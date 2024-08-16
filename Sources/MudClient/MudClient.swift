@@ -12,10 +12,7 @@ import Cocoa
 @main
 struct Connect: ParsableCommand {
     mutating func run() throws {
-        var tattr = termios()
-        tcgetattr(STDIN_FILENO, &tattr)
-        tattr.c_lflag &= ~tcflag_t(ECHO | ICANON)
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr);
+        TerminalService.setRawTerminal()
         
         let stdInSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: .main)
         stdInSource.setEventHandler(qos: .default, flags: [], handler: self.handleInput)
@@ -26,20 +23,21 @@ struct Connect: ParsableCommand {
         sigIntSource.setEventHandler(qos: .default, flags: [], handler: self.stop)
         sigIntSource.resume()
         
-//        let connection = Connection(host: "alteraeon.com", port: 3000)
-//        try await connection.connect()
-//        let interpreter = Container.scriptInterpreter()
-//        try interpreter.parser.parse("#load {test.script}")
-//        Task {
-//            for try await string in connection {
-//                print(string)
-//            }
-//        }
-//
         Task {
-            let stream = Container.inputService().commandStream.processScriptInput()
-            for try await command in stream {
-//                try await connection.send(command)
+//            let connection = Connection(host: "alteraeon.com", port: 3000)
+//            try await connection.connect()
+//            let interpreter = Container.scriptInterpreter()
+//            try interpreter.parser.parse("#load {test.script}")
+//            Task {
+//                for try await string in connection {
+//                    print(string)
+//                }
+//            }
+            Task {
+                let stream = Container.inputService().commandStream.processScriptInput()
+                for try await command in stream {
+//                    try await connection.send(command)
+                }
             }
         }
         
@@ -53,7 +51,7 @@ struct Connect: ParsableCommand {
             return
         }
 
-        Container.inputService().handle(input: string)
+        Container.terminalService().handle(input: string)
     }
     
     private func stop() {
