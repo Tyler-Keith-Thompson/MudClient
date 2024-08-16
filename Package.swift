@@ -1,0 +1,38 @@
+// swift-tools-version: 6.0
+// The swift-tools-version declares the minimum version of Swift required to build this package.
+
+import PackageDescription
+
+let package = Package(
+    name: "MudClient",
+    platforms: [.macOS(.v13)],
+    products: [
+        // Products define the executables and libraries a package produces, making them visible to other packages.
+        .executable(name: "MudClient", targets: ["MudClient"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.70.0"),
+        .package(url: "https://github.com/Tyler-Keith-Thompson/Afluent.git", from: "0.6.2"),
+        .package(url: "git@github.com:Tyler-Keith-Thompson/DependencyInjection.git", from: "0.0.7"),
+        .package(url: "https://github.com/pointfreeco/swift-parsing.git", from: "0.13.0"),
+    ],
+    targets: [
+        // Targets are the basic building blocks of a package, defining a module or a test suite.
+        // Targets can depend on other targets in this package and products from dependencies.
+        .executableTarget(
+            name: "MudClient",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "NIO", package: "swift-nio"),
+                .product(name: "Afluent", package: "Afluent"),
+                .product(name: "DependencyInjection", package: "DependencyInjection"),
+                .product(name: "Parsing", package: "swift-parsing"),
+            ]
+        ),
+        .testTarget(
+            name: "MudClientTests",
+            dependencies: ["MudClient"]
+        ),
+    ]
+)
