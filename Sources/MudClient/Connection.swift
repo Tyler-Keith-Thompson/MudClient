@@ -9,6 +9,7 @@ import Foundation
 import NIO
 import Parsing
 import Afluent
+import DependencyInjection
 
 actor Connection: AsyncSequence {
     enum Error: Swift.Error {
@@ -83,7 +84,7 @@ extension Connection {
         
         // channel is connected, send a message
         func channelActive(context: ChannelHandlerContext) {
-            Swift.print("Client connected to \(context.remoteAddress?.description ?? "unknown")")
+            Container.terminalService().print("Client connected to \(context.remoteAddress?.description ?? "unknown")")
             writeContext = context
         }
         
@@ -101,7 +102,7 @@ extension Connection {
         }
         
         func channelInactive(context: ChannelHandlerContext) {
-            Swift.print("Disconnected from: \(context.remoteAddress?.description ?? "unknown")")
+            Container.terminalService().print("Disconnected from: \(context.remoteAddress?.description ?? "unknown")")
             continuation.finish()
         }
     }

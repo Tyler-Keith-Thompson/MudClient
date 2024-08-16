@@ -96,16 +96,16 @@ final class TerminalService {
             case .controlA: moveToStartOfLine()
             case .controlE: moveToEndOfLine()
             case .enter:
-                moveToEndOfLine()
                 lineBuffer.append(contentsOf: partialInput.dropLast())
-                writeToStandardOut(data: Data("\n".utf8))
                 moveToStartOfLine()
+                let echo = lineBuffer
+                lineBuffer = ""
+                print("\n\(echo)".utf8)
                 do {
-                    try Container.inputService().parse(input: lineBuffer)
+                    try Container.inputService().parse(input: echo)
                 } catch {
                     print(error)
                 }
-                lineBuffer = ""
             }
             partialInput = ""
         case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
@@ -119,6 +119,28 @@ final class TerminalService {
             partialInput = ""
         case .failure(let error):
             print(error)
+        }
+    }
+    
+    func setup() {
+        let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
+        writeToStandardOut(data: Data("\(divider)\n".utf8))
+        writeToStandardOut(data: Data(lineBuffer.utf8))
+    }
+    
+    func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+        guard let cursorPosition = getCursorPosition() else { return }
+        clearInputAndDividerLines(row: cursorPosition.row)
+        
+        let output = items.map(String.init(describing:)).joined(separator: separator) + terminator
+        writeToStandardOut(data: Data(output.utf8))
+        
+        let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
+        writeToStandardOut(data: Data("\(divider)\n".utf8))
+        writeToStandardOut(data: Data(lineBuffer.utf8))
+        moveToStartOfLine()
+        if !lineBuffer.isEmpty {
+            moveCursorRightBy(amount: cursorPosition.column - 1)
         }
     }
 
@@ -145,6 +167,36 @@ final class TerminalService {
     func moveToEndOfLine() {
         let endPosition = lineBuffer.count
         writeToStandardOut(data: Data("\u{1B}[\(endPosition+1)G".utf8))
+    }
+    
+    private func clearInputAndDividerLines(row: Int) {
+        // Clear the input line (last row)
+        moveCursorToPosition(row: row, column: 1)
+        writeToStandardOut(data: Data("\u{1B}[2K".utf8))  // Clear the input line
+        
+        // Clear the divider line (second last row)
+        moveCursorToPosition(row: row - 1, column: 1)
+        writeToStandardOut(data: Data("\u{1B}[2K".utf8))  // Clear the divider line
+    }
+    
+    private func moveCursorToPosition(row: Int, column: Int) {
+        writeToStandardOut(data: Data("\u{1B}[\(row);\(column)H".utf8))
+    }
+    
+    private func getTerminalHeight() -> Int? {
+        var w = winsize()
+        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 {
+            return Int(w.ws_row)
+        }
+        return nil
+    }
+    
+    private func getTerminalWidth() -> Int? {
+        var w = winsize()
+        if ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 {
+            return Int(w.ws_col)
+        }
+        return nil
     }
 
     func refreshDisplay(fromColumn startColumn: Int) {

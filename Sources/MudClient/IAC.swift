@@ -8,6 +8,7 @@
 import Afluent
 import Foundation
 import Parsing
+import DependencyInjection
 
 struct IAC: OptionSet, CustomDebugStringConvertible {
     let rawValue: Int
@@ -256,7 +257,7 @@ extension AsyncSequence where Self: Sendable, Element == Data {
                 let val = try parser.parse(str).joined()
             
                 for command in commands {
-                    Swift.print("SENDING: \(command.map(String.init(describing:)))")
+                    Container.terminalService().print("SENDING: \(command.map(String.init(describing:)))")
                     try await writeToStream(command)
                 }
                 return String(val)
