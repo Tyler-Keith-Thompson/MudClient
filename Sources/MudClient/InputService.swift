@@ -67,8 +67,7 @@ final class InputService: @unchecked Sendable {
         .eraseToAnyAsyncSequence()
     }
     
-    fileprivate init() {
-    }
+    fileprivate init() { }
     
     func parse(input: String) throws {
         for command in try parser.parse(input) {
@@ -76,48 +75,99 @@ final class InputService: @unchecked Sendable {
         }
     }
     
+    enum KeyCommand {
+        case leftArrow
+        case rightArrow
+        case upArrow
+        case downArrow
+        case backspace
+        case controlA
+        case controlE
+        case enter
+    }
+    
+    private lazy var lineParser = Parse {
+        OneOf {
+            controlA
+            controlE
+            leftArrow
+            rightArrow
+            upArrow
+            downArrow
+            backspace
+            enter
+        }
+    }
+
+    private lazy var controlA = Parse {
+        "\u{01}".map { KeyCommand.controlA }
+    }
+    
+    private lazy var controlE = Parse {
+        "\u{05}".map { KeyCommand.controlE }
+    }
+    
+    private lazy var leftArrow = Parse {
+        "\u{1B}[D".map { KeyCommand.leftArrow }
+    }
+    
+    private lazy var rightArrow = Parse {
+        "\u{1B}[C".map { KeyCommand.rightArrow }
+    }
+    
+    private lazy var upArrow = Parse {
+        "\u{1B}[A".map { KeyCommand.upArrow }
+    }
+    
+    private lazy var downArrow = Parse {
+        "\u{1B}[B".map { KeyCommand.downArrow }
+    }
+    
+    private lazy var backspace = Parse {
+        "\u{7F}".map { KeyCommand.backspace }
+    }
+    
+    private lazy var enter: AnyParser<Substring, KeyCommand> = Parse {
+        Skip { Optionally { Prefix { $0 != "\n" } } }
+        "\n".map { KeyCommand.enter }
+    }.eraseToAnyParser()
+    
     var lineBuffer: String = ""
     var partialInput: String = ""
 
     func handle(input: String) {
         partialInput.append(input)
-
-        if partialInput == "\u{01}" { // Ctrl+A
-            moveToStartOfLine()
-            partialInput = ""
-        } else if partialInput == "\u{05}" { // Ctrl+E
-            moveToEndOfLine()
-            partialInput = ""
-        } else if partialInput == "\u{1B}[D" { // Left arrow
-            moveCursorLeft()
-            partialInput = ""
-        } else if partialInput == "\u{1B}[C" { // Right arrow
-            moveCursorRight()
-            partialInput = ""
-        } else if partialInput == "\u{1B}[A" { // Up arrow
-            print("Up arrow pressed")
-            partialInput = ""
-        } else if partialInput == "\u{1B}[B" { // Down arrow
-            print("Down arrow pressed")
-            partialInput = ""
-        } else if partialInput == "\u{7F}" { // Backspace handling
-            if let cursorPosition = getCursorPosition(), cursorPosition.column > 1 {
-                let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorPosition.column - 2)
-                lineBuffer.remove(at: index)
-                refreshDisplay(fromColumn: cursorPosition.column - 1)
+        
+        switch Result(catching: { try lineParser.parse(partialInput) }) {
+        case .success(let command):
+            switch command {
+            case .leftArrow: moveCursorLeft()
+            case .rightArrow: moveCursorRight()
+            case .upArrow: break
+            case .downArrow: break
+            case .backspace:
+                if let cursorPosition = getCursorPosition(), cursorPosition.column > 1 {
+                    let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorPosition.column - 2)
+                    lineBuffer.remove(at: index)
+                    refreshDisplay(fromColumn: cursorPosition.column - 1)
+                }
+            case .controlA: moveToStartOfLine()
+            case .controlE: moveToEndOfLine()
+            case .enter:
+                moveToEndOfLine()
+                lineBuffer.append(contentsOf: partialInput.dropLast())
+                writeToStandardOut(data: Data("\n".utf8))
+                moveToStartOfLine()
+                print("Full line: \(lineBuffer)")
+                do {
+                    try parse(input: lineBuffer)
+                } catch {
+                    print(error)
+                }
+                lineBuffer = ""
             }
             partialInput = ""
-        } else if partialInput.hasSuffix("\n") {
-            lineBuffer.append(contentsOf: partialInput.dropLast())
-            print("Full line: \(lineBuffer)")
-            do {
-                try parse(input: lineBuffer)
-            } catch {
-                print(error)
-            }
-            lineBuffer = ""
-            partialInput = ""
-        } else if !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2 {
+        case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
             // Handle normal character input
             if let cursorPosition = getCursorPosition() {
                 let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorPosition.column - 1)
@@ -126,6 +176,8 @@ final class InputService: @unchecked Sendable {
                 moveCursorRightBy(amount: input.count)
             }
             partialInput = ""
+        case .failure(let error):
+            print(error)
         }
     }
 
