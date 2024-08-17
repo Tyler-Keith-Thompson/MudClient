@@ -10,6 +10,7 @@ import DependencyInjection
 import Parsing
 
 final class TerminalService {
+    let lock = NSRecursiveLock()
     static func setRawTerminal() {
         var tattr = termios()
         tcgetattr(STDIN_FILENO, &tattr)
@@ -76,6 +77,7 @@ final class TerminalService {
     
     var lineBuffer: String = ""
     var partialInput: String = ""
+    var cursorColumn = 1
 
     func handle(input: String) {
         partialInput.append(input)
@@ -88,10 +90,11 @@ final class TerminalService {
             case .upArrow: break
             case .downArrow: break
             case .backspace:
-                if let cursorPosition = getCursorPosition(), cursorPosition.column > 1 {
-                    let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorPosition.column - 2)
+                if cursorColumn > 1 {
+                    let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorColumn - 2)
                     lineBuffer.remove(at: index)
-                    refreshDisplay(fromColumn: cursorPosition.column - 1)
+                    refreshDisplay(fromColumn: cursorColumn - 1)
+                    cursorColumn -= 1
                 }
             case .controlA: moveToStartOfLine()
             case .controlE: moveToEndOfLine()
@@ -101,6 +104,7 @@ final class TerminalService {
                 let echo = lineBuffer
                 lineBuffer = ""
                 print("\n\(echo)".utf8)
+                moveToStartOfLine()
                 do {
                     try Container.inputService().parse(input: echo)
                 } catch {
@@ -110,12 +114,10 @@ final class TerminalService {
             partialInput = ""
         case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
             // Handle normal character input
-            if let cursorPosition = getCursorPosition() {
-                let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorPosition.column - 1)
-                lineBuffer.insert(contentsOf: input, at: index)
-                refreshDisplay(fromColumn: cursorPosition.column)
-                moveCursorRightBy(amount: input.count)
-            }
+            let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorColumn - 1)
+            lineBuffer.insert(contentsOf: input, at: index)
+            refreshDisplay(fromColumn: cursorColumn)
+            moveCursorRightBy(amount: input.count)
             partialInput = ""
         case .failure(let error):
             print(error)
@@ -123,14 +125,12 @@ final class TerminalService {
     }
     
     func setup() {
-        let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
-        writeToStandardOut(data: Data("\(divider)\n".utf8))
-        writeToStandardOut(data: Data(lineBuffer.utf8))
+        print("")
     }
     
     func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
-        guard let cursorPosition = getCursorPosition() else { return }
-        clearInputAndDividerLines(row: cursorPosition.row)
+        let cursorColumn = self.cursorColumn
+        clearInputAndDividerLines()
         
         let output = items.map(String.init(describing:)).joined(separator: separator) + terminator
         writeToStandardOut(data: Data(output.utf8))
@@ -140,47 +140,57 @@ final class TerminalService {
         writeToStandardOut(data: Data(lineBuffer.utf8))
         moveToStartOfLine()
         if !lineBuffer.isEmpty {
-            moveCursorRightBy(amount: cursorPosition.column - 1)
+            moveCursorRightBy(amount: cursorColumn - 1)
         }
     }
 
     func moveCursorLeft() {
-        writeToStandardOut(data: Data("\u{1B}[D".utf8))
+        if cursorColumn > 0 {
+            writeToStandardOut(data: Data("\u{1B}[D".utf8))
+            cursorColumn -= 1
+        }
     }
 
     func moveCursorRight() {
-        if let cursorPosition = getCursorPosition(), cursorPosition.column <= lineBuffer.count {
+        if cursorColumn <= lineBuffer.count {
             writeToStandardOut(data: Data("\u{1B}[C".utf8))
+            cursorColumn += 1
         }
     }
 
     func moveCursorRightBy(amount: Int) {
         if amount > 0 {
+            cursorColumn += amount
             writeToStandardOut(data: Data("\u{1B}[\(amount)C".utf8))
         }
     }
 
     func moveToStartOfLine() {
         writeToStandardOut(data: Data("\u{1B}[1G".utf8))
+        cursorColumn = 1
     }
 
     func moveToEndOfLine() {
         let endPosition = lineBuffer.count
+        cursorColumn = endPosition+1
         writeToStandardOut(data: Data("\u{1B}[\(endPosition+1)G".utf8))
     }
     
-    private func clearInputAndDividerLines(row: Int) {
-        // Clear the input line (last row)
-        moveCursorToPosition(row: row, column: 1)
-        writeToStandardOut(data: Data("\u{1B}[2K".utf8))  // Clear the input line
+    private func clearInputAndDividerLines() {
+        // Move to the beginning of the input line (assumed to be the current line)
+        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
+        // Clear the entire line (input line)
+        writeToStandardOut(data: Data("\u{1B}[2K".utf8))
         
-        // Clear the divider line (second last row)
-        moveCursorToPosition(row: row - 1, column: 1)
-        writeToStandardOut(data: Data("\u{1B}[2K".utf8))  // Clear the divider line
-    }
-    
-    private func moveCursorToPosition(row: Int, column: Int) {
-        writeToStandardOut(data: Data("\u{1B}[\(row);\(column)H".utf8))
+        // Move cursor up one line to the divider line
+        writeToStandardOut(data: Data("\u{1B}[1A".utf8))
+        // Move to the beginning of the divider line
+        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
+        // Clear the entire divider line
+        writeToStandardOut(data: Data("\u{1B}[2K".utf8))
+        
+        // Move cursor back down to the input line (now clear)
+        writeToStandardOut(data: Data("\u{1B}[1B".utf8))
     }
     
     private func getTerminalHeight() -> Int? {
@@ -214,31 +224,6 @@ final class TerminalService {
         } catch {
             print(error)
         }
-    }
-    
-    func getCursorPosition() -> (row: Int, column: Int)? {
-        // Request cursor position
-        let requestPosition = "\u{1B}[6n"
-        writeToStandardOut(data: Data(requestPosition.utf8))
-        
-        // Read the response from the terminal
-        var buffer = [UInt8](repeating: 0, count: 32)
-        let responseLength = read(STDIN_FILENO, &buffer, buffer.count)
-        
-        let parser = Parse {
-            "\u{1B}["
-            Int.parser()
-            ";"
-            Int.parser()
-            "R"
-        }
-        
-        if let response = String(bytes: buffer.prefix(responseLength), encoding: .utf8),
-           let result = try? parser.parse(response) {
-            return (row: result.0, column: result.1)
-        }
-        
-        return nil
     }
 }
 

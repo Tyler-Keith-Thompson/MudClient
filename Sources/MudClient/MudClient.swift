@@ -8,6 +8,7 @@ import ArgumentParser
 import DependencyInjection
 import Foundation
 import Cocoa
+import Fakery
 
 @main
 struct Connect: ParsableCommand {
@@ -26,19 +27,19 @@ struct Connect: ParsableCommand {
         Container.terminalService().setup()
         
         Task {
-            try await Task.sleep(for: .seconds(5))
-            print("Here's some server output")
-            try await Task.sleep(for: .seconds(5))
-            print("Here's some MORE server output")
-            try await Task.sleep(for: .seconds(5))
-            print("Here's EVEN MORE server output")
 //            let connection = Connection(host: "alteraeon.com", port: 3000)
 //            try await connection.connect()
 //            let interpreter = Container.scriptInterpreter()
-//            try interpreter.parser.parse("#load {test.script}")
+////            try interpreter.parser.parse("#load {test.script}")
+            Task {
+                while true {
+                    try await Task.sleep(for: .seconds(Double.random(in: 0.05...1.0)))
+                    print(Faker().lorem.paragraphs(amount: Int.random(in: 1...3)))
+                }
+            }
 //            Task {
 //                for try await string in connection {
-//                    print(string)
+//                    Container.terminalService().print(string)
 //                }
 //            }
             Task {
