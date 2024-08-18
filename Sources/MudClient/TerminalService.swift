@@ -85,24 +85,51 @@ final class TerminalService {
         switch Result(catching: { try lineParser.parse(partialInput) }) {
         case .success(let command):
             switch command {
-            case .leftArrow: cursor.moveLeft()
-            case .rightArrow: cursor.moveRight(line: lineBuffer)
+            case .leftArrow:
+                cursor.moveLeft()
+                refreshDisplay(cursorColumn: cursor.column)
+            case .rightArrow:
+                cursor.moveRight(line: lineBuffer)
+                refreshDisplay(cursorColumn: cursor.column)
             case .upArrow: break
             case .downArrow: break
             case .backspace:
-                if cursor.column > 1 {
+                if cursor.column > 1, let terminalWidth = getTerminalWidth() {
                     let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
                     lineBuffer.remove(at: index)
-                    refreshDisplay(fromColumn: cursor.column - 1)
+                    
+                    // Define a threshold to keep the cursor away from the edges
+                    let threshold = max(1, terminalWidth / 4)  // 25% of the terminal width
+                    
+                    // Adjust visibleStartColumn based on the cursor's position relative to the threshold
+                    if cursor.column - visibleStartColumn < threshold {
+                        visibleStartColumn = max(0, visibleStartColumn - 1)
+                    } else if cursor.column > visibleStartColumn + terminalWidth - 1 {
+                        // Adjust if the cursor is beyond the right edge of the visible window
+                        visibleStartColumn = cursor.column - terminalWidth
+                    }
+                    
+                    // Ensure that the visible window does not jump unexpectedly when deleting from the end
+                    if cursor.column == lineBuffer.count + 1 && lineBuffer.count < terminalWidth {
+                        visibleStartColumn = 0  // Reset when the line is short enough to fit within the window
+                    }
+                    
+                    // Refresh display and update cursor position
+                    refreshDisplay(cursorColumn: cursor.column - 1)
                     cursor.update(column: cursor.column - 1)
                 }
-            case .controlA: cursor.moveToStartOfLine()
-            case .controlE: cursor.moveToEndOf(line: lineBuffer)
+            case .controlA:
+                cursor.moveToStartOfLine()
+                refreshDisplay(cursorColumn: cursor.column)
+            case .controlE:
+                cursor.moveToEndOf(line: lineBuffer)
+                refreshDisplay(cursorColumn: cursor.column)
             case .enter:
                 lineBuffer.append(contentsOf: partialInput.dropLast())
                 cursor.moveToStartOfLine()
                 let echo = lineBuffer
                 lineBuffer = ""
+                visibleStartColumn = 0
                 print("\n\(echo)".utf8)
                 cursor.moveToStartOfLine()
                 do {
@@ -116,7 +143,7 @@ final class TerminalService {
             // Handle normal character input
             let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
             lineBuffer.insert(contentsOf: input, at: index)
-            refreshDisplay(fromColumn: cursor.column)
+            refreshDisplay(cursorColumn: cursor.column)
             cursor.moveRightBy(amount: input.count)
             partialInput = ""
         case .failure(let error):
@@ -177,13 +204,36 @@ final class TerminalService {
         return nil
     }
 
-    func refreshDisplay(fromColumn startColumn: Int) {
-        writeToStandardOut(data: Data("\u{1B}[\(startColumn)G".utf8))
-        writeToStandardOut(data: Data("\u{1B}[K".utf8))
-        let startIndex = lineBuffer.index(lineBuffer.startIndex, offsetBy: startColumn - 1)
-        let remainder = String(lineBuffer[startIndex...])
-        writeToStandardOut(data: Data(remainder.utf8))
-        writeToStandardOut(data: Data("\u{1B}[\(startColumn)G".utf8))
+    var visibleStartColumn: Int = 0  // Track this as a property of TerminalService
+
+    func refreshDisplay(cursorColumn: Int) {
+        // Get the terminal width
+        guard let terminalWidth = getTerminalWidth() else { return }
+
+        // Determine if scrolling is necessary
+        if cursorColumn < visibleStartColumn + 1 {
+            // Cursor is left of the visible window, so scroll left
+            visibleStartColumn = max(0, cursorColumn - 1)
+        } else if cursorColumn > visibleStartColumn + terminalWidth - 1 {
+            // Cursor is right of the visible window, so scroll right
+            visibleStartColumn = cursorColumn - terminalWidth + 1
+        }
+
+        // Calculate the starting index for the visible portion of the lineBuffer
+        let visibleStartIndex = lineBuffer.index(lineBuffer.startIndex, offsetBy: visibleStartColumn)
+        let visibleEndIndex = lineBuffer.index(visibleStartIndex, offsetBy: min(terminalWidth - 1, lineBuffer.distance(from: visibleStartIndex, to: lineBuffer.endIndex)))
+        let visibleText = String(lineBuffer[visibleStartIndex..<visibleEndIndex])
+
+        // Move the cursor to the beginning of the line
+        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
+        // Clear the current line
+        writeToStandardOut(data: Data("\u{1B}[2K".utf8))
+        // Write the visible portion of the lineBuffer to the terminal
+        writeToStandardOut(data: Data(visibleText.utf8))
+        
+        // Calculate the cursor position within the visible text
+        let cursorOffset = cursorColumn - visibleStartColumn
+        writeToStandardOut(data: Data("\u{1B}[\(cursorOffset)G".utf8))
     }
 
     func writeToStandardOut(data: Data) {
