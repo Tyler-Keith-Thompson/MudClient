@@ -94,24 +94,17 @@ final class TerminalService {
             case .upArrow: break
             case .downArrow: break
             case .backspace:
-                if cursor.column > 1, let terminalWidth = getTerminalWidth() {
+                if cursor.column > 1 {
                     let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
                     lineBuffer.remove(at: index)
                     
-                    // Define a threshold to keep the cursor away from the edges
-                    let threshold = max(1, terminalWidth / 4)  // 25% of the terminal width
-                    
-                    // Adjust visibleStartColumn based on the cursor's position relative to the threshold
-                    if cursor.column - visibleStartColumn < threshold {
-                        visibleStartColumn = max(0, visibleStartColumn - 1)
-                    } else if cursor.column > visibleStartColumn + terminalWidth - 1 {
-                        // Adjust if the cursor is beyond the right edge of the visible window
-                        visibleStartColumn = cursor.column - terminalWidth
-                    }
-                    
-                    // Ensure that the visible window does not jump unexpectedly when deleting from the end
-                    if cursor.column == lineBuffer.count + 1 && lineBuffer.count < terminalWidth {
-                        visibleStartColumn = 0  // Reset when the line is short enough to fit within the window
+                    // Calculate the necessary visibleStartColumn to keep the end aligned with the terminal width
+                    let terminalWidth = getTerminalWidth() ?? 80
+                    if lineBuffer.count <= terminalWidth {
+                        visibleStartColumn = 0  // If the entire input fits, no need to scroll
+                    } else {
+                        // Keep the end of the visible text aligned with the right edge of the terminal
+                        visibleStartColumn = max(0, lineBuffer.count - terminalWidth)
                     }
                     
                     // Refresh display and update cursor position
