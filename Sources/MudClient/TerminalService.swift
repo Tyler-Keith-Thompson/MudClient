@@ -126,11 +126,7 @@ final class TerminalService {
         
         let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
         writeToStandardOut(data: Data("\(output.hasSuffix("\n") ? "" : "\n")\(divider)\n".utf8))
-        writeToStandardOut(data: Data(lineBuffer.utf8))
-        cursor.moveToStartOfLine()
-        if !lineBuffer.isEmpty {
-            cursor.moveRightBy(amount: cursorColumn - 1)
-        }
+        refreshDisplay(cursorColumn: cursor.column)
     }
     
     private func clearInputAndDividerLines() {

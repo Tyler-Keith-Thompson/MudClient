@@ -27,19 +27,19 @@ struct Connect: ParsableCommand {
         Container.terminalService().setup()
         
         Task {
-//            let connection = Connection(host: "alteraeon.com", port: 3000)
-//            try await connection.connect()
-////            let interpreter = Container.scriptInterpreter()
-////            try interpreter.parser.parse("#load {test.script}")
-//            Task {
-//                for try await string in connection {
-//                    Container.terminalService().print(string, terminator: "")
-//                }
-//            }
+            let connection = Connection(host: "alteraeon.com", port: 3000)
+            try await connection.connect()
+//            let interpreter = Container.scriptInterpreter()
+//            try interpreter.parser.parse("#load {test.script}")
+            Task {
+                for try await string in connection {
+                    Container.terminalService().print(string, terminator: "")
+                }
+            }
             Task {
                 let stream = Container.inputService().commandStream.processScriptInput()
                 for try await command in stream {
-//                    try await connection.send(command)
+                    try await connection.send(command)
                 }
             }
         }
