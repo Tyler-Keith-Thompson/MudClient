@@ -21,7 +21,7 @@ struct Connect: ParsableCommand {
         
         signal(SIGINT, SIG_IGN)
         let sigIntSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-        sigIntSource.setEventHandler(qos: .default, flags: [], handler: self.stop)
+        sigIntSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleSigInt)
         sigIntSource.resume()
         
         Container.terminalService().setup()
@@ -29,17 +29,11 @@ struct Connect: ParsableCommand {
         Task {
 //            let connection = Connection(host: "alteraeon.com", port: 3000)
 //            try await connection.connect()
-//            let interpreter = Container.scriptInterpreter()
+////            let interpreter = Container.scriptInterpreter()
 ////            try interpreter.parser.parse("#load {test.script}")
-            Task {
-                while true {
-                    try await Task.sleep(for: .seconds(Double.random(in: 0.05...1.0)))
-                    print(Faker().lorem.paragraphs(amount: Int.random(in: 1...3)))
-                }
-            }
 //            Task {
 //                for try await string in connection {
-//                    Container.terminalService().print(string)
+//                    Container.terminalService().print(string, terminator: "")
 //                }
 //            }
             Task {
@@ -61,15 +55,6 @@ struct Connect: ParsableCommand {
         }
 
         Container.terminalService().handle(input: string)
-    }
-    
-    private func stop() {
-        var tattr = termios()
-        tcgetattr(STDIN_FILENO, &tattr)
-        tattr.c_lflag |= tcflag_t(ECHO | ICANON)
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
-        Swift.print("Stopping")
-        Self.exit(withError: nil)
     }
 }
 

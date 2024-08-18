@@ -10,6 +10,7 @@ import DependencyInjection
 import Parsing
 
 final class TerminalService {
+    @LazyInjected(Container.cursor) private var cursor
     let lock = NSRecursiveLock()
     static func setRawTerminal() {
         var tattr = termios()
@@ -77,7 +78,6 @@ final class TerminalService {
     
     var lineBuffer: String = ""
     var partialInput: String = ""
-    var cursorColumn = 1
 
     func handle(input: String) {
         partialInput.append(input)
@@ -85,26 +85,26 @@ final class TerminalService {
         switch Result(catching: { try lineParser.parse(partialInput) }) {
         case .success(let command):
             switch command {
-            case .leftArrow: moveCursorLeft()
-            case .rightArrow: moveCursorRight()
+            case .leftArrow: cursor.moveLeft()
+            case .rightArrow: cursor.moveRight(line: lineBuffer)
             case .upArrow: break
             case .downArrow: break
             case .backspace:
-                if cursorColumn > 1 {
-                    let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorColumn - 2)
+                if cursor.column > 1 {
+                    let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
                     lineBuffer.remove(at: index)
-                    refreshDisplay(fromColumn: cursorColumn - 1)
-                    cursorColumn -= 1
+                    refreshDisplay(fromColumn: cursor.column - 1)
+                    cursor.update(column: cursor.column - 1)
                 }
-            case .controlA: moveToStartOfLine()
-            case .controlE: moveToEndOfLine()
+            case .controlA: cursor.moveToStartOfLine()
+            case .controlE: cursor.moveToEndOf(line: lineBuffer)
             case .enter:
                 lineBuffer.append(contentsOf: partialInput.dropLast())
-                moveToStartOfLine()
+                cursor.moveToStartOfLine()
                 let echo = lineBuffer
                 lineBuffer = ""
                 print("\n\(echo)".utf8)
-                moveToStartOfLine()
+                cursor.moveToStartOfLine()
                 do {
                     try Container.inputService().parse(input: echo)
                 } catch {
@@ -114,10 +114,10 @@ final class TerminalService {
             partialInput = ""
         case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
             // Handle normal character input
-            let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursorColumn - 1)
+            let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
             lineBuffer.insert(contentsOf: input, at: index)
-            refreshDisplay(fromColumn: cursorColumn)
-            moveCursorRightBy(amount: input.count)
+            refreshDisplay(fromColumn: cursor.column)
+            cursor.moveRightBy(amount: input.count)
             partialInput = ""
         case .failure(let error):
             print(error)
@@ -129,51 +129,19 @@ final class TerminalService {
     }
     
     func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
-        let cursorColumn = self.cursorColumn
+        let cursorColumn = cursor.column
         clearInputAndDividerLines()
         
         let output = items.map(String.init(describing:)).joined(separator: separator) + terminator
         writeToStandardOut(data: Data(output.utf8))
         
         let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
-        writeToStandardOut(data: Data("\(divider)\n".utf8))
+        writeToStandardOut(data: Data("\(output.hasSuffix("\n") ? "" : "\n")\(divider)\n".utf8))
         writeToStandardOut(data: Data(lineBuffer.utf8))
-        moveToStartOfLine()
+        cursor.moveToStartOfLine()
         if !lineBuffer.isEmpty {
-            moveCursorRightBy(amount: cursorColumn - 1)
+            cursor.moveRightBy(amount: cursorColumn - 1)
         }
-    }
-
-    func moveCursorLeft() {
-        if cursorColumn > 0 {
-            writeToStandardOut(data: Data("\u{1B}[D".utf8))
-            cursorColumn -= 1
-        }
-    }
-
-    func moveCursorRight() {
-        if cursorColumn <= lineBuffer.count {
-            writeToStandardOut(data: Data("\u{1B}[C".utf8))
-            cursorColumn += 1
-        }
-    }
-
-    func moveCursorRightBy(amount: Int) {
-        if amount > 0 {
-            cursorColumn += amount
-            writeToStandardOut(data: Data("\u{1B}[\(amount)C".utf8))
-        }
-    }
-
-    func moveToStartOfLine() {
-        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
-        cursorColumn = 1
-    }
-
-    func moveToEndOfLine() {
-        let endPosition = lineBuffer.count
-        cursorColumn = endPosition+1
-        writeToStandardOut(data: Data("\u{1B}[\(endPosition+1)G".utf8))
     }
     
     private func clearInputAndDividerLines() {
@@ -223,6 +191,23 @@ final class TerminalService {
             try FileHandle.standardOutput.write(contentsOf: data)
         } catch {
             print(error)
+        }
+    }
+    
+    func handleSigInt() {
+        if lineBuffer.isEmpty {
+            var tattr = termios()
+            tcgetattr(STDIN_FILENO, &tattr)
+            tattr.c_lflag |= tcflag_t(ECHO | ICANON)
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
+            Swift.print("\nStopping")
+            exit(0)
+        } else {
+            cursor.moveToStartOfLine()
+            // Clear the entire line (input line)
+            writeToStandardOut(data: Data("\u{1B}[2K".utf8))
+            lineBuffer = ""
+            partialInput = ""
         }
     }
 }
