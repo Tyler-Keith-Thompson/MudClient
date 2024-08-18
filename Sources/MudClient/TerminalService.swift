@@ -11,7 +11,7 @@ import Parsing
 
 final class TerminalService {
     @LazyInjected(Container.cursor) private var cursor
-    let lock = NSRecursiveLock()
+    
     static func setRawTerminal() {
         var tattr = termios()
         tcgetattr(STDIN_FILENO, &tattr)
@@ -78,6 +78,9 @@ final class TerminalService {
     
     var lineBuffer: String = ""
     var partialInput: String = ""
+    var visibleStartColumn = 0
+    var commandHistory: [String] = []
+    var currentCommandIndex: Int = 0
 
     func handle(input: String) {
         partialInput.append(input)
@@ -91,54 +94,20 @@ final class TerminalService {
             case .rightArrow:
                 cursor.moveRight(line: lineBuffer)
                 refreshDisplay(cursorColumn: cursor.column)
-            case .upArrow: break
-            case .downArrow: break
-            case .backspace:
-                if cursor.column > 1 {
-                    let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
-                    lineBuffer.remove(at: index)
-                    
-                    // Calculate the necessary visibleStartColumn to keep the end aligned with the terminal width
-                    let terminalWidth = getTerminalWidth() ?? 80
-                    if lineBuffer.count <= terminalWidth {
-                        visibleStartColumn = 0  // If the entire input fits, no need to scroll
-                    } else {
-                        // Keep the end of the visible text aligned with the right edge of the terminal
-                        visibleStartColumn = max(0, lineBuffer.count - terminalWidth)
-                    }
-                    
-                    // Refresh display and update cursor position
-                    refreshDisplay(cursorColumn: cursor.column - 1)
-                    cursor.update(column: cursor.column - 1)
-                }
+            case .upArrow: handleUpArrow()
+            case .downArrow: handleDownArrow()
+            case .backspace: handleBackspace()
             case .controlA:
                 cursor.moveToStartOfLine()
                 refreshDisplay(cursorColumn: cursor.column)
             case .controlE:
                 cursor.moveToEndOf(line: lineBuffer)
                 refreshDisplay(cursorColumn: cursor.column)
-            case .enter:
-                lineBuffer.append(contentsOf: partialInput.dropLast())
-                cursor.moveToStartOfLine()
-                let echo = lineBuffer
-                lineBuffer = ""
-                visibleStartColumn = 0
-                print("\n\(echo)".utf8)
-                cursor.moveToStartOfLine()
-                do {
-                    try Container.inputService().parse(input: echo)
-                } catch {
-                    print(error)
-                }
+            case .enter: handleEnter()
             }
             partialInput = ""
         case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
-            // Handle normal character input
-            let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
-            lineBuffer.insert(contentsOf: input, at: index)
-            refreshDisplay(cursorColumn: cursor.column)
-            cursor.moveRightBy(amount: input.count)
-            partialInput = ""
+            handleOther(input: input)
         case .failure(let error):
             print(error)
         }
@@ -196,10 +165,86 @@ final class TerminalService {
         }
         return nil
     }
+    
+    private func handleUpArrow() {
+        if currentCommandIndex > 0 {
+            currentCommandIndex -= 1
+            let previousCommand = commandHistory[currentCommandIndex]
+            lineBuffer = previousCommand
+            cursor.moveToEndOf(line: lineBuffer)
+            refreshDisplay(cursorColumn: cursor.column)
+        } else if currentCommandIndex == 0 && !commandHistory.isEmpty {
+            // Special case: When already at the first command
+            lineBuffer = commandHistory[currentCommandIndex]
+            cursor.moveToEndOf(line: lineBuffer)
+            refreshDisplay(cursorColumn: cursor.column)
+        }
+    }
+    
+    private func handleDownArrow() {
+        if currentCommandIndex < commandHistory.count - 1 {
+            currentCommandIndex += 1
+            let nextCommand = commandHistory[currentCommandIndex]
+            lineBuffer = nextCommand
+            cursor.moveToEndOf(line: lineBuffer)
+            refreshDisplay(cursorColumn: cursor.column)
+        } else if currentCommandIndex == commandHistory.count - 1 {
+            // Special case: When at the last command and pressing down
+            currentCommandIndex += 1
+            cursor.moveToStartOfLine()
+            lineBuffer = ""
+            visibleStartColumn = 0
+            refreshDisplay(cursorColumn: cursor.column)
+        }
+    }
+    
+    private func handleBackspace() {
+        if cursor.column > 1 {
+            let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
+            lineBuffer.remove(at: index)
+            
+            // Calculate the necessary visibleStartColumn to keep the end aligned with the terminal width
+            let terminalWidth = getTerminalWidth() ?? 80
+            if lineBuffer.count <= terminalWidth {
+                visibleStartColumn = 0  // If the entire input fits, no need to scroll
+            } else {
+                // Keep the end of the visible text aligned with the right edge of the terminal
+                visibleStartColumn = max(0, lineBuffer.count - terminalWidth)
+            }
+            
+            // Refresh display and update cursor position
+            refreshDisplay(cursorColumn: cursor.column - 1)
+            cursor.update(column: cursor.column - 1)
+        }
+    }
+    
+    private func handleEnter() {
+        lineBuffer.append(contentsOf: partialInput.dropLast())
+        cursor.moveToStartOfLine()
+        let echo = lineBuffer
+        lineBuffer = ""
+        visibleStartColumn = 0
+        print("\n\(echo)".utf8)
+        cursor.moveToStartOfLine()
+        commandHistory.append(echo)
+        currentCommandIndex = commandHistory.count
+        do {
+            try Container.inputService().parse(input: echo)
+        } catch {
+            print(error)
+        }
+    }
+    
+    private func handleOther(input: String) {
+        // Handle normal character input
+        let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
+        lineBuffer.insert(contentsOf: input, at: index)
+        refreshDisplay(cursorColumn: cursor.column)
+        cursor.moveRightBy(amount: input.count)
+        partialInput = ""
+    }
 
-    var visibleStartColumn: Int = 0  // Track this as a property of TerminalService
-
-    func refreshDisplay(cursorColumn: Int) {
+    private func refreshDisplay(cursorColumn: Int) {
         // Get the terminal width
         guard let terminalWidth = getTerminalWidth() else { return }
 
