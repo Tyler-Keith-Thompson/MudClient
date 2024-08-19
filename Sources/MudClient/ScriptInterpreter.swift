@@ -134,7 +134,7 @@ extension AsyncSequence where Self: Sendable, Element == String {
         .eraseToAnyAsyncSequence()
     }
     
-    func processServerOutput() -> AnyAsyncSequence<String> {
+    func processServerOutputForScripts() -> AnyAsyncSequence<String> {
         map { output in
             let lines = output.components(separatedBy: CharacterSet.newlines)
             let triggers = Container.scriptInterpreter().triggers

@@ -8,7 +8,6 @@ import ArgumentParser
 import DependencyInjection
 import Foundation
 import Cocoa
-import Fakery
 
 @main
 struct Connect: ParsableCommand {
@@ -58,6 +57,6 @@ struct Connect: ParsableCommand {
     }
 }
 
-func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
-    Container.terminalService().print(items, separator: separator, terminator: terminator)
+func print(_ item: Any, terminator: String = "\n") {
+    Container.terminalService().print(item, terminator: terminator)
 }

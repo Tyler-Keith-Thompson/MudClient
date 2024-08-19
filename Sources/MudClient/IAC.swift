@@ -10,9 +10,38 @@ import Foundation
 import Parsing
 import DependencyInjection
 
-struct IAC: OptionSet, CustomDebugStringConvertible {
-    let rawValue: Int
-
+enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
+    case iac
+    case dont
+    case `do`
+    case wont
+    case will
+    case sb
+    case se
+    case ttype
+    case window_size
+    case line_mode
+    case character_set
+    case msdp
+    case mssp
+    case zmp
+    case actp
+    case mxp
+    case msp
+    case mccp
+    case `is` // binary
+    case binary // is
+    case msdp_array_close
+    case msdp_array_open
+    case msdp_table_close
+    case msdp_table_open
+    case msdp_val
+    case msdp_var // send, echo
+    case send // msdp_var, echo
+    case echo // msdp_var, send
+    case go_ahead
+    case unknown(UInt8)
+    
     var asciiChar: String {
         switch self {
         case .iac: return String(UnicodeScalar(255))
@@ -40,7 +69,8 @@ struct IAC: OptionSet, CustomDebugStringConvertible {
         case .msdp_table_open: return String(UnicodeScalar(3))
         case .msdp_val: return String(UnicodeScalar(2))
         case .msdp_var, .send, .echo: return String(UnicodeScalar(1))
-        default: return elements().map(\.asciiChar).joined()
+        case .go_ahead: return String(UnicodeScalar(249))
+        case .unknown(let byte): return String(UnicodeScalar(byte))
         }
     }
     
@@ -71,7 +101,8 @@ struct IAC: OptionSet, CustomDebugStringConvertible {
         case .msdp_table_open: return Data([3])
         case .msdp_val: return Data([2])
         case .msdp_var, .send, .echo: return Data([1])
-        default: return elements().map(\.data).reduce(into: Data()) { $0.append($1) }
+        case .go_ahead: return Data([249])
+        case .unknown(let byte): return Data([byte])
         }
     }
     
@@ -105,40 +136,12 @@ struct IAC: OptionSet, CustomDebugStringConvertible {
         case .msdp_var: return "MSDP_VAR"
         case .send: return "SEND"
         case .echo: return "ECHO"
-        default: return elements().map(\.debugDescription).joined(separator: " ")
+        case .go_ahead: return "GO_AHEAD"
+        case .unknown: return "UNKNOWN"
         }
     }
-    
-    static let iac              = Self(rawValue: 1 << 0)
-    static let dont             = Self(rawValue: 1 << 1)
-    static let `do`             = Self(rawValue: 1 << 2)
-    static let wont             = Self(rawValue: 1 << 3)
-    static let will             = Self(rawValue: 1 << 4)
-    static let sb               = Self(rawValue: 1 << 5)
-    static let se               = Self(rawValue: 1 << 6)
-    static let ttype            = Self(rawValue: 1 << 7)
-    static let window_size      = Self(rawValue: 1 << 8)
-    static let line_mode        = Self(rawValue: 1 << 9)
-    static let character_set    = Self(rawValue: 1 << 10)
-    static let msdp             = Self(rawValue: 1 << 11)
-    static let mssp             = Self(rawValue: 1 << 12)
-    static let zmp              = Self(rawValue: 1 << 13)
-    static let actp             = Self(rawValue: 1 << 14)
-    static let mxp              = Self(rawValue: 1 << 15)
-    static let msp              = Self(rawValue: 1 << 16)
-    static let mccp             = Self(rawValue: 1 << 17)
-    static let `is`             = Self(rawValue: 1 << 18) // also binary
-    static let binary           = Self(rawValue: 1 << 18)
-    static let msdp_array_close = Self(rawValue: 1 << 19)
-    static let msdp_array_open  = Self(rawValue: 1 << 20)
-    static let msdp_table_close = Self(rawValue: 1 << 21)
-    static let msdp_table_open  = Self(rawValue: 1 << 22)
-    static let msdp_val         = Self(rawValue: 1 << 23)
-    static let msdp_var         = Self(rawValue: 1 << 24) // also send, echo
-    static let send             = Self(rawValue: 1 << 24)
-    static let echo             = Self(rawValue: 1 << 24)
-    
-    static let all = [
+
+    static let allCases = [
         Self.dont,
         Self.do,
         Self.wont,
@@ -166,41 +169,52 @@ struct IAC: OptionSet, CustomDebugStringConvertible {
         Self.msdp_var,
         Self.send,
         Self.echo,
+        Self.go_ahead,
     ]
     
-    static func parser() -> some Parser<Substring, [IAC]> {
+    static func negotiationParser() -> some Parser<Substring, (IAC, IAC, IAC)> {
         Parse {
-            Self.iac.asciiChar
-            Many {
-                OneOf {
-                    Parse { Self.dont.asciiChar }.map { _ in Self.dont }
-                    Parse { Self.do.asciiChar }.map { _ in Self.do }
-                    Parse { Self.wont.asciiChar }.map { _ in Self.wont }
-                    Parse { Self.will.asciiChar }.map { _ in Self.will }
-                    Parse { Self.sb.asciiChar }.map { _ in Self.sb }
-                    Parse { Self.se.asciiChar }.map { _ in Self.se }
-                    Parse { Self.ttype.asciiChar }.map { _ in Self.ttype }
-                    Parse { Self.window_size.asciiChar }.map { _ in Self.window_size }
-                    Parse { Self.line_mode.asciiChar }.map { _ in Self.line_mode }
-                    Parse { Self.character_set.asciiChar }.map { _ in Self.character_set }
-                    Parse { Self.msdp.asciiChar }.map { _ in Self.msdp }
-                    Parse { Self.mssp.asciiChar }.map { _ in Self.mssp }
-                    Parse { Self.zmp.asciiChar }.map { _ in Self.zmp }
-                    Parse { Self.actp.asciiChar }.map { _ in Self.actp }
-                    Parse { Self.mxp.asciiChar }.map { _ in Self.mxp }
-                    Parse { Self.msp.asciiChar }.map { _ in Self.msp }
-                    Parse { Self.mccp.asciiChar }.map { _ in Self.mccp }
-                    Parse { Self.is.asciiChar }.map { _ in Self.is }
-                    Parse { Self.binary.asciiChar }.map { _ in Self.binary }
-                    Parse { Self.msdp_array_close.asciiChar }.map { _ in Self.msdp_array_close }
-                    Parse { Self.msdp_array_open.asciiChar }.map { _ in Self.msdp_array_open }
-                    Parse { Self.msdp_table_close.asciiChar }.map { _ in Self.msdp_table_close }
-                    Parse { Self.msdp_table_open.asciiChar }.map { _ in Self.msdp_table_open }
-                    Parse { Self.msdp_val.asciiChar }.map { _ in Self.msdp_val }
-                    Parse { Self.msdp_var.asciiChar }.map { _ in Self.msdp_var }
-                    Parse { Self.send.asciiChar }.map { _ in Self.send }
-                    Parse { Self.echo.asciiChar }.map { _ in Self.echo }
-                }
+            Self.iac.asciiChar.map { _ in Self.iac }
+            OneOf {
+                Parse { Self.dont.asciiChar }.map { _ in Self.dont }
+                Parse { Self.do.asciiChar }.map { _ in Self.do }
+                Parse { Self.wont.asciiChar }.map { _ in Self.wont }
+                Parse { Self.will.asciiChar }.map { _ in Self.will }
+            }
+            OneOf {
+                Parse { Self.sb.asciiChar }.map { _ in Self.sb }
+                Parse { Self.se.asciiChar }.map { _ in Self.se }
+                Parse { Self.ttype.asciiChar }.map { _ in Self.ttype }
+                Parse { Self.window_size.asciiChar }.map { _ in Self.window_size }
+                Parse { Self.line_mode.asciiChar }.map { _ in Self.line_mode }
+                Parse { Self.character_set.asciiChar }.map { _ in Self.character_set }
+                Parse { Self.msdp.asciiChar }.map { _ in Self.msdp }
+                Parse { Self.mssp.asciiChar }.map { _ in Self.mssp }
+                Parse { Self.zmp.asciiChar }.map { _ in Self.zmp }
+                Parse { Self.actp.asciiChar }.map { _ in Self.actp }
+                Parse { Self.mxp.asciiChar }.map { _ in Self.mxp }
+                Parse { Self.msp.asciiChar }.map { _ in Self.msp }
+                Parse { Self.mccp.asciiChar }.map { _ in Self.mccp }
+                Parse { Self.is.asciiChar }.map { _ in Self.is }
+                Parse { Self.binary.asciiChar }.map { _ in Self.binary }
+                Parse { Self.msdp_array_close.asciiChar }.map { _ in Self.msdp_array_close }
+                Parse { Self.msdp_array_open.asciiChar }.map { _ in Self.msdp_array_open }
+                Parse { Self.msdp_table_close.asciiChar }.map { _ in Self.msdp_table_close }
+                Parse { Self.msdp_table_open.asciiChar }.map { _ in Self.msdp_table_open }
+                Parse { Self.msdp_val.asciiChar }.map { _ in Self.msdp_val }
+                Parse { Self.msdp_var.asciiChar }.map { _ in Self.msdp_var }
+                Parse { Self.send.asciiChar }.map { _ in Self.send }
+                Parse { Self.echo.asciiChar }.map { _ in Self.echo }
+                Prefix(1).map { Self.unknown(UInt8($0.unicodeScalars.first!.value)) }
+            }
+        }
+    }
+    
+    static func commandParser() -> some Parser<Substring, (IAC, IAC)> {
+        Parse {
+            Self.iac.asciiChar.map { _ in Self.iac }
+            OneOf {
+                Self.go_ahead.asciiChar.map { _ in Self.go_ahead }
             }
         }
     }
@@ -232,23 +246,27 @@ extension AsyncSequence where Self: Sendable, Element == Data {
                 var commands = [Data]()
                 let parser = Many {
                     OneOf {
-                        IAC.parser().map { iac in
-                            let command = iac.reduce(into: IAC.iac) {
-                                $0.update(with: $1)
-                            }
-                            switch command {
-                            case [.iac, .will, .mssp]: commands.append(IAC([.iac, .dont, .mssp]).data)
-                            case [.iac, .will, .msdp]: commands.append(IAC([.iac, .dont, .msdp]).data)
-                            case [.iac, .will, .mccp]: commands.append(IAC([.iac, .dont, .mccp]).data)
-                            case [.iac, .will, .msp]: commands.append(IAC([.iac, .dont, .msp]).data) // TODO: Bring back MSP (will)
-                            case [.iac, .will, .zmp]: commands.append(IAC([.iac, .dont, .zmp]).data)
-                            case [.iac, .do, .mxp]: commands.append(IAC([.iac, .dont, .mxp]).data)
-                            case [.iac, .do, .line_mode]: commands.append(IAC([.iac, .will, .line_mode]).data)
-                            case [.iac, .do, .actp]: commands.append(IAC([.iac, .dont, .actp]).data)
-                            case [.iac, .do, .ttype]: commands.append(IAC([.iac, .will, .ttype]).data)
-                            case [.iac, .send, .ttype]: commands.append(IAC([.iac, .sb, .ttype, .is]).data + Data("MudClient".utf8) + IAC([.iac, .se]).data)
+                        IAC.negotiationParser().map { iac in
+                            switch iac {
+                            case (.iac, .will, .mssp): commands.append([IAC.iac, .dont, .mssp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .will, .msdp): commands.append([IAC.iac, .dont, .msdp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .will, .mccp): commands.append([IAC.iac, .dont, .mccp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .will, .msp): commands.append([IAC.iac, .do, .msp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .will, .zmp): commands.append([IAC.iac, .dont, .zmp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .do, .mxp): commands.append([IAC.iac, .dont, .mxp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .do, .line_mode): commands.append([IAC.iac, .do, .line_mode].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .do, .actp): commands.append([IAC.iac, .dont, .actp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .do, .ttype): commands.append([IAC.iac, .will, .ttype].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .send, .ttype): commands.append([IAC.iac, .sb, .ttype, .is].reduce(into: Data()) { $0.append($1.data) } + Data("MudClient".utf8) + [IAC.iac, .se].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .do, .unknown(let byte)): commands.append([IAC.iac, .wont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .dont, .unknown(let byte)): commands.append([IAC.iac, .wont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .will, .unknown(let byte)): commands.append([IAC.iac, .dont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .wont, .unknown(let byte)): commands.append([IAC.iac, .dont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
                             default: break
                             }
+                            return Substring()
+                        }
+                        IAC.commandParser().map { _ in
                             return Substring()
                         }
                         Prefix(1)
@@ -257,7 +275,6 @@ extension AsyncSequence where Self: Sendable, Element == Data {
                 let val = try parser.parse(str).joined()
             
                 for command in commands {
-//                    Container.terminalService().print("SENDING: \(command.map(String.init(describing:)))")
                     try await writeToStream(command)
                 }
                 return String(val)

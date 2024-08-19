@@ -117,33 +117,30 @@ final class TerminalService {
         print("")
     }
     
-    func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
-        let cursorColumn = cursor.column
+    func print(_ string: Any, terminator: String = "\n") {
         clearInputAndDividerLines()
         
-        let output = items.map(String.init(describing:)).joined(separator: separator) + terminator
+        let output = String(describing: string) + terminator
         writeToStandardOut(data: Data(output.utf8))
         
         let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
-        writeToStandardOut(data: Data("\(output.hasSuffix("\n") ? "" : "\n")\(divider)\n".utf8))
+        writeToStandardOut(data: Data("\n\(divider)\n".utf8))
         refreshDisplay(cursorColumn: cursor.column)
     }
     
     private func clearInputAndDividerLines() {
         // Move to the beginning of the input line (assumed to be the current line)
         writeToStandardOut(data: Data("\u{1B}[1G".utf8))
-        // Clear the entire line (input line)
+        // Clear the entire input line
         writeToStandardOut(data: Data("\u{1B}[2K".utf8))
         
         // Move cursor up one line to the divider line
         writeToStandardOut(data: Data("\u{1B}[1A".utf8))
-        // Move to the beginning of the divider line
-        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
-        // Clear the entire divider line
-        writeToStandardOut(data: Data("\u{1B}[2K".utf8))
+        // Delete the divider line and shift content up
+        writeToStandardOut(data: Data("\u{1B}[1M".utf8))
         
-        // Move cursor back down to the input line (now clear)
-        writeToStandardOut(data: Data("\u{1B}[1B".utf8))
+        // Now the cursor is at the position where the divider line was,
+        // and the line has been deleted, effectively removing the newline as well.
     }
     
     private func getTerminalHeight() -> Int? {
