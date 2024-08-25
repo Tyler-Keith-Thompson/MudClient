@@ -25,11 +25,12 @@ struct Connect: ParsableCommand {
         
         Container.terminalService().setup()
         
+        try Container.scriptInterpreter().parser.parse("#load {AlterAeon}")
+        
         Task {
-            let connection = Connection(host: "alteraeon.com", port: 3000)
+//            let connection = Connection(host: "godwars2.org", port: 3000)
+            let connection = Connection(host: "alteraeon.com", port: 3002)
             try await connection.connect()
-//            let interpreter = Container.scriptInterpreter()
-//            try interpreter.parser.parse("#load {test.script}")
             Task {
                 for try await string in connection {
                     Container.terminalService().print(string, terminator: "")

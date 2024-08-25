@@ -52,7 +52,7 @@ final class InputService: @unchecked Sendable {
             guard let self else { return command }
             if command == "!", let lastCommand {
                 return lastCommand
-            } else {
+            } else if !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 self.lastCommand = command
             }
             return command
@@ -66,6 +66,10 @@ final class InputService: @unchecked Sendable {
         for command in try parser.parse(input) {
             continuation.yield(command)
         }
+    }
+    
+    func send(verbatim: String) throws {
+        continuation.yield(verbatim)
     }
     
     func handleSigInt() {

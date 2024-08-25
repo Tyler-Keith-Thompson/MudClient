@@ -9,6 +9,9 @@ let package = Package(
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .executable(name: "MudClient", targets: ["MudClient"]),
+        .library(name: "ScriptDescription",
+                 type: .dynamic,
+                 targets: ["ScriptDescription"])
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
@@ -16,6 +19,7 @@ let package = Package(
         .package(url: "https://github.com/Tyler-Keith-Thompson/Afluent.git", from: "0.6.2"),
         .package(url: "git@github.com:Tyler-Keith-Thompson/DependencyInjection.git", from: "0.0.7"),
         .package(url: "https://github.com/pointfreeco/swift-parsing.git", from: "0.13.0"),
+        .package(url: "git@github.com:JohnSundell/ShellOut.git", from: "2.3.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -28,8 +32,11 @@ let package = Package(
                 .product(name: "Afluent", package: "Afluent"),
                 .product(name: "DependencyInjection", package: "DependencyInjection"),
                 .product(name: "Parsing", package: "swift-parsing"),
+                .product(name: "ShellOut", package: "ShellOut"),
+                "ScriptDescription",
             ]
         ),
+        .target(name: "ScriptDescription"),
         .testTarget(
             name: "MudClientTests",
             dependencies: ["MudClient"]

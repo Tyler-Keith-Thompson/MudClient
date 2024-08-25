@@ -11,24 +11,221 @@ import Foundation
 import AVFoundation
 import CryptoKit
 
+class AudioPlayer: @unchecked Sendable {
+    let lock = NSRecursiveLock()
+    let player: AVAudioPlayer
+    
+    init(player: AVAudioPlayer) {
+        self.player = player
+    }
+    
+    func prepareToPlay() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.prepareToPlay()
+    }
+
+    func play() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.play()
+    }
+
+    @available(macOS 10.7, *)
+    func play(atTime time: TimeInterval) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.play(atTime: time)
+    }
+
+    func pause() {
+        lock.lock()
+        defer { lock.unlock() }
+        player.pause()
+    }
+
+    func stop() {
+        lock.lock()
+        defer { lock.unlock() }
+        player.stop()
+    }
+
+    var isPlaying: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.isPlaying
+    }
+
+    var numberOfChannels: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.numberOfChannels
+    }
+
+    var duration: TimeInterval {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.duration
+    }
+    
+    open var data: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.data
+    }
+
+    @available(macOS 10.7, *)
+    var pan: Float {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.pan
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.pan = newValue
+        }
+    }
+
+    var volume: Float {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.volume
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.volume = newValue
+        }
+    }
+
+    @available(macOS 10.12, *)
+    func setVolume(_ volume: Float, fadeDuration duration: TimeInterval) {
+        lock.lock()
+        defer { lock.unlock() }
+        player.setVolume(volume, fadeDuration: duration)
+    }
+
+    @available(macOS 10.8, *)
+    var enableRate: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.enableRate
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.enableRate = newValue
+        }
+    }
+
+    @available(macOS 10.8, *)
+    var rate: Float {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.rate
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.rate = newValue
+        }
+    }
+
+    var currentTime: TimeInterval {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.currentTime
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.currentTime = newValue
+        }
+    }
+    
+    open var numberOfLoops: Int {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.numberOfLoops
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.numberOfLoops = newValue
+        }
+    }
+
+    @available(macOS 10.7, *)
+    var settings: [String : Any] {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.settings
+        }
+    }
+
+    @available(macOS 10.12, *)
+    var format: AVAudioFormat {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.format
+        }
+    }
+
+    open var isMeteringEnabled: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return player.isMeteringEnabled
+        } set {
+            lock.lock()
+            defer { lock.unlock() }
+            player.isMeteringEnabled = newValue
+        }
+    }
+
+    func updateMeters() {
+        lock.lock()
+        defer { lock.unlock() }
+        player.updateMeters()
+    }
+
+    func peakPower(forChannel channelNumber: Int) -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.peakPower(forChannel: channelNumber)
+    }
+
+    func averagePower(forChannel channelNumber: Int) -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        return player.averagePower(forChannel: channelNumber)
+    }
+}
+
 final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
     let cache = AsynchronousUnitOfWorkCache()
     let lock = NSRecursiveLock()
     var players = [AVAudioPlayer]()
     
-    func _play(data: Data) throws {
+    func _player(data: Data) throws -> AudioPlayer {
         let player = try AVAudioPlayer(data: data)
         player.delegate = self
         lock.lock()
         players.append(player)
         lock.unlock()
-        player.play()
+        return AudioPlayer(player: player)
     }
     
-    func play(_ url: URL) -> some AsynchronousUnitOfWork<Void> {
+    func player(_ url: URL, volume: Float = 1, loops: Int = 0) -> some AsynchronousUnitOfWork<AudioPlayer> {
         downloadOrRetrieve(url)
             .tryMap { hash, data in
-                try self._play(data: data)
+                let player = try self._player(data: data)
+                player.volume = volume
+                player.numberOfLoops = loops
+                return player
             }
     }
     

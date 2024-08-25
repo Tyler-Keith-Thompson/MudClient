@@ -219,7 +219,9 @@ final class TerminalService {
         visibleStartColumn = 0
         print("\n\(echo)".utf8)
         cursor.moveToStartOfLine()
-        commandHistory.append(echo)
+        if !echo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            commandHistory.append(echo)
+        }
         currentCommandIndex = commandHistory.count
         do {
             try Container.inputService().parse(input: echo)

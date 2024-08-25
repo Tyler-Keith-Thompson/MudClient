@@ -5,7 +5,6 @@
 //  Created by Tyler Thompson on 8/18/24.
 //
 
-import AudioStreaming
 import DependencyInjection
 import Parsing
 import Foundation
@@ -149,6 +148,8 @@ extension AsyncSequence where Self: Sendable, Element == String {
                 let mspResult = Result { try MSP.parser.parse(line.trimmingCharacters(in: .whitespacesAndNewlines)) }
                 switch mspResult {
                 case .success((let fName, let msp)):
+                    var volume: Float = 1
+                    var loops = 0
                     msp.forEach { parameter in
                         switch parameter {
                         case .u(let url):
@@ -156,17 +157,19 @@ extension AsyncSequence where Self: Sendable, Element == String {
                                 MSP.defaultURL = url
                             }
                         case .t: break
-                        case .v(let volume): break
-//                            player.volume = Float(volume)
-                        case .l: break
+                        case .v(let v):
+                            volume = Float(v / 100)
+                        case .l(let numberOfLoops):
+                            loops = numberOfLoops
                         case .p: break
                         case .c: break
                         case .unknown: break
                         }
                     }
                     if case .name(let path) = fName, let defaultURL = MSP.defaultURL {
-                        mspService.play(defaultURL.appendingPathComponent(path)).run()
-//                        player.play(url: defaultURL.appendingPathComponent(path))
+                        mspService.player(defaultURL.appendingPathComponent(path), volume: volume, loops: loops)
+                            .map { $0.play() }
+                            .run()
                     }
                     return false
                 case .failure: return true

@@ -9,6 +9,8 @@ import Afluent
 import DependencyInjection
 import Foundation
 import Parsing
+import ShellOut
+import ScriptDescription
 
 struct Trigger {
     let inputRegex: Regex<AnyRegexOutput>
@@ -16,6 +18,9 @@ struct Trigger {
 }
 
 final class ScriptInterpreter {
+    typealias InitFunction = @convention(c) () -> UnsafeMutableRawPointer
+    var scripts: [any ScriptDescription] = []
+    
     lazy var echo = Parse {
         "echo "
         Rest().map { print($0) }
@@ -43,35 +48,51 @@ final class ScriptInterpreter {
         }
     }
     
-    lazy var trigger = Parse {
-        "trigger "
-        Parse {
-            parameter
-            Skip { Optionally { CharacterSet.whitespaces } }
-            parameter
-        }
-        .map { triggerRegex, response in
-            _ = Result { try Regex(String(triggerRegex)) }.map { regex in
-                self.addTrigger(Trigger(inputRegex: regex, response: String(response)))
-            }
-        }
-    }
-    
     lazy var load = Parse {
         "load "
         Parse {
             parameter
         }
-        .map { fileName in
-            _ = Result { try String(contentsOf: URL(fileURLWithPath: fileName)) }.map { contents in
-                do {
-                    try contents.components(separatedBy: CharacterSet.newlines).forEach {
-                        guard !$0.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-                        try self.parser.parse($0.trimmingCharacters(in: .whitespaces))
+        .map { scriptFolder in
+            do {
+                print("Building ScriptDescription")
+                try shellOut(to: "swift", arguments: ["build", "-c", "debug", "--product", "ScriptDescription"])
+                print("Getting script: \(scriptFolder)")
+                try shellOut(to: "swift", arguments: ["build", "-c", "release"], at: "Scripts/\(scriptFolder)")
+                let scriptPath = "Scripts/\(scriptFolder)/.build/release/lib\(scriptFolder).dylib"
+                try shellOut(to: "cp", arguments: [scriptPath, ".build/debug"])
+                
+                let pathToPlugin = ".build/debug/lib\(scriptFolder).dylib"
+                let openRes = dlopen(pathToPlugin, RTLD_NOW|RTLD_LOCAL)
+                if openRes != nil {
+                    defer {
+                        dlclose(openRes)
                     }
-                } catch {
-                    print(error)
+                    
+                    let symbolName = "createFactory"
+                    let sym = dlsym(openRes, symbolName)
+                    
+                    if sym != nil {
+                        let f: InitFunction = unsafeBitCast(sym, to: InitFunction.self)
+                        let pluginPointer = f()
+                        let plugin = Unmanaged<ScriptFactory>.fromOpaque(pluginPointer).takeRetainedValue()
+                        self.lock.lock()
+                        self.scripts.append(plugin.getScript())
+                        print("Loaded script: \(String(describing: self.scripts.last))")
+                        self.lock.unlock()
+                    } else {
+                        print("Error loading \(pathToPlugin). \n\tSymbol \(symbolName) not found.")
+                    }
+                } else {
+                    if let err = dlerror() {
+                        let errMsg = String(format: "%s", err)
+                        print("error opening lib:", errMsg)
+                    } else {
+                        print("error opening lib: unknown error")
+                    }
                 }
+            } catch {
+                print("Failed to get script: \(error)")
             }
         }
     }
@@ -98,7 +119,6 @@ final class ScriptInterpreter {
             String.scriptIndicator
             OneOf {
                 echo
-                trigger
                 load
             }
         }
@@ -137,13 +157,18 @@ extension AsyncSequence where Self: Sendable, Element == String {
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
         map { output in
             let lines = output.components(separatedBy: CharacterSet.newlines)
-            let triggers = Container.scriptInterpreter().triggers
+            let scripts = Container.scriptInterpreter().scripts
             try lines.forEach { line in
-                try triggers.forEach { trigger in
-                    if let _ = try? trigger.inputRegex.firstMatch(in: line) {
-                        try Container.inputService().parse(input: trigger.response)
+                try scripts
+                    .flatMap { $0.processLine(input: line) }
+                    .forEach { action in
+                        switch action {
+                        case .send(let output):
+                            try Container.inputService().send(verbatim: output)
+                        case .echo(let output):
+                            Container.terminalService().print(output)
+                        }
                     }
-                }
             }
             return output
         }

@@ -1,4 +1,0 @@
-#echo Loaded!
-#trigger {\(To log on an existing character, enter the name now\.\)} {mabuz;thisisunsafe;1}
-#trigger {A (.*?) is DEAD!} {victory;bsac corpse;harvest teeth corpse}
-#trigger {is mortally wounded, and will die soon if not aided} {cast soulsteal}
