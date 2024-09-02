@@ -249,7 +249,7 @@ extension AsyncSequence where Self: Sendable, Element == Data {
                         IAC.negotiationParser().map { iac in
                             switch iac {
                             case (.iac, .will, .mssp): commands.append([IAC.iac, .dont, .mssp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .will, .msdp): commands.append([IAC.iac, .dont, .msdp].reduce(into: Data()) { $0.append($1.data) })
+                            case (.iac, .will, .msdp): commands.append([IAC.iac, .do, .msdp].reduce(into: Data()) { $0.append($1.data) })
                             case (.iac, .will, .mccp): commands.append([IAC.iac, .dont, .mccp].reduce(into: Data()) { $0.append($1.data) })
                             case (.iac, .will, .msp): commands.append([IAC.iac, .do, .msp].reduce(into: Data()) { $0.append($1.data) })
                             case (.iac, .will, .zmp): commands.append([IAC.iac, .dont, .zmp].reduce(into: Data()) { $0.append($1.data) })

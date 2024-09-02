@@ -30,6 +30,7 @@ struct Connect: ParsableCommand {
         Task {
 //            let connection = Connection(host: "godwars2.org", port: 3000)
             let connection = Connection(host: "alteraeon.com", port: 3002)
+//            let connection = Connection(host: "localhost", port: 3000)
             try await connection.connect()
             Task {
                 for try await string in connection {

@@ -14,7 +14,7 @@ let package = Package(
             targets: ["AlterAeon"]),
     ],
     dependencies: [
-        .package(path: "../../")
+        .package(path: "../../"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.

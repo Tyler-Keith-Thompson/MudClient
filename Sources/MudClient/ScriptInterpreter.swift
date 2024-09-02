@@ -58,8 +58,8 @@ final class ScriptInterpreter {
                 print("Building ScriptDescription")
                 try shellOut(to: "swift", arguments: ["build", "-c", "debug", "--product", "ScriptDescription"])
                 print("Getting script: \(scriptFolder)")
-                try shellOut(to: "swift", arguments: ["build", "-c", "release"], at: "Scripts/\(scriptFolder)")
-                let scriptPath = "Scripts/\(scriptFolder)/.build/release/lib\(scriptFolder).dylib"
+                try shellOut(to: "swift", arguments: ["build"], at: "Scripts/\(scriptFolder)")
+                let scriptPath = "Scripts/\(scriptFolder)/.build/debug/lib\(scriptFolder).dylib"
                 try shellOut(to: "cp", arguments: [scriptPath, ".build/debug"])
                 
                 let pathToPlugin = ".build/debug/lib\(scriptFolder).dylib"
@@ -78,7 +78,7 @@ final class ScriptInterpreter {
                         let plugin = Unmanaged<ScriptFactory>.fromOpaque(pluginPointer).takeRetainedValue()
                         self.lock.lock()
                         self.scripts.append(plugin.getScript())
-                        print("Loaded script: \(String(describing: self.scripts.last))")
+                        print("Loaded script \(scriptPath)")
                         self.lock.unlock()
                     } else {
                         print("Error loading \(pathToPlugin). \n\tSymbol \(symbolName) not found.")
@@ -148,6 +148,12 @@ extension AsyncSequence where Self: Sendable, Element == String {
             if case .success = result {
                 return nil
             } else {
+                for script in interpreter.scripts {
+                    let context = _ScriptContext()
+                    if try await script.processAlias(input: input, context: context) {
+                        return nil
+                    }
+                }
                 return input
             }
         }
@@ -156,22 +162,32 @@ extension AsyncSequence where Self: Sendable, Element == String {
     
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
         map { output in
-            let lines = output.components(separatedBy: CharacterSet.newlines)
+            let lines = output.replacingOccurrences(of: "\r", with: "").components(separatedBy: CharacterSet.newlines)
             let scripts = Container.scriptInterpreter().scripts
-            try lines.forEach { line in
-                try scripts
-                    .flatMap { $0.processLine(input: line) }
-                    .forEach { action in
-                        switch action {
-                        case .send(let output):
-                            try Container.inputService().send(verbatim: output)
-                        case .echo(let output):
-                            Container.terminalService().print(output)
-                        }
+            var out = [String]()
+            for line in lines {
+                let context = _ScriptContext()
+                for script in scripts where try await script.processLine(input: line, context: context) {
+                    break
+                }
+                for script in scripts {
+                    if !(try await script.transform(input: line, context: context)) {
+                        out.append(line)
                     }
+                }
             }
-            return output
+            return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()
+    }
+}
+
+struct _ScriptContext: Sendable, ScriptContext {
+    func send(_ message: String) throws {
+        try Container.inputService().send(verbatim: message)
+    }
+    
+    func echo(_ message: String) {
+        Container.terminalService().print(message)
     }
 }

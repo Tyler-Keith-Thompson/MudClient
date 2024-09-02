@@ -36,7 +36,12 @@ let package = Package(
                 "ScriptDescription",
             ]
         ),
-        .target(name: "ScriptDescription"),
+        .target(name: "ScriptDescription",
+                dependencies: [
+                    .product(name: "Afluent", package: "Afluent"),
+                    .product(name: "Parsing", package: "swift-parsing"),
+                    .product(name: "DependencyInjection", package: "DependencyInjection"),
+                ]),
         .testTarget(
             name: "MudClientTests",
             dependencies: ["MudClient"]

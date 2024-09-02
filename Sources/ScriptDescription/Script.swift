@@ -6,20 +6,35 @@
 //
 
 public struct Script: ScriptDescription {
-    public func processLine(input: String) -> [Action] {
-        body.flatMap { $0.processLine(input: input) }
+    public func processLine(input: String, context: ScriptContext) async throws -> Bool {
+        for script in body {
+            if try await script.processLine(input: input, context: context) {
+                return true
+            }
+        }
+        return false
     }
     
-    public func transform(input: String) -> String {
-        input
+    public func transform(input: String, context: ScriptContext) async throws -> Bool {
+        for script in body {
+            if try await script.transform(input: input, context: context) {
+                return true
+            }
+        }
+        return false
+    }
+    
+    public func processAlias(input: String, context: any ScriptContext) async throws -> Bool {
+        for script in body {
+            if try await script.processAlias(input: input, context: context) {
+                return true
+            }
+        }
+        return false
     }
     
     @ScriptBuilder var body: [any ScriptDescription]
     public init(@ScriptBuilder body: () -> [any ScriptDescription]) {
         self.body = body()
-    }
-    public enum Action {
-        case send(String)
-        case echo(String)
     }
 }

@@ -7,5 +7,4 @@
 
 public struct Noop: ScriptDescription {
     public init() { }
-    public func processLine(input: String) -> [Script.Action] { [] }
 }

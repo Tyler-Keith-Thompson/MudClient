@@ -219,8 +219,9 @@ final class TerminalService {
         visibleStartColumn = 0
         print("\n\(echo)".utf8)
         cursor.moveToStartOfLine()
-        if !echo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            commandHistory.append(echo)
+        let trimmed = echo.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty && trimmed != commandHistory.last {
+            commandHistory.append(trimmed)
         }
         currentCommandIndex = commandHistory.count
         do {

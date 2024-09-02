@@ -210,8 +210,8 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
     let lock = NSRecursiveLock()
     var players = [AVAudioPlayer]()
     
-    func _player(data: Data) throws -> AudioPlayer {
-        let player = try AVAudioPlayer(data: data)
+    func _player(data: Data, hint: String? = nil) throws -> AudioPlayer {
+        let player = try AVAudioPlayer(data: data, fileTypeHint: hint.flatMap { UTType(filenameExtension: $0) }?.identifier)
         player.delegate = self
         lock.lock()
         players.append(player)
@@ -222,7 +222,7 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
     func player(_ url: URL, volume: Float = 1, loops: Int = 0) -> some AsynchronousUnitOfWork<AudioPlayer> {
         downloadOrRetrieve(url)
             .tryMap { hash, data in
-                let player = try self._player(data: data)
+                let player = try self._player(data: data, hint: url.pathExtension)
                 player.volume = volume
                 player.numberOfLoops = loops
                 return player

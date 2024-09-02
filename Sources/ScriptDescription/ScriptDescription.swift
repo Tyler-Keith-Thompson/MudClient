@@ -6,10 +6,13 @@
 //
 
 public protocol ScriptDescription {
-    func transform(input: String) -> String
-    func processLine(input: String) -> [Script.Action]
+    func transform(input: String, context: ScriptContext) async throws -> Bool
+    func processLine(input: String, context: ScriptContext) async throws -> Bool
+    func processAlias(input: String, context: ScriptContext) async throws -> Bool
 }
 
 extension ScriptDescription {
-    public func transform(input: String) -> String { input }
+    public func transform(input: String, context: ScriptContext) async throws -> Bool { false }
+    public func processAlias(input: String, context: ScriptContext) async throws -> Bool { false }
+    public func processLine(input: String, context: ScriptContext) async throws -> Bool { false }
 }
