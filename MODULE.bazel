@@ -1,0 +1,65 @@
+module(
+    name = "mudclient",
+    version = "0.1.0",
+)
+
+# ── Platforms ────────────────────────────────────────────────────────
+bazel_dep(name = "platforms", version = "1.0.0")
+
+# ── Swift / Apple ────────────────────────────────────────────────────
+# apple_support must come BEFORE rules_cc for toolchain resolution.
+bazel_dep(name = "apple_support", version = "2.2.0", repo_name = "build_bazel_apple_support")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "rules_swift", version = "3.5.0")
+bazel_dep(name = "rules_apple", version = "4.5.1")
+
+# ── Swift Package Manager dependencies ───────────────────────────────
+bazel_dep(name = "rules_swift_package_manager", version = "1.13.0")
+
+swift_deps = use_extension(
+    "@rules_swift_package_manager//:extensions.bzl",
+    "swift_deps",
+)
+swift_deps.from_package(
+    declare_swift_deps_info = True,
+    resolved = "//swift:Package.resolved",
+    swift = "//swift:Package.swift",
+)
+use_repo(
+    swift_deps,
+    "swift_deps_info",
+    "swift_package",
+    "swiftpkg_afluent",
+    "swiftpkg_dependencyinjection",
+    "swiftpkg_shellout",
+    "swiftpkg_swift_argument_parser",
+    "swiftpkg_swift_nio",
+)
+
+# ── Local fork: swift-parsing ────────────────────────────────────────
+# A local, unpushed fork (branch `streaming`) lives as a sibling checkout. It
+# can't be referenced by git URL, and its SwiftPM manifest uses the newer
+# `traits` API that the SPM-to-Bazel resolver doesn't handle. We build only its
+# `Parsing` target directly from source via a hand-written BUILD file. MudClient
+# doesn't use Parsing's `#if CasePaths` features, so no swift-case-paths /
+# swift-syntax dependency is needed.
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+new_local_repository(
+    name = "swift_parsing",
+    build_file = "//third_party:swift_parsing.BUILD",
+    path = "../swift-parsing",
+)
+
+# ── Apple CC toolchain ───────────────────────────────────────────────
+# Required so rules_swift gets a valid target triple instead of "local".
+apple_cc_configure = use_extension(
+    "@build_bazel_apple_support//crosstool:setup.bzl",
+    "apple_cc_configure_extension",
+)
+use_repo(apple_cc_configure, "local_config_apple_cc")
+
+register_toolchains("@local_config_apple_cc//:all")
+
+# ── Xcode project generation ─────────────────────────────────────────
+bazel_dep(name = "rules_xcodeproj", version = "4.0.0")

@@ -1,0 +1,11 @@
+# SwiftPM build/checkout dirs — these contain stray BUILD/.bzl files that
+# Bazel's //... target pattern must not recurse into.
+.build
+swift/.build
+Scripts/AlterAeon/.build
+
+# Convenience symlinks
+bazel-bin
+bazel-out
+bazel-testlogs
+bazel-MudClient

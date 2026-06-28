@@ -1,0 +1,10 @@
+load("@rules_xcodeproj//xcodeproj:defs.bzl", "top_level_target", "xcodeproj")
+
+xcodeproj(
+    name = "xcodeproj",
+    project_name = "MudClient",
+    top_level_targets = [
+        top_level_target("//Sources/MudClient:MudClient", target_environments = ["device"]),
+        top_level_target("//Tests/MudClientTests:MudClientTests", target_environments = ["device"]),
+    ],
+)

@@ -44,3 +44,41 @@ private actor RecordedWrites {
     }
     #expect(text == "x")
 }
+
+@Test func mspDirectiveSplitAcrossChunks() throws {
+    // An `!!SOUND(...)` directive split across two reads must still be recognized as one directive
+    // and stripped from the visible output.
+    let buffer = MSPLineBuffer()
+    let first = buffer.process("!!SOUND(cow.wav V=100 L=1")
+    // Incomplete directive: held back, nothing shown, nothing fired yet.
+    #expect(first.output.isEmpty)
+    #expect(first.directives.isEmpty)
+
+    let second = buffer.process(")\n")
+    // Completed by the newline: recognized as a directive, still nothing shown.
+    #expect(second.output.isEmpty)
+    #expect(second.directives.count == 1)
+}
+
+@Test func mspPassesThroughOrdinaryTextAndPrompts() throws {
+    let buffer = MSPLineBuffer()
+    // A complete line flows straight through.
+    #expect(buffer.process("You see a cow.\n").output == "You see a cow.\n")
+    // A prompt with no trailing newline is shown immediately, not held back.
+    #expect(buffer.process("HP:100 >").output == "HP:100 >")
+    // Text split mid-line is emitted incrementally without duplication.
+    let a = buffer.process(" attack")
+    let b = buffer.process(" cow\n")
+    #expect(a.output == " attack")
+    #expect(b.output == " cow\n")
+}
+
+@Test func mspMalformedDirectiveIsNotHeldForever() throws {
+    // A line that looks like a directive but never closes must be released (shown) once its line
+    // ends, rather than swallowing all subsequent output.
+    let buffer = MSPLineBuffer()
+    #expect(buffer.process("!!SOUND(broken").output.isEmpty)  // held while it could still complete
+    let released = buffer.process(" no close\n")
+    #expect(released.output == "!!SOUND(broken no close\n")
+    #expect(released.directives.isEmpty)
+}

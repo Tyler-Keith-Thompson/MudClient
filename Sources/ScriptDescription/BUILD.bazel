@@ -1,0 +1,13 @@
+load("@rules_swift//swift:swift.bzl", "swift_library")
+
+swift_library(
+    name = "ScriptDescription",
+    srcs = glob(["*.swift"]),
+    module_name = "ScriptDescription",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@swift_parsing//:Parsing",
+        "@swiftpkg_afluent//:Afluent",
+        "@swiftpkg_dependencyinjection//:DependencyInjection",
+    ],
+)

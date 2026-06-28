@@ -1,0 +1,22 @@
+# macOS deployment target (matches Package.swift: .macOS(.v13))
+build --macos_minimum_os=13.0
+build --host_macos_minimum_os=13.0
+
+# Debug configuration (used by `just build`, `just run`, `just test`)
+build:debug --compilation_mode=dbg
+
+# Release configuration
+build:release --compilation_mode=opt
+
+# Local disk cache for incremental builds
+build --disk_cache=~/.cache/bazel-mudclient
+
+# Suppress warnings from third-party SwiftPM dependencies (and our own code) so
+# the build doesn't fail on upstream warnings. rules_swift maps this feature to
+# swiftc's -suppress-warnings.
+build --features=swift.suppress_warnings
+
+# The runtime plugin loader (ScriptInterpreter) shells out to `swift build`, so
+# tests and runs need HOME and local execution.
+test --spawn_strategy=local
+test --test_env=HOME

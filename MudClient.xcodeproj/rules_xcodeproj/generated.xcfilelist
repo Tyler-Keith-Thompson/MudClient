@@ -1,0 +1,1 @@
+$(BAZEL_OUT)/darwin_arm64-dbg-ST-69e65c902ded/bin/external/rules_swift_package_manager++swift_deps+swiftpkg_swift_nio/NIOPosix.rspm_resource_bundle_accessor_ResourceBundleAccessor.swift

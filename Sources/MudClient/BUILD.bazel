@@ -1,0 +1,36 @@
+load("@rules_swift//swift:swift.bzl", "swift_binary", "swift_library")
+
+_DEPS = [
+    "//Sources/ScriptDescription",
+    "@swift_parsing//:Parsing",
+    "@swiftpkg_afluent//:Afluent",
+    "@swiftpkg_dependencyinjection//:DependencyInjection",
+    "@swiftpkg_shellout//:ShellOut",
+    "@swiftpkg_swift_argument_parser//:ArgumentParser",
+    "@swiftpkg_swift_nio//:NIO",
+]
+
+# The full module, including the `@main` entry point (MudClient.swift), compiled
+# straight into the executable.
+swift_binary(
+    name = "MudClient",
+    srcs = glob(["*.swift"]),
+    module_name = "MudClientMain",
+    visibility = ["//visibility:public"],
+    deps = _DEPS,
+)
+
+# The same module MINUS the `@main` entry point, for tests to `@testable import
+# MudClient`. Excluding MudClient.swift keeps the `_main` symbol out of the test
+# bundle (it would collide with the generated test runner's `main`). The test
+# only exercises IAC.swift, so the entry point isn't needed here.
+swift_library(
+    name = "MudClientLib",
+    srcs = glob(
+        ["*.swift"],
+        exclude = ["MudClient.swift"],
+    ),
+    module_name = "MudClient",
+    visibility = ["//visibility:public"],
+    deps = _DEPS,
+)
