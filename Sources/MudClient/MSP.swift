@@ -185,14 +185,29 @@ final class MSPLineBuffer: @unchecked Sendable {
         if carryEmitted < carry.count {
             let pending = carry.dropFirst(carryEmitted)
             let trimmedLeading = pending.drop(while: { $0 == " " || $0 == "\t" })
-            let couldBecomeDirective =
-                carryEmitted == 0
-                && (trimmedLeading.isEmpty
-                    || Self.marker.hasPrefix(trimmedLeading)
-                    || trimmedLeading.hasPrefix(Self.marker))
-            if !couldBecomeDirective {
-                output += pending
-                carryEmitted = carry.count
+            if carryEmitted == 0,
+                trimmedLeading.hasPrefix(Self.marker),
+                let directive = try? MSP.parser.parse(
+                    carry.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            {
+                // A complete directive that simply hasn't been newline-terminated yet. Act on it
+                // immediately rather than waiting for a newline, otherwise text arriving on the same
+                // line in a later chunk (e.g. a prompt) would contaminate the directive and it would
+                // fail to parse — and so leak to the display — once the line finally ends.
+                directives.append(directive)
+                carry = ""
+                carryEmitted = 0
+            } else {
+                let couldBecomeDirective =
+                    carryEmitted == 0
+                    && (trimmedLeading.isEmpty
+                        || Self.marker.hasPrefix(trimmedLeading)
+                        || trimmedLeading.hasPrefix(Self.marker))
+                if !couldBecomeDirective {
+                    output += pending
+                    carryEmitted = carry.count
+                }
             }
         }
 

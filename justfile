@@ -5,6 +5,13 @@ BAZEL_CONFIG := "debug"
 BAZEL := "bazel"
 MUDCLIENT_TARGET := "//Sources/MudClient:MudClient"
 
+# Pin Bazel's Apple toolchain to the currently-selected Xcode for both building
+# and running tests. Without this, with multiple Xcodes installed, the build and
+# the test runtime can resolve different Xcodes and a swift-testing/XCTest
+# dylib mismatch crashes the test runner. `.bazelrc` forwards this via
+# --action_env / --test_env DEVELOPER_DIR.
+export DEVELOPER_DIR := `xcode-select -p`
+
 [doc('Build everything (default)')]
 all: build
 

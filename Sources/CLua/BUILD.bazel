@@ -1,0 +1,23 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_swift//swift:swift.bzl", "swift_interop_hint")
+
+# Vendored Lua 5.4 C library. Mirrors the SwiftPM `CLua` target in Package.swift:
+# the `.c` sources compiled with LUA_USE_MACOSX, public API surfaced to Swift
+# through the curated umbrella in `include/clua.h` (see include/module.modulemap).
+cc_library(
+    name = "CLua",
+    srcs = glob(["*.c"]),
+    hdrs = glob(["include/*.h"]),
+    copts = ["-DLUA_USE_MACOSX"],
+    includes = ["include"],
+    aspect_hints = [":CLua_swift"],
+    visibility = ["//visibility:public"],
+)
+
+# Lets Swift `import CLua`, using the hand-written module map that exposes only
+# the public Lua API (not the internal headers).
+swift_interop_hint(
+    name = "CLua_swift",
+    module_map = "include/module.modulemap",
+    module_name = "CLua",
+)

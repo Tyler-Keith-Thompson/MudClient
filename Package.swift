@@ -24,6 +24,14 @@ let package = Package(
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
         // Targets can depend on other targets in this package and products from dependencies.
+        // Embedded Lua 5.4 C library (vendored under Sources/CLua). Replaces the
+        // old swift-build + dlopen scripting pipeline.
+        .target(
+            name: "CLua",
+            cSettings: [
+                .define("LUA_USE_MACOSX"),
+            ]
+        ),
         .executableTarget(
             name: "MudClient",
             dependencies: [
@@ -34,6 +42,7 @@ let package = Package(
                 .product(name: "Parsing", package: "swift-parsing"),
                 .product(name: "ShellOut", package: "ShellOut"),
                 "ScriptDescription",
+                "CLua",
             ]
         ),
         .target(name: "ScriptDescription",

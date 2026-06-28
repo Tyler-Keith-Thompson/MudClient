@@ -1,0 +1,2 @@
+# Exposes the ported Lua scripts as build inputs (e.g. test `data`).
+exports_files(["AlterAeon.lua"])

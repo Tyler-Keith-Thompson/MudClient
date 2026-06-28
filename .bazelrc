@@ -20,3 +20,11 @@ build --features=swift.suppress_warnings
 # tests and runs need HOME and local execution.
 test --spawn_strategy=local
 test --test_env=HOME
+
+# Pin the Apple toolchain (build + test runtime) to one Xcode so swift-testing
+# and XCTest support dylibs come from the same Xcode. The value is supplied by
+# the environment (the justfile sets it from `xcode-select -p`); inheriting it
+# keeps both the build actions and the test runner on the same Xcode.
+build --action_env=DEVELOPER_DIR
+build --host_action_env=DEVELOPER_DIR
+test --test_env=DEVELOPER_DIR

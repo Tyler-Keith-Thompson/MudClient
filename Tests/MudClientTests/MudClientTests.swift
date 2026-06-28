@@ -82,3 +82,27 @@ private actor RecordedWrites {
     #expect(released.output == "!!SOUND(broken no close\n")
     #expect(released.directives.isEmpty)
 }
+
+@Test func mspDirectiveWithoutTrailingNewlineIsStrippedNotLeaked() throws {
+    // Regression: a complete directive that arrives without a trailing newline, followed by a
+    // prompt in a *separate* chunk, must be acted on immediately. Otherwise the prompt would be
+    // appended to the same buffered line, the combined line would fail to parse as a directive, and
+    // the directive text would leak to the display.
+    let directive = "!!SOUND(Off U=http://www.alteraeon.com/soundpack/wav_v1/ X=2.0)"
+    let buffer = MSPLineBuffer()
+    let first = buffer.process(directive)
+    #expect(first.directives.count == 1)  // recognized eagerly, before the prompt arrives
+    #expect(first.output.isEmpty)
+    let second = buffer.process("> ")
+    #expect(second.directives.isEmpty)
+    #expect(second.output == "> ")  // the prompt still flows to the display
+}
+
+@Test func mspRealDirectiveNewlineTerminated() throws {
+    let buffer = MSPLineBuffer()
+    let result = buffer.process(
+        "!!SOUND(Off U=http://www.alteraeon.com/soundpack/wav_v1/ X=2.0)\n"
+    )
+    #expect(result.directives.count == 1)
+    #expect(result.output.isEmpty)
+}

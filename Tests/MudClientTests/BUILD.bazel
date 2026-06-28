@@ -4,6 +4,9 @@ swift_test(
     name = "MudClientTests",
     size = "small",
     srcs = glob(["*.swift"]),
+    # The Lua engine test loads this script from disk, resolved relative to the
+    # test source (#filePath), which under Bazel lands in the runfiles tree.
+    data = ["//Scripts:AlterAeon.lua"],
     visibility = ["//visibility:public"],
     deps = [
         "//Sources/MudClient:MudClientLib",
