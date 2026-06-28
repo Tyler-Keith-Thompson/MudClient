@@ -239,47 +239,89 @@ extension OptionSet where RawValue: FixedWidthInteger {
     }
 }
 
+extension IAC {
+    /// One unit of meaning pulled from the server's byte stream: a negotiation we must answer, an
+    /// ignorable in-band command, or a passthrough character bound for the display.
+    enum StreamToken: Sendable {
+        case respond(Data)
+        case passthrough(Substring)
+        case ignore
+    }
+
+    /// Builds a `Data` value out of a sequence of telnet control codes.
+    static func bytes(_ codes: IAC...) -> Data {
+        codes.reduce(into: Data()) { $0.append($1.data) }
+    }
+
+    /// A parser that extracts a single ``StreamToken`` from the front of the server stream.
+    ///
+    /// Because it is driven by a `StreamingParser`, the IAC negotiation and command parsers can
+    /// report that they need more input when a telnet sequence is split across the network reads
+    /// that produce our `Data` chunks. The driver buffers the partial sequence and resumes once the
+    /// remaining bytes arrive — so a negotiation that straddles a packet boundary is no longer
+    /// mistaken for stray text.
+    static func streamTokenParser() -> some Parser<Substring, StreamToken> {
+        OneOf {
+            negotiationParser().map { iac -> StreamToken in
+                switch iac {
+                case (.iac, .will, .mssp): return .respond(bytes(.iac, .dont, .mssp))
+                case (.iac, .will, .msdp): return .respond(bytes(.iac, .do, .msdp))
+                case (.iac, .will, .mccp): return .respond(bytes(.iac, .dont, .mccp))
+                case (.iac, .will, .msp): return .respond(bytes(.iac, .do, .msp))
+                case (.iac, .will, .zmp): return .respond(bytes(.iac, .dont, .zmp))
+                case (.iac, .do, .mxp): return .respond(bytes(.iac, .dont, .mxp))
+                case (.iac, .do, .line_mode): return .respond(bytes(.iac, .do, .line_mode))
+                case (.iac, .do, .actp): return .respond(bytes(.iac, .dont, .actp))
+                case (.iac, .do, .ttype): return .respond(bytes(.iac, .will, .ttype))
+                case (.iac, .send, .ttype):
+                    return .respond(
+                        bytes(.iac, .sb, .ttype, .is) + Data("MudClient".utf8) + bytes(.iac, .se)
+                    )
+                case (.iac, .do, .unknown(let byte)): return .respond(bytes(.iac, .wont, .unknown(byte)))
+                case (.iac, .dont, .unknown(let byte)): return .respond(bytes(.iac, .wont, .unknown(byte)))
+                case (.iac, .will, .unknown(let byte)): return .respond(bytes(.iac, .dont, .unknown(byte)))
+                case (.iac, .wont, .unknown(let byte)): return .respond(bytes(.iac, .dont, .unknown(byte)))
+                default: return .ignore
+                }
+            }
+            IAC.commandParser().map { _ in StreamToken.ignore }
+            Prefix(1).map { StreamToken.passthrough($0) }
+        }
+    }
+}
+
+/// Holds the cross-chunk parsing state for ``handleIACCommunication``. Reference semantics let the
+/// (sequentially-invoked) async `map` carry the buffer between `Data` chunks. Access is serialized
+/// by the asynchronous sequence, so the unchecked `Sendable` is safe.
+private final class IACStreamState<P: Parser>: @unchecked Sendable
+where P.Input == Substring, P.Output == IAC.StreamToken {
+    var driver: StreamingParser<P>
+
+    init(_ parser: P) {
+        self.driver = StreamingParser(parser)
+    }
+}
+
 extension AsyncSequence where Self: Sendable, Element == Data {
     func handleIACCommunication(writeToStream: @Sendable @escaping (Data) async throws -> Void) -> AnyAsyncSequence<String> {
-        map { input in
-            if let str = String(data: input, encoding: .isoLatin1) {
-                var commands = [Data]()
-                let parser = Many {
-                    OneOf {
-                        IAC.negotiationParser().map { iac in
-                            switch iac {
-                            case (.iac, .will, .mssp): commands.append([IAC.iac, .dont, .mssp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .will, .msdp): commands.append([IAC.iac, .do, .msdp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .will, .mccp): commands.append([IAC.iac, .dont, .mccp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .will, .msp): commands.append([IAC.iac, .do, .msp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .will, .zmp): commands.append([IAC.iac, .dont, .zmp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .do, .mxp): commands.append([IAC.iac, .dont, .mxp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .do, .line_mode): commands.append([IAC.iac, .do, .line_mode].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .do, .actp): commands.append([IAC.iac, .dont, .actp].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .do, .ttype): commands.append([IAC.iac, .will, .ttype].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .send, .ttype): commands.append([IAC.iac, .sb, .ttype, .is].reduce(into: Data()) { $0.append($1.data) } + Data("MudClient".utf8) + [IAC.iac, .se].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .do, .unknown(let byte)): commands.append([IAC.iac, .wont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .dont, .unknown(let byte)): commands.append([IAC.iac, .wont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .will, .unknown(let byte)): commands.append([IAC.iac, .dont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
-                            case (.iac, .wont, .unknown(let byte)): commands.append([IAC.iac, .dont, .unknown(byte)].reduce(into: Data()) { $0.append($1.data) })
-                            default: break
-                            }
-                            return Substring()
-                        }
-                        IAC.commandParser().map { _ in
-                            return Substring()
-                        }
-                        Prefix(1)
-                    }
-                }
-                let val = try parser.parse(str).joined()
-            
-                for command in commands {
-                    try await writeToStream(command)
-                }
-                return String(val)
+        let state = IACStreamState(IAC.streamTokenParser())
+        return map { input -> String in
+            // Latin-1 maps each byte to a scalar 0...255, so characters line up 1:1 with bytes.
+            guard let chunk = String(data: input, encoding: .isoLatin1).map({ Substring($0) }) else {
+                return ""
             }
-            return ""
+            var output = ""
+            for token in try state.driver.feed(chunk) {
+                switch token {
+                case .passthrough(let text):
+                    output += text
+                case .respond(let data):
+                    try await writeToStream(data)
+                case .ignore:
+                    break
+                }
+            }
+            return output
         }
         .eraseToAnyAsyncSequence()
     }

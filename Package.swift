@@ -18,7 +18,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.70.0"),
         .package(url: "https://github.com/Tyler-Keith-Thompson/Afluent.git", from: "0.6.2"),
         .package(url: "git@github.com:Tyler-Keith-Thompson/DependencyInjection.git", from: "0.0.7"),
-        .package(url: "https://github.com/pointfreeco/swift-parsing.git", from: "0.13.0"),
+        .package(path: "../swift-parsing"),
         .package(url: "git@github.com:JohnSundell/ShellOut.git", from: "2.3.0"),
     ],
     targets: [

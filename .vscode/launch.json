@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MudClient}",
+            "name": "Debug MudClient",
+            "program": "${workspaceFolder:MudClient}/.build/debug/MudClient",
+            "preLaunchTask": "swift: Build Debug MudClient"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MudClient}",
+            "name": "Release MudClient",
+            "program": "${workspaceFolder:MudClient}/.build/release/MudClient",
+            "preLaunchTask": "swift: Build Release MudClient"
+        }
+    ]
+}
