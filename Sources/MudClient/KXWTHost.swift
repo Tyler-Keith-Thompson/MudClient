@@ -284,9 +284,11 @@ final class State {
 
     var room: Room?
     func setRoom(_ room: Room, context: HostScriptContext) throws {
+        let moved = self.room?.id != room.id
         self.room = room
         waypoint = false
         recover = false
+        if moved { Container.aiPilot().noteRoomChange() }
     }
 
     var terrain: Terrain?

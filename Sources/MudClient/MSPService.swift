@@ -235,7 +235,9 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
             let stableHash = Insecure.MD5.hash(data: Data(url.path().utf8))
             let ext = url.pathExtension
             let documentDirectory = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            let fileUrl = documentDirectory.appending(path: stableHash.hexEncodedString()).appendingPathExtension(ext)
+            let cacheDirectory = documentDirectory.appending(path: "MudClient/sounds", directoryHint: .isDirectory)
+            try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            let fileUrl = cacheDirectory.appending(path: stableHash.hexEncodedString()).appendingPathExtension(ext)
             if FileManager.default.fileExists(atPath: fileUrl.path) {
                 return (stableHash.hexEncodedString(), try Data(contentsOf: fileUrl))
             } else {

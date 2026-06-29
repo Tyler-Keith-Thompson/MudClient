@@ -106,3 +106,47 @@ private actor RecordedWrites {
     #expect(result.directives.count == 1)
     #expect(result.output.isEmpty)
 }
+
+@Test func mspCRLFDirectiveIsStripped() throws {
+    // Regression for THE real-world bug: AlterAeon ends lines with CRLF, which Swift treats as
+    // a single grapheme cluster — line splitting on "\n" silently failed and every directive leaked.
+    let buffer = MSPLineBuffer()
+    let r = buffer.process("!!SOUND(move/building4.wav)\r\nAn intersection\r\n")
+    #expect(r.directives.count == 1)
+    #expect(!r.output.contains("!!SOUND"))
+    #expect(r.output.contains("An intersection"))
+}
+
+@Test func mspLoginCaptureSequenceIsStripped() throws {
+    // The exact shape from a raw capture: a no-newline char prompt, then the base-URL directive
+    // arriving "\r\n"-prefixed and terminated by IAC GA (so no trailing newline).
+    let buffer = MSPLineBuffer()
+    _ = buffer.process("Would you like to create a new character?   ")
+    let r = buffer.process("\r\n!!SOUND(Off U=http://www.alteraeon.com/soundpack/wav_v1/ X=2.0)")
+    #expect(r.directives.count == 1)
+    #expect(!r.output.contains("!!SOUND"))
+}
+
+@Test func mspParamlessSoundDirectiveIsStripped() throws {
+    let buffer = MSPLineBuffer()
+    let r = buffer.process("!!SOUND(move/building4.wav)\r\n")
+    #expect(r.directives.count == 1)
+    #expect(r.output.isEmpty)
+}
+
+@Test func replayCapturedRawLog() async throws {
+    // Debug tool: replay a MUD_RAW_LOG capture through the real IAC + MSP path.
+    // Run with: bazel test ... --test_filter=replayCapturedRawLog --test_env=REPLAY_FILE=/path
+    guard let path = ProcessInfo.processInfo.environment["REPLAY_FILE"],
+          let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+        print("REPLAY: set REPLAY_FILE to a capture to run this"); return
+    }
+    let chunks = content.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
+    let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+    let buffer = MSPLineBuffer()
+    var terminal = "", directives = 0
+    for try await text in stream.handleIACCommunication(writeToStream: { _ in }) {
+        let r = buffer.process(text); terminal += r.output; directives += r.directives.count
+    }
+    print("REPLAY chunks=\(chunks.count) directives=\(directives) leakedSOUND=\(terminal.contains("!!SOUND"))")
+}

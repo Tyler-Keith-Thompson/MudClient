@@ -159,22 +159,28 @@ final class MSPLineBuffer: @unchecked Sendable {
 
     @discardableResult
     func process(_ incoming: String) -> (output: String, directives: [(FName, [MSP])]) {
-        carry += incoming
+        // AlterAeon ends lines with CRLF. Swift fuses "\r\n" into a SINGLE grapheme-cluster
+        // Character, so `firstIndex(of: "\n")` never matches and line splitting silently fails —
+        // every directive then leaks unrecognized. Normalize to LF here (the display pipeline
+        // strips \r anyway). Without this, MSP is entirely non-functional against a real server.
+        carry += incoming.replacingOccurrences(of: "\r", with: "")
         var output = ""
         var directives: [(FName, [MSP])] = []
 
-        // Resolve every complete, newline-terminated line.
+        // Resolve every complete, newline-terminated line. We look for the directive in the
+        // *un-emitted remainder* of the line, not just at the line start: AlterAeon sends prompts
+        // with no trailing newline, so a directive often lands appended to an already-emitted
+        // prompt on the same buffer line. The already-shown prefix stays shown; the directive tail
+        // is recognized and stripped.
         while let newline = carry.firstIndex(of: "\n") {
             let line = carry[..<newline]
-            if carryEmitted == 0,
-                let directive = try? MSP.parser.parse(
-                    line.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            {
-                // A whole, not-yet-shown line that is an MSP directive: act on it, show nothing.
+            let remainder = line.dropFirst(carryEmitted)
+            let trimmed = remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty, let directive = try? MSP.parser.parse(trimmed) {
+                // The un-emitted tail of this line is an MSP directive: act on it, show nothing.
                 directives.append(directive)
             } else {
-                output += line.dropFirst(carryEmitted)
+                output += remainder
                 output.append("\n")
             }
             carry = String(carry[carry.index(after: newline)...])
@@ -185,25 +191,23 @@ final class MSPLineBuffer: @unchecked Sendable {
         if carryEmitted < carry.count {
             let pending = carry.dropFirst(carryEmitted)
             let trimmedLeading = pending.drop(while: { $0 == " " || $0 == "\t" })
-            if carryEmitted == 0,
+            let trimmedFull = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedFull.isEmpty,
                 trimmedLeading.hasPrefix(Self.marker),
-                let directive = try? MSP.parser.parse(
-                    carry.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
+                let directive = try? MSP.parser.parse(trimmedFull)
             {
                 // A complete directive that simply hasn't been newline-terminated yet. Act on it
                 // immediately rather than waiting for a newline, otherwise text arriving on the same
                 // line in a later chunk (e.g. a prompt) would contaminate the directive and it would
-                // fail to parse — and so leak to the display — once the line finally ends.
+                // fail to parse — and so leak to the display — once the line finally ends. Keep any
+                // already-emitted prefix (e.g. a prompt) buffered so later lines still align.
                 directives.append(directive)
-                carry = ""
-                carryEmitted = 0
+                carry = String(carry.prefix(carryEmitted))
             } else {
                 let couldBecomeDirective =
-                    carryEmitted == 0
-                    && (trimmedLeading.isEmpty
-                        || Self.marker.hasPrefix(trimmedLeading)
-                        || trimmedLeading.hasPrefix(Self.marker))
+                    trimmedLeading.isEmpty
+                    || Self.marker.hasPrefix(trimmedLeading)
+                    || trimmedLeading.hasPrefix(Self.marker)
                 if !couldBecomeDirective {
                     output += pending
                     carryEmitted = carry.count
@@ -232,7 +236,7 @@ extension AsyncSequence where Self: Sendable, Element == String {
                         }
                     case .t: break
                     case .v(let v):
-                        volume = Float(v / 100)
+                        volume = Float(v) / 100   // NB: Float(v/100) is integer division — 0 for v<100
                     case .l(let numberOfLoops):
                         loops = numberOfLoops
                     case .p: break

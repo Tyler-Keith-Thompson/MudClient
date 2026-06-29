@@ -64,6 +64,7 @@ final class AIPilotService: @unchecked Sendable {
     private var transcript: [String] = []
     private var lastTurn = Date.distantPast
     private var recentCommands: [String] = []
+    private var loopBreaks = 0   // consecutive loop-breaks without a good turn between
     private var requestedScripts: Set<String> = []
     private var resolvedModel: String?
     private var inputSeq = 0   // bumped per observed line; see takeTurn backlog drain
@@ -102,6 +103,19 @@ final class AIPilotService: @unchecked Sendable {
         transcript.append("[you typed] \(c)")
         inputSeq &+= 1
         lastHumanInput = Date()
+        if transcript.count > config.transcriptLines {
+            transcript.removeFirst(transcript.count - config.transcriptLines)
+        }
+        lock.unlock()
+    }
+
+    /// The character actually moved to a different room (KXWT rvnum changed). Drop a
+    /// hard boundary into the transcript so the model stops acting on creatures/items
+    /// that were in the room it just left.
+    func noteRoomChange() {
+        lock.lock()
+        transcript.append("--- [MOVED to a NEW room. Everything above is a PREVIOUS room — creatures and items there are gone; act only on what's below.] ---")
+        inputSeq &+= 1
         if transcript.count > config.transcriptLines {
             transcript.removeFirst(transcript.count - config.transcriptLines)
         }
@@ -229,7 +243,14 @@ final class AIPilotService: @unchecked Sendable {
 
         let messages: [[String: String]]
         lock.lock()
-        let convo = transcript.suffix(config.transcriptLines).joined(separator: "\n")
+        // Show only the CURRENT room's output (everything from the last room-change
+        // marker on). This deterministically stops the model anchoring on creatures or
+        // instructions from a room it already left — a reasoning trap a 14B won't escape
+        // on its own, no matter what the prompt says.
+        let recent = transcript.suffix(config.transcriptLines)
+        let convoLines = recent.lastIndex(where: { $0.contains("MOVED to a NEW room") })
+            .map { Array(recent[$0...]) } ?? Array(recent)
+        let convo = convoLines.joined(separator: "\n")
         let theGoal = goal
         let directive = pendingDirective
         pendingDirective = nil
@@ -274,7 +295,9 @@ final class AIPilotService: @unchecked Sendable {
                 let req = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
                 if !req.isEmpty { scriptRequests.append(req) }
             } else if let r = t.range(of: #"^(CMD|cmd|>)\s*:?\s*"#, options: .regularExpression) {
-                let cmd = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                var cmd = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+                while cmd.hasSuffix(".") { cmd.removeLast() }   // models sometimes write "get all corpse."
+                cmd = cmd.trimmingCharacters(in: .whitespaces)
                 if !cmd.isEmpty { commands.append(cmd) }
             } else if !t.isEmpty {
                 thoughts.append(t)
@@ -282,19 +305,33 @@ final class AIPilotService: @unchecked Sendable {
         }
 
         if !thoughts.isEmpty { echo("[ai] " + thoughts.joined(separator: " ")) }
-        for req in scriptRequests { requestScriptChange(req) }
+        for req in scriptRequests.prefix(1) { requestScriptChange(req) }   // at most one new rule per turn
 
         lock.lock()
         let cap = config.maxCommandsPerTurn
         let threshold = config.loopThreshold
         commands = Array(commands.prefix(cap))
-        // Loop detection across turns: count trailing identical commands.
+        // Loop detection: count trailing identical commands across turns.
         for c in commands {
             if recentCommands.last == c { recentCommands.append(c) }
             else { recentCommands = [c] }
         }
+        let loopCmd = recentCommands.last ?? ""
         let looping = recentCommands.count >= threshold
-        if looping { enabled = false }
+        var disarm = false
+        if looping {
+            loopBreaks += 1
+            recentCommands.removeAll()
+            if loopBreaks >= 2 {
+                disarm = true               // ignored the nudge — really stuck
+                enabled = false
+            } else {
+                // Break the loop WITHOUT stopping: steer it to try something else.
+                pendingDirective = "You've repeated `\(loopCmd)` with no progress — it isn't working (e.g. a blocked exit or wrong target). Do NOT repeat it; try a different action."
+            }
+        } else if !commands.isEmpty {
+            loopBreaks = 0
+        }
         lock.unlock()
 
         if commands.isEmpty {
@@ -303,7 +340,12 @@ final class AIPilotService: @unchecked Sendable {
         }
 
         if looping {
-            echo("[ai] stuck in a loop on `\(commands.last ?? "")` — disarming. `#ai on` to resume.")
+            if disarm {
+                echo("[ai] still repeating `\(loopCmd)` after a nudge — disarming. `#ai on` to resume.")
+            } else {
+                echo("[ai] `\(loopCmd)` isn't working — nudging it to try something else.")
+                noteActivity()              // re-arm so it acts on the correction
+            }
             return
         }
 
@@ -505,27 +547,29 @@ final class AIPilotService: @unchecked Sendable {
 
         Your current goal: \(goal)
 
-        ## Prefer SCRIPT over CMD whenever the behavior is deterministic.
+        ## CMD is your default. SCRIPT is the rare exception for RECURRING reflexes.
 
-        You are slower than the game. Every time you make a per-turn `CMD:` decision \
-        for something mechanical, you waste time and may fall behind. So your PRIMARY \
-        job is to convert deterministic, repeatable reactions into scripts that run \
-        instantly without you. Reserve `CMD:` for genuine in-the-moment judgment.
+        Almost everything you do is a `CMD:`. A `SCRIPT:` creates a PERMANENT standing
+        rule, so request one ONLY for a pattern you will face again and again where the
+        response is always identical. One-time things — tutorial steps, intro prompts,
+        unique NPC dialog, a specific quest action, story beats — happen ONCE, so handle
+        them with `CMD:` and NEVER script them.
 
-        Decision test: "Could I state this as 'WHENEVER X happens, ALWAYS do Y' with \
-        no judgment required?" If yes -> `SCRIPT:` it once and never think about it \
-        again. If it needs situational judgment -> `CMD:` it now.
+        Before any `SCRIPT:`, ALL of these must be true:
+          1. It will RECUR many times (not a one-off event).
+          2. The response is ALWAYS the same, with zero judgment.
+          3. You have actually SEEN the pattern happen — don't script hypotheticals.
+        If any one is false, use `CMD:`.
 
-        SCRIPT these (deterministic reflexes):
-        - "Whenever a creature dies / I see '... is DEAD!', loot the corpse: get all corpse."
-        - "Whenever I see 'kxwt_supported', send 'set kxwt'."
-        - "Whenever my health drops below 30%, flee."
-        - "Gag/hide spammy lines like X."
-        - "Make an alias 'rec' that triggers recovery."
-        The client's scripts can match game lines (triggers), match my own typed input \
-        (aliases), hide lines (gags), send commands, and call helpers like recover() \
-        and dump_state(). Describe the rule in plain English; a developer agent writes \
-        the Lua and the client hot-reloads it.
+        Good SCRIPT candidates (rare): "loot every corpse after a kill: get all corpse",
+        "flee whenever health drops below 30%". That's about it for most sessions.
+        Do NOT script: tutorial/intro steps, one-time messages, quest-specific actions,
+        or anything you're merely guessing might repeat.
+
+        At most ONE `SCRIPT:` per turn, and only when it clearly earns a permanent rule.
+        Scripts can match game lines (triggers), match your typed input (aliases), hide
+        lines (gags), and send commands; describe the rule in plain English and a
+        developer agent writes the Lua.
 
         CMD these (need judgment): which way to explore, whether to engage or avoid a \
         specific mob, when to retreat strategically, quest/spend/training choices.
@@ -539,6 +583,20 @@ final class AIPilotService: @unchecked Sendable {
         - If a reflex you already requested hasn't taken effect yet, don't re-request it.
         - If there's nothing worth doing, reply with reasoning and NO directives.
         - Never invent output you didn't see. Base decisions only on the state and log.
+        - If the game gives an explicit instruction (a tutorial/help prompt telling you \
+        to cast a spell, type a command, go somewhere), FOLLOW it — don't wander off.
+        - If a command just failed ("Alas, you cannot go that way", "you can't"), do NOT \
+        repeat it. Pick a different exit or action. Repeating a failed command is useless.
+        - Act on your CURRENT room only — the most recent room description. A line reading \
+        "MOVED to a NEW room" means everything above it is a PAST room; creatures and \
+        items there are GONE. Never cast at or attack something from a room you've left.
+        - Finish what a room demands BEFORE leaving it. If a creature blocks your way and \
+        the game says to fight/cast on it, do that FIRST — do not walk off and leave it.
+        - To attack or cast on a creature you must be in the SAME room as it. If it was in \
+        a room you left (above a "MOVED to a NEW room" line, or any earlier room), the \
+        cast will FAIL from here — MOVE back toward that room first (e.g. reverse your \
+        last step), THEN cast once you're there. "isn't a valid target" / "isn't here" \
+        means the creature is not in your current room.
 
         Co-driving: a human is sharing control of this character. Lines marked \
         `[you typed]` are commands the HUMAN just issued. Respect their intent — \
