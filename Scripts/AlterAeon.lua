@@ -11,10 +11,6 @@
 --   recover()         toggle the recovery routine
 --   dump_state()      echo the parsed game state
 
-trigger("(.+) is DEAD!", function(line)
-    send("cry")
-end)
-
 trigger("^kxwt_supported$", function()
     send("set kxwt")
 end)

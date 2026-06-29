@@ -562,6 +562,36 @@ final class KXWTHost {
         dump(state, to: &dumped)
         HostScriptContext().echo(dumped)
     }
+
+    /// A compact, model-friendly snapshot of the parsed state (used by AIPilotService).
+    func summary() -> String {
+        var out: [String] = []
+        out.append("name: \(state.characterName ?? "unknown")")
+        if let p = state.prompt {
+            out.append("hp: \(p.currentHealth)/\(p.maxHealth), mana: \(p.currentMana)/\(p.maxMana), stamina: \(p.currentStamina)/\(p.maxStamina)\(p.ready ? " (ready)" : "")")
+        }
+        if let pos = state.position {
+            let s: String
+            switch pos {
+            case .standing: s = "standing"
+            case .sitting: s = "sitting"
+            case .sleeping: s = "sleeping"
+            case .unknown(let u): s = u
+            }
+            out.append("position: \(s)")
+        }
+        if let rs = state.roomShort { out.append("room: \(rs)") }
+        if let a = state.area { out.append("area: \(a.printableAreaName)") }
+        if let t = state.terrain { out.append("terrain: \(String(describing: t).lowercased())") }
+        switch state.combatStatus {
+        case .notFighting: out.append("combat: not fighting")
+        case .fighting(let percent, _, let name): out.append("combat: fighting \(name) (\(percent)%)")
+        }
+        if !state.activeSpells.isEmpty { out.append("active spells: \(state.activeSpells.joined(separator: ", "))") }
+        if let g = state.gold { out.append("gold: \(g)") }
+        out.append("recovery mode: \(state.recover ? "on" : "off")")
+        return out.joined(separator: "\n")
+    }
 }
 
 extension Container {

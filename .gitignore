@@ -12,3 +12,7 @@ DerivedData/
 MODULE.bazel.lock
 user.bazelrc
 /swift/.build
+
+# AI pilot runtime artifacts
+Scripts/.ai-script-requests.jsonl
+ai-traces.jsonl

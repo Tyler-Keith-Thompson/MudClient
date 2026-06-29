@@ -54,6 +54,16 @@ final class LuaScriptEngine: @unchecked Sendable {
         try lua.runFile(path)
     }
 
+    /// Drop all registered triggers/aliases/gags. Used before re-running a script
+    /// file so a hot-reload doesn't stack duplicate rules. The host builtins
+    /// (send/echo/trigger/...) live on the lua_State and survive.
+    func clearRules() {
+        lock.lock(); defer { lock.unlock() }
+        lineRules.removeAll()
+        aliasRules.removeAll()
+        gags.removeAll()
+    }
+
     // MARK: - Dispatch
 
     /// Fire any matching line triggers, then report whether the line should be gagged.

@@ -67,13 +67,40 @@ final class ScriptInterpreter {
         }
     }
 
+    /// `#ai ...` — control the local-LLM pilot (see AIPilotService). Everything
+    /// after `ai` is handed to the pilot verbatim (`on`, `off`, `goal <text>`, ...).
+    lazy var ai = Parse {
+        "ai"
+        Optionally {
+            " "
+            Rest().map(String.init)
+        }
+    }
+    .map { (arg: String?) in
+        Container.aiPilot().command(arg ?? "")
+    }
+
     var parser: some Parser<Substring, Void> {
         Parse {
             String.scriptIndicator
             OneOf {
                 echo
                 load
+                ai
             }
+        }
+    }
+
+    /// Re-run a script file live, clearing existing rules first so triggers/aliases
+    /// aren't duplicated. Used after the AI pilot's script-edit loop rewrites the file.
+    func reload(_ scriptName: String = "AlterAeon") {
+        let path = "Scripts/\(scriptName).lua"
+        engine.clearRules()
+        do {
+            try engine.load(path: path)
+            Container.terminalService().print("[ai] reloaded \(path)")
+        } catch {
+            Container.terminalService().print("[ai] failed to reload \(path): \(error)")
         }
     }
 }
@@ -116,10 +143,15 @@ extension AsyncSequence where Self: Sendable, Element == String {
                 .replacingOccurrences(of: "\r", with: "")
                 .components(separatedBy: CharacterSet.newlines)
             let engine = Container.scriptInterpreter().engine
+            let pilot = Container.aiPilot()
             var out = [String]()
             for line in lines where !engine.processLine(line) {
                 out.append(line)
+                pilot.observe(line)
             }
+            // Output arrived; (re)arm the pilot's idle countdown so it takes a turn
+            // once the server's burst of output settles.
+            pilot.noteActivity()
             return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()
