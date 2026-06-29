@@ -37,6 +37,7 @@ actor Connection: AsyncSequence {
     nonisolated func makeAsyncIterator() -> AnyAsyncSequence<String>.AsyncIterator {
         stream.captureRaw()
             .handleIACCommunication(writeToStream: send)
+            .normalizeLineEndings()
             .processMSP()
             .processServerOutputForScripts()
             .eraseToAnyAsyncSequence()

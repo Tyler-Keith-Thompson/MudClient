@@ -16,3 +16,6 @@ user.bazelrc
 # AI pilot runtime artifacts
 Scripts/.ai-script-requests.jsonl
 ai-traces.jsonl
+
+# raw capture (debug, ring-buffered)
+mud_raw.log

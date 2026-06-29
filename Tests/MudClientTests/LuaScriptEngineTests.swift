@@ -33,7 +33,10 @@ import Testing
     #expect(engine.processLine("kxwt_prompt 100 100") == true)
 }
 
-@Test func alterAeonLuaScriptLoadsAndDispatches() throws {
+@Test func luaKxwtPatternDispatches() throws {
+    // Mocks the AlterAeon kxwt wiring inline rather than loading the real Scripts/AlterAeon.lua,
+    // which is game content that may change. This tests the engine's trigger/gag/host-forwarding
+    // mechanics, independent of any one script's contents.
     let engine = LuaScriptEngine()
     var sent: [String] = []
     var kxwtPayloads: [String] = []
@@ -42,15 +45,12 @@ import Testing
         if case .string(let s)? = args.first { kxwtPayloads.append(s) }
         return []
     }
-    engine.register("recover") { _ in [] }
-    engine.register("dump_state") { _ in [] }
 
-    // Load the actual ported script from disk. Resolve relative to this source file (not the
-    // working directory) so it works under both `swift test` and `bazel test`.
-    try engine.load(path: repoPath("Scripts/AlterAeon.lua"))
-
-    #expect(engine.processLine("A clay man is DEAD!") == false)
-    #expect(sent.contains("cry"))
+    try engine.load(source: #"""
+        trigger("^kxwt_supported$", function() send("set kxwt") end)
+        trigger("^kxwt_(.+)$", function(line, payload) kxwt(payload) end)
+        gag("^kxwt_")
+    """#)
 
     _ = engine.processLine("kxwt_supported")
     #expect(sent.contains("set kxwt"))
@@ -72,15 +72,4 @@ import Testing
     #expect(engine.processAlias("gold") == true)
     #expect(engine.processAlias("look") == false)
     #expect(sent == ["score gold"])
-}
-
-/// Resolves a repository-relative path using this source file's location, so disk-backed test
-/// fixtures load regardless of the test runner's working directory (SwiftPM vs. Bazel).
-private func repoPath(_ relative: String, file: StaticString = #filePath) -> String {
-    URL(fileURLWithPath: "\(file)")
-        .deletingLastPathComponent()  // Tests/MudClientTests/
-        .deletingLastPathComponent()  // Tests/
-        .deletingLastPathComponent()  // <repo root>
-        .appendingPathComponent(relative)
-        .path
 }

@@ -41,6 +41,7 @@ final class AIPilotService: @unchecked Sendable {
         var maxTokens = 256
         var loopThreshold = 4       // identical commands in a row => disarm
         var humanGrace: TimeInterval = 4.0   // after you type, the pilot waits this long before acting
+        var maxStaleSkips = 2       // re-read this many times if the world moved mid-request, then act anyway
         var traceFile: String? = "ai-traces.jsonl"   // on by default; nil = off
 
         static func fromEnvironment() -> Config {
@@ -65,6 +66,7 @@ final class AIPilotService: @unchecked Sendable {
     private var lastTurn = Date.distantPast
     private var recentCommands: [String] = []
     private var loopBreaks = 0   // consecutive loop-breaks without a good turn between
+    private var staleSkips = 0   // consecutive turns dropped because the world moved mid-request
     private var requestedScripts: Set<String> = []
     private var resolvedModel: String?
     private var inputSeq = 0   // bumped per observed line; see takeTurn backlog drain
@@ -278,6 +280,24 @@ final class AIPilotService: @unchecked Sendable {
 
         do {
             let reply = try await complete(messages: messages)
+            // Staleness gate: if the game streamed new output while we were thinking, the plan we
+            // just produced is for an old situation (e.g. we decided to keep hitting a mob that has
+            // since died). Throw it away and re-read fresh — up to maxStaleSkips times, so a busy
+            // fight still eventually acts instead of livelocking.
+            lock.lock()
+            let moved = inputSeq != snapSeq
+            let suppress = moved && staleSkips < config.maxStaleSkips
+            if suppress {
+                staleSkips += 1
+                if pendingDirective == nil { pendingDirective = directive }  // don't lose a one-off note
+            } else {
+                staleSkips = 0
+            }
+            lock.unlock()
+            if suppress {
+                echo("[ai] (situation changed while thinking — re-reading before acting)")
+                return   // the defer's backlog-drain re-arms a fresh turn
+            }
             logTrace(messages: messages, reply: reply)
             handleReply(reply)
         } catch {
@@ -295,9 +315,12 @@ final class AIPilotService: @unchecked Sendable {
                 let req = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
                 if !req.isEmpty { scriptRequests.append(req) }
             } else if let r = t.range(of: #"^(CMD|cmd|>)\s*:?\s*"#, options: .regularExpression) {
-                var cmd = String(t[r.upperBound...]).trimmingCharacters(in: .whitespaces)
-                while cmd.hasSuffix(".") { cmd.removeLast() }   // models sometimes write "get all corpse."
-                cmd = cmd.trimmingCharacters(in: .whitespaces)
+                // Strip markdown the model wraps commands in (`backticks`, *asterisks*) and a
+                // trailing sentence period — otherwise the MUD gets "`attack golem`" verbatim.
+                let fences = CharacterSet(charactersIn: " `*")
+                var cmd = String(t[r.upperBound...]).trimmingCharacters(in: fences)
+                while cmd.hasSuffix(".") { cmd.removeLast() }
+                cmd = cmd.trimmingCharacters(in: fences)
                 if !cmd.isEmpty { commands.append(cmd) }
             } else if !t.isEmpty {
                 thoughts.append(t)

@@ -23,8 +23,12 @@ final class RawCapture: @unchecked Sendable {
     private static let keep = 1000
 
     init?() {
-        guard let path = ProcessInfo.processInfo.environment["MUD_RAW_LOG"], !path.isEmpty else { return nil }
-        url = URL(fileURLWithPath: path)
+        // On by default to `mud_raw.log` (ring-buffered, so bounded) — a capture is always ready
+        // for debugging without fiddling with env vars. Override the path with MUD_RAW_LOG, or
+        // disable entirely with MUD_RAW_LOG=off (or "").
+        let env = ProcessInfo.processInfo.environment["MUD_RAW_LOG"]
+        if env == "" || env?.lowercased() == "off" { return nil }
+        url = URL(fileURLWithPath: env ?? "mud_raw.log")
         try? Data().write(to: url)   // start each session fresh
     }
 
@@ -62,13 +66,36 @@ extension AsyncSequence where Self: Sendable, Element == Data {
     }
 }
 
+/// Collapses every line-ending convention — CRLF, lone CR (classic Mac), and LF — to a single
+/// LF, statefully across chunk boundaries. This is a generic MUD client, not AlterAeon-specific,
+/// so we don't assume CRLF. Iterating Unicode scalars (not Characters) is essential: Swift fuses
+/// "\r\n" into ONE Character, which is exactly the trap that made `firstIndex(of: "\n")` silently
+/// miss CRLF lines downstream. A trailing CR is held as `pendingCR` until the next chunk so a CRLF
+/// split across two TCP reads becomes one LF, not two.
+final class LineEndingNormalizer: @unchecked Sendable {
+    private var pendingCR = false
+
+    func normalize(_ s: String) -> String {
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(s.unicodeScalars.count)
+        for scalar in s.unicodeScalars {
+            if pendingCR {
+                pendingCR = false
+                out.append("\n")              // the CR ended a line
+                if scalar == "\n" { continue } // CRLF: absorb the following LF
+            }
+            if scalar == "\r" { pendingCR = true }   // wait to see if an LF follows
+            else { out.append(scalar) }
+        }
+        return String(out)
+    }
+}
+
 extension AsyncSequence where Self: Sendable, Element == String {
-    /// Normalize line endings to LF once, centrally, right after IAC decoding. Swift fuses
-    /// "\r\n" into a single grapheme-cluster Character, so any `firstIndex(of: "\n")`,
-    /// `contains("\n")`, or split-on-"\n" downstream silently misses CRLF-terminated lines
-    /// (the MSP bug). Stripping \r (rather than mapping CRLF->LF) is correct even when a chunk
-    /// boundary splits "\r" from "\n". Downstream display already expects \r-free text.
+    /// Normalize CR/CRLF/LF to LF once, centrally, right after IAC decoding, so no downstream
+    /// code can hit Swift's "\r\n is one grapheme" trap when splitting/searching on "\n".
     func normalizeLineEndings() -> AnyAsyncSequence<String> {
-        map { $0.replacingOccurrences(of: "\r", with: "") }.eraseToAnyAsyncSequence()
+        let normalizer = LineEndingNormalizer()
+        return map { normalizer.normalize($0) }.eraseToAnyAsyncSequence()
     }
 }
