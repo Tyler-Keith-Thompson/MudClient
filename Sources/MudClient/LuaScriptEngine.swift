@@ -119,14 +119,23 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     // MARK: - Dispatch
 
-    /// Fire any matching line triggers, then report whether the line should be gagged.
+    /// Strips ANSI/VT control sequences (CSI — colours, cursor moves, etc.) so triggers and gags match
+    /// the plain text a player sees, not the escape codes. Without this, a coloured line like
+    /// "\u{1B}[37m\u{1B}[0m[Exits: west ]" fails a `^\[Exits:` trigger. Display output keeps its colour;
+    /// only the copy used for matching is cleaned.
+    private let ansiSequence = try! Regex("\u{1B}\\[[0-9;?]*[ -/]*[@-~]")
+
+    /// Fire any matching line triggers, then report whether the line should be gagged. Triggers and
+    /// gags see the ANSI-stripped line (and capture groups from it); the caller still displays the
+    /// original, coloured line.
     func processLine(_ line: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        let clean = line.replacing(ansiSequence, with: "")
         for rule in lineRules {
-            guard let match = try? rule.regex.firstMatch(in: line) else { continue }
-            try? lua.call(rule.handler, callArgs(line: line, match: match))
+            guard let match = try? rule.regex.firstMatch(in: clean) else { continue }
+            try? lua.call(rule.handler, callArgs(line: clean, match: match))
         }
-        return gags.contains { (try? $0.firstMatch(in: line)) != nil }
+        return gags.contains { (try? $0.firstMatch(in: clean)) != nil }
     }
 
     /// Fire the first matching alias for user input. Returns true if one matched

@@ -107,8 +107,10 @@ end)
 trigger([[^kxwt_rshort (.+)$]], function(_, n) state.room_name = n end)
 
 -- Exits are NOT a kxwt field — they print as a plain "[Exits: east west ]" line at the end of the
--- room description. Parse the direction words into a set the HUD compass reads. (Level-1 long string
--- [=[ ]=] so the pattern's own ] brackets don't close it.)
+-- room description. Parse the direction words into a set the HUD compass reads. (ANSI colour codes
+-- are stripped upstream before triggers match, so the ^-anchor is safe even for the coloured
+-- auto-look form emitted when moving.) Level-1 long string [=[ ]=] so the pattern's own ] doesn't
+-- close it.
 trigger([=[^\[Exits: (.*?)\]]=], function(_, list)
   local set = {}
   for dir in (list or ""):gmatch("%a+") do set[dir:lower()] = true end

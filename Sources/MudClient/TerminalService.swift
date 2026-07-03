@@ -210,12 +210,16 @@ final class TerminalService {
 
     func print(_ string: Any, terminator: String = "\n") {
         guard let l = layout() else { return }
+        // Hide the cursor for the whole repaint so its round-trip — up to the output region to write,
+        // then back down to the input line — happens invisibly (that jump was the flicker).
+        writeToStandardOut(data: Data("\u{1B}[?25l".utf8))
         if lastSignature != signature(l) { setupScreen() }     // band geometry changed → resize region
         var out = "\u{1B}8"                                 // restore output cursor (bottom of region)
         out += String(describing: string) + terminator      // write output; scrolls within the region
         out += "\u{1B}7"                                     // save the new output cursor
         writeToStandardOut(data: Data(out.utf8))
-        drawFurniture(l)
+        drawFurniture(l)                                    // repaint furniture; parks cursor on input
+        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))  // show the cursor, now back at the input line
     }
 
     /// Paint one server/output chunk. Empty chunks (a fully-gagged status batch) carry no text but a
@@ -231,8 +235,9 @@ final class TerminalService {
     /// Repaint all furniture without writing any output (e.g. after a panel-only state change).
     func refreshFurniture() {
         guard let l = layout() else { return }
-        if lastSignature != signature(l) { setupScreen(); return }
-        drawFurniture(l)
+        writeToStandardOut(data: Data("\u{1B}[?25l".utf8))   // hide cursor during the repaint (no flicker)
+        if lastSignature != signature(l) { setupScreen() } else { drawFurniture(l) }
+        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))   // show it, back on the input line
     }
 
     /// Paint the top panel, the scroll-frame dividers, the bottom status panel, and the input line —
@@ -276,6 +281,7 @@ final class TerminalService {
     /// a weird state on exit.
     func teardownScreen() {
         var out = "\u{1B}[r"                                // reset scroll region to the full screen
+        out += "\u{1B}[?25h"                                // make sure the cursor is visible again
         out += "\u{1B}[\(getTerminalHeight() ?? 24);1H"
         writeToStandardOut(data: Data(out.utf8))
     }

@@ -103,16 +103,8 @@ local function spells_row()
   return { spans = spans }
 end
 
-local function update_bottom()
-  panel.render({
-    vitals_row(),   -- HP | MP | MV | target, all on one line
-    spells_row(),
-  })
-end
-
--- ============================ TOP PANEL (reference) ============================
-
--- Exits compass rose, rendered across the three room rows as a fixed-width right column.
+-- Exits compass rose (three lines) + the room name — kept at the BOTTOM, next to where you act, so
+-- you glance at exits constantly.
 local function dir_span(label, on)
   return { text = label, fg = on and "brightgreen" or "brightblack", bold = on or false }
 end
@@ -127,16 +119,35 @@ local function compass(line)
   return { spans = rows[line], width = 12, align = "center" }
 end
 
+-- Room name (+ up/down exits as badges, since the rose only covers the compass directions).
+local function room_name_cell()
+  local e = state.exits or {}
+  local spans = { { text = "◈ ", fg = "cyan" }, { text = state.room_name or "somewhere", fg = "brightcyan" } }
+  if e.up then spans[#spans + 1] = { text = "  ⤒U", fg = "brightgreen" } end
+  if e.down then spans[#spans + 1] = { text = "  ⤓D", fg = "brightgreen" } end
+  return { spans = spans }
+end
+
+local function update_bottom()
+  local blank = { text = "" }
+  panel.render({
+    vitals_row(),   -- HP | MP | MV | target, all on one line
+    spells_row(),
+    { cols = { blank,             compass(1) } },   -- room name sits centred beside the compass rose
+    { cols = { room_name_cell(),  compass(2) } },
+    { cols = { blank,             compass(3) } },
+  })
+end
+
+-- ============================ TOP PANEL (reference) ============================
+
 -- span-list builders for the reference block (packed onto flex lines)
 local function place_spans()
-  local e = state.exits or {}
   local b = {}
   if state.position then b[#b + 1] = { text = "(" .. state.position .. ")", dim = true } end
   if state.walkdir and WALK_ARROW[state.walkdir] then
     b[#b + 1] = { text = "  " .. WALK_ARROW[state.walkdir], fg = "brightblue" }
   end
-  if e.up then b[#b + 1] = { text = "  ⤒U", fg = "brightgreen" } end
-  if e.down then b[#b + 1] = { text = "  ⤓D", fg = "brightgreen" } end
   if state.gold then b[#b + 1] = { text = string.format("  %dg", state.gold), fg = "yellow" } end
   return b
 end
@@ -173,18 +184,13 @@ local function effects_spans()
   return b
 end
 
--- Room / navigation block: three lines with the compass on the right.
+-- Reference block: area + position/gold, then time/weather + progress/effects. (Room name and the
+-- exits compass live at the bottom now; area name stays up here.)
 local function reference_rows()
   local sep = { { text = "   " } }
-  local name = { spans = { { text = "◈ ", fg = "cyan" },
-                           { text = state.room_name or "somewhere", fg = "brightcyan" } } }
   local area_place = { spans = cat({ { text = state.area or "", dim = true } }, sep, place_spans()) }
   local env_prog = { spans = cat(env_spans(), sep, exp_spans(), sep, effects_spans()) }
-  return {
-    { cols = { name, compass(1) } },
-    { cols = { area_place, compass(2) } },
-    { cols = { env_prog, compass(3) } },
-  }
+  return { area_place, env_prog }
 end
 
 -- Group roster (you + pets/groupmates): compact HP/MP/MV bars per member.
