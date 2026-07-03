@@ -1,0 +1,175 @@
+================ scheduled dual-train start: Tue Jun 30 03:00:05 MDT 2026 ================
+---- [moe] training: Tue Jun 30 03:00:09 MDT 2026 ----
+Loading pretrained model
+Loading datasets
+Training
+Trainable parameters: 0.740% (256.449M/34660.609M)
+Starting training..., iters: 600
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:01<00:30,  1.25s/it]Calculating loss...:   8%|▊         | 2/25 [00:01<00:17,  1.28it/s]Calculating loss...:  12%|█▏        | 3/25 [00:02<00:17,  1.29it/s]Calculating loss...:  16%|█▌        | 4/25 [00:03<00:15,  1.35it/s]Calculating loss...:  20%|██        | 5/25 [00:03<00:15,  1.33it/s]Calculating loss...:  24%|██▍       | 6/25 [00:04<00:13,  1.36it/s]Calculating loss...:  28%|██▊       | 7/25 [00:05<00:13,  1.33it/s]Calculating loss...:  32%|███▏      | 8/25 [00:06<00:12,  1.34it/s]Calculating loss...:  36%|███▌      | 9/25 [00:06<00:11,  1.38it/s]Calculating loss...:  40%|████      | 10/25 [00:07<00:10,  1.41it/s]Calculating loss...:  44%|████▍     | 11/25 [00:08<00:10,  1.33it/s]Calculating loss...:  48%|████▊     | 12/25 [00:09<00:10,  1.22it/s]Calculating loss...:  52%|█████▏    | 13/25 [00:10<00:09,  1.23it/s]Calculating loss...:  56%|█████▌    | 14/25 [00:10<00:08,  1.29it/s]Calculating loss...:  60%|██████    | 15/25 [00:11<00:07,  1.34it/s]Calculating loss...:  64%|██████▍   | 16/25 [00:12<00:07,  1.25it/s]Calculating loss...:  68%|██████▊   | 17/25 [00:13<00:06,  1.26it/s]Calculating loss...:  72%|███████▏  | 18/25 [00:13<00:04,  1.40it/s]Calculating loss...:  76%|███████▌  | 19/25 [00:14<00:04,  1.42it/s]Calculating loss...:  80%|████████  | 20/25 [00:15<00:03,  1.33it/s]Calculating loss...:  84%|████████▍ | 21/25 [00:16<00:03,  1.31it/s]Calculating loss...:  88%|████████▊ | 22/25 [00:16<00:02,  1.25it/s]Calculating loss...:  92%|█████████▏| 23/25 [00:17<00:01,  1.48it/s]Calculating loss...:  96%|█████████▌| 24/25 [00:18<00:00,  1.47it/s]Calculating loss...: 100%|██████████| 25/25 [00:18<00:00,  1.44it/s]Calculating loss...: 100%|██████████| 25/25 [00:18<00:00,  1.33it/s]
+Iter 1: Val loss 3.944, Val took 18.781s
+Iter 10: Train loss 2.477, Learning Rate 1.000e-05, It/sec 0.111, Tokens/sec 43.640, Trained Tokens 3915, Peak mem 32.107 GB
+Iter 20: Train loss 1.448, Learning Rate 1.000e-05, It/sec 0.199, Tokens/sec 91.158, Trained Tokens 8497, Peak mem 32.107 GB
+Iter 30: Train loss 1.451, Learning Rate 1.000e-05, It/sec 0.220, Tokens/sec 80.579, Trained Tokens 12156, Peak mem 32.107 GB
+Iter 40: Train loss 1.581, Learning Rate 1.000e-05, It/sec 0.169, Tokens/sec 70.619, Trained Tokens 16342, Peak mem 33.063 GB
+Iter 50: Train loss 1.484, Learning Rate 1.000e-05, It/sec 0.174, Tokens/sec 73.021, Trained Tokens 20528, Peak mem 34.034 GB
+Iter 60: Train loss 1.164, Learning Rate 1.000e-05, It/sec 0.263, Tokens/sec 96.919, Trained Tokens 24212, Peak mem 34.034 GB
+Iter 70: Train loss 1.240, Learning Rate 1.000e-05, It/sec 0.316, Tokens/sec 97.410, Trained Tokens 27297, Peak mem 34.034 GB
+Iter 80: Train loss 1.062, Learning Rate 1.000e-05, It/sec 0.236, Tokens/sec 100.902, Trained Tokens 31564, Peak mem 34.034 GB
+Iter 90: Train loss 0.865, Learning Rate 1.000e-05, It/sec 0.249, Tokens/sec 88.626, Trained Tokens 35121, Peak mem 34.034 GB
+Iter 100: Train loss 1.106, Learning Rate 1.000e-05, It/sec 0.259, Tokens/sec 97.205, Trained Tokens 38880, Peak mem 34.049 GB
+Iter 100: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/0000100_adapters.safetensors.
+Iter 110: Train loss 0.972, Learning Rate 1.000e-05, It/sec 0.253, Tokens/sec 99.193, Trained Tokens 42794, Peak mem 34.049 GB
+Iter 120: Train loss 1.069, Learning Rate 1.000e-05, It/sec 0.243, Tokens/sec 99.743, Trained Tokens 46891, Peak mem 35.075 GB
+Iter 130: Train loss 1.474, Learning Rate 1.000e-05, It/sec 0.244, Tokens/sec 100.015, Trained Tokens 50997, Peak mem 35.075 GB
+Iter 140: Train loss 0.807, Learning Rate 1.000e-05, It/sec 0.259, Tokens/sec 99.439, Trained Tokens 54839, Peak mem 35.075 GB
+Iter 150: Train loss 1.048, Learning Rate 1.000e-05, It/sec 0.257, Tokens/sec 98.242, Trained Tokens 58668, Peak mem 35.075 GB
+Iter 160: Train loss 0.843, Learning Rate 1.000e-05, It/sec 0.242, Tokens/sec 97.726, Trained Tokens 62708, Peak mem 35.075 GB
+Iter 170: Train loss 0.775, Learning Rate 1.000e-05, It/sec 0.225, Tokens/sec 99.963, Trained Tokens 67144, Peak mem 35.075 GB
+Iter 180: Train loss 1.283, Learning Rate 1.000e-05, It/sec 0.241, Tokens/sec 99.802, Trained Tokens 71279, Peak mem 35.075 GB
+Iter 190: Train loss 0.999, Learning Rate 1.000e-05, It/sec 0.282, Tokens/sec 97.542, Trained Tokens 74739, Peak mem 35.075 GB
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:00<00:20,  1.20it/s]Calculating loss...:   8%|▊         | 2/25 [00:01<00:17,  1.32it/s]Calculating loss...:  12%|█▏        | 3/25 [00:02<00:16,  1.33it/s]Calculating loss...:  16%|█▌        | 4/25 [00:02<00:13,  1.55it/s]Calculating loss...:  20%|██        | 5/25 [00:03<00:14,  1.35it/s]Calculating loss...:  24%|██▍       | 6/25 [00:04<00:14,  1.36it/s]Calculating loss...:  28%|██▊       | 7/25 [00:04<00:11,  1.51it/s]Calculating loss...:  32%|███▏      | 8/25 [00:05<00:10,  1.63it/s]Calculating loss...:  36%|███▌      | 9/25 [00:06<00:10,  1.53it/s]Calculating loss...:  40%|████      | 10/25 [00:06<00:08,  1.70it/s]Calculating loss...:  44%|████▍     | 11/25 [00:07<00:08,  1.64it/s]Calculating loss...:  48%|████▊     | 12/25 [00:08<00:09,  1.44it/s]Calculating loss...:  52%|█████▏    | 13/25 [00:08<00:08,  1.46it/s]Calculating loss...:  56%|█████▌    | 14/25 [00:09<00:07,  1.48it/s]Calculating loss...:  60%|██████    | 15/25 [00:10<00:07,  1.38it/s]Calculating loss...:  64%|██████▍   | 16/25 [00:11<00:06,  1.39it/s]Calculating loss...:  68%|██████▊   | 17/25 [00:11<00:06,  1.30it/s]Calculating loss...:  72%|███████▏  | 18/25 [00:12<00:05,  1.37it/s]Calculating loss...:  76%|███████▌  | 19/25 [00:13<00:04,  1.34it/s]Calculating loss...:  80%|████████  | 20/25 [00:14<00:03,  1.29it/s]Calculating loss...:  84%|████████▍ | 21/25 [00:14<00:03,  1.27it/s]Calculating loss...:  88%|████████▊ | 22/25 [00:15<00:02,  1.33it/s]Calculating loss...:  92%|█████████▏| 23/25 [00:16<00:01,  1.32it/s]Calculating loss...:  96%|█████████▌| 24/25 [00:17<00:00,  1.31it/s]Calculating loss...: 100%|██████████| 25/25 [00:17<00:00,  1.36it/s]Calculating loss...: 100%|██████████| 25/25 [00:17<00:00,  1.40it/s]
+Iter 200: Val loss 0.838, Val took 17.882s
+Iter 200: Train loss 1.025, Learning Rate 1.000e-05, It/sec 0.249, Tokens/sec 98.513, Trained Tokens 78693, Peak mem 35.075 GB
+Iter 200: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/0000200_adapters.safetensors.
+Iter 210: Train loss 0.545, Learning Rate 1.000e-05, It/sec 0.263, Tokens/sec 97.938, Trained Tokens 82418, Peak mem 35.075 GB
+Iter 220: Train loss 0.804, Learning Rate 1.000e-05, It/sec 0.256, Tokens/sec 99.207, Trained Tokens 86296, Peak mem 35.075 GB
+Iter 230: Train loss 0.829, Learning Rate 1.000e-05, It/sec 0.257, Tokens/sec 86.382, Trained Tokens 89658, Peak mem 35.075 GB
+Iter 240: Train loss 1.043, Learning Rate 1.000e-05, It/sec 0.247, Tokens/sec 96.670, Trained Tokens 93574, Peak mem 35.075 GB
+Iter 250: Train loss 1.196, Learning Rate 1.000e-05, It/sec 0.265, Tokens/sec 98.396, Trained Tokens 97289, Peak mem 35.075 GB
+Iter 260: Train loss 0.977, Learning Rate 1.000e-05, It/sec 0.242, Tokens/sec 98.129, Trained Tokens 101344, Peak mem 35.075 GB
+Iter 270: Train loss 0.632, Learning Rate 1.000e-05, It/sec 0.249, Tokens/sec 99.267, Trained Tokens 105326, Peak mem 35.075 GB
+Iter 280: Train loss 1.040, Learning Rate 1.000e-05, It/sec 0.317, Tokens/sec 96.451, Trained Tokens 108366, Peak mem 35.075 GB
+Iter 290: Train loss 0.583, Learning Rate 1.000e-05, It/sec 0.270, Tokens/sec 98.449, Trained Tokens 112007, Peak mem 35.075 GB
+Iter 300: Train loss 0.519, Learning Rate 1.000e-05, It/sec 0.291, Tokens/sec 95.749, Trained Tokens 115295, Peak mem 35.075 GB
+Iter 300: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/0000300_adapters.safetensors.
+Iter 310: Train loss 0.635, Learning Rate 1.000e-05, It/sec 0.279, Tokens/sec 96.490, Trained Tokens 118756, Peak mem 35.075 GB
+Iter 320: Train loss 0.665, Learning Rate 1.000e-05, It/sec 0.300, Tokens/sec 96.269, Trained Tokens 121965, Peak mem 35.075 GB
+Iter 330: Train loss 0.463, Learning Rate 1.000e-05, It/sec 0.177, Tokens/sec 77.980, Trained Tokens 126361, Peak mem 36.085 GB
+Iter 340: Train loss 0.773, Learning Rate 1.000e-05, It/sec 0.292, Tokens/sec 95.596, Trained Tokens 129640, Peak mem 36.085 GB
+Iter 350: Train loss 0.822, Learning Rate 1.000e-05, It/sec 0.252, Tokens/sec 97.037, Trained Tokens 133498, Peak mem 36.085 GB
+Iter 360: Train loss 0.486, Learning Rate 1.000e-05, It/sec 0.231, Tokens/sec 98.706, Trained Tokens 137762, Peak mem 36.085 GB
+Iter 370: Train loss 1.052, Learning Rate 1.000e-05, It/sec 0.325, Tokens/sec 94.693, Trained Tokens 140679, Peak mem 36.085 GB
+Iter 380: Train loss 0.854, Learning Rate 1.000e-05, It/sec 0.264, Tokens/sec 97.449, Trained Tokens 144366, Peak mem 36.085 GB
+Iter 390: Train loss 1.058, Learning Rate 1.000e-05, It/sec 0.304, Tokens/sec 97.187, Trained Tokens 147558, Peak mem 36.085 GB
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:00<00:17,  1.38it/s]Calculating loss...:   8%|▊         | 2/25 [00:01<00:15,  1.48it/s]Calculating loss...:  12%|█▏        | 3/25 [00:02<00:14,  1.50it/s]Calculating loss...:  16%|█▌        | 4/25 [00:02<00:14,  1.48it/s]Calculating loss...:  20%|██        | 5/25 [00:03<00:13,  1.48it/s]Calculating loss...:  24%|██▍       | 6/25 [00:04<00:12,  1.47it/s]Calculating loss...:  28%|██▊       | 7/25 [00:04<00:11,  1.61it/s]Calculating loss...:  32%|███▏      | 8/25 [00:05<00:11,  1.42it/s]Calculating loss...:  36%|███▌      | 9/25 [00:06<00:11,  1.39it/s]Calculating loss...:  40%|████      | 10/25 [00:06<00:09,  1.61it/s]Calculating loss...:  44%|████▍     | 11/25 [00:07<00:09,  1.55it/s]Calculating loss...:  48%|████▊     | 12/25 [00:08<00:09,  1.43it/s]Calculating loss...:  52%|█████▏    | 13/25 [00:09<00:09,  1.32it/s]Calculating loss...:  56%|█████▌    | 14/25 [00:09<00:08,  1.36it/s]Calculating loss...:  60%|██████    | 15/25 [00:10<00:07,  1.39it/s]Calculating loss...:  64%|██████▍   | 16/25 [00:11<00:06,  1.41it/s]Calculating loss...:  68%|██████▊   | 17/25 [00:11<00:05,  1.44it/s]Calculating loss...:  72%|███████▏  | 18/25 [00:12<00:05,  1.40it/s]Calculating loss...:  76%|███████▌  | 19/25 [00:13<00:04,  1.46it/s]Calculating loss...:  80%|████████  | 20/25 [00:13<00:03,  1.46it/s]Calculating loss...:  84%|████████▍ | 21/25 [00:14<00:02,  1.46it/s]Calculating loss...:  88%|████████▊ | 22/25 [00:15<00:02,  1.45it/s]Calculating loss...:  92%|█████████▏| 23/25 [00:15<00:01,  1.39it/s]Calculating loss...:  96%|█████████▌| 24/25 [00:16<00:00,  1.44it/s]Calculating loss...: 100%|██████████| 25/25 [00:17<00:00,  1.42it/s]Calculating loss...: 100%|██████████| 25/25 [00:17<00:00,  1.44it/s]
+Iter 400: Val loss 1.193, Val took 17.355s
+Iter 400: Train loss 0.405, Learning Rate 1.000e-05, It/sec 0.212, Tokens/sec 74.747, Trained Tokens 151079, Peak mem 36.085 GB
+Iter 400: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/0000400_adapters.safetensors.
+Iter 410: Train loss 0.943, Learning Rate 1.000e-05, It/sec 0.193, Tokens/sec 70.444, Trained Tokens 154732, Peak mem 36.085 GB
+Iter 420: Train loss 0.482, Learning Rate 1.000e-05, It/sec 0.178, Tokens/sec 81.795, Trained Tokens 159324, Peak mem 36.085 GB
+Iter 430: Train loss 0.904, Learning Rate 1.000e-05, It/sec 0.179, Tokens/sec 75.255, Trained Tokens 163524, Peak mem 36.085 GB
+Iter 440: Train loss 0.725, Learning Rate 1.000e-05, It/sec 0.192, Tokens/sec 75.088, Trained Tokens 167441, Peak mem 36.085 GB
+Iter 450: Train loss 0.868, Learning Rate 1.000e-05, It/sec 0.212, Tokens/sec 73.948, Trained Tokens 170934, Peak mem 36.085 GB
+Iter 460: Train loss 0.383, Learning Rate 1.000e-05, It/sec 0.208, Tokens/sec 82.993, Trained Tokens 174921, Peak mem 36.085 GB
+Iter 470: Train loss 0.980, Learning Rate 1.000e-05, It/sec 0.186, Tokens/sec 72.861, Trained Tokens 178842, Peak mem 36.085 GB
+Iter 480: Train loss 0.563, Learning Rate 1.000e-05, It/sec 0.197, Tokens/sec 73.096, Trained Tokens 182552, Peak mem 36.085 GB
+Iter 490: Train loss 1.162, Learning Rate 1.000e-05, It/sec 0.233, Tokens/sec 83.800, Trained Tokens 186150, Peak mem 36.085 GB
+Iter 500: Train loss 0.594, Learning Rate 1.000e-05, It/sec 0.219, Tokens/sec 71.517, Trained Tokens 189420, Peak mem 36.085 GB
+Iter 500: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/0000500_adapters.safetensors.
+Iter 510: Train loss 0.677, Learning Rate 1.000e-05, It/sec 0.213, Tokens/sec 72.470, Trained Tokens 192816, Peak mem 36.085 GB
+Iter 520: Train loss 0.600, Learning Rate 1.000e-05, It/sec 0.194, Tokens/sec 72.695, Trained Tokens 196559, Peak mem 36.085 GB
+Iter 530: Train loss 0.865, Learning Rate 1.000e-05, It/sec 0.260, Tokens/sec 82.178, Trained Tokens 199723, Peak mem 36.085 GB
+Iter 540: Train loss 0.392, Learning Rate 1.000e-05, It/sec 0.180, Tokens/sec 78.519, Trained Tokens 204078, Peak mem 36.085 GB
+Iter 550: Train loss 0.530, Learning Rate 1.000e-05, It/sec 0.189, Tokens/sec 74.418, Trained Tokens 208017, Peak mem 36.085 GB
+Iter 560: Train loss 0.457, Learning Rate 1.000e-05, It/sec 0.199, Tokens/sec 74.342, Trained Tokens 211753, Peak mem 36.085 GB
+Iter 570: Train loss 0.784, Learning Rate 1.000e-05, It/sec 0.234, Tokens/sec 84.705, Trained Tokens 215379, Peak mem 36.085 GB
+Iter 580: Train loss 1.185, Learning Rate 1.000e-05, It/sec 0.222, Tokens/sec 72.017, Trained Tokens 218629, Peak mem 36.085 GB
+Iter 590: Train loss 0.663, Learning Rate 1.000e-05, It/sec 0.201, Tokens/sec 72.765, Trained Tokens 222248, Peak mem 36.085 GB
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:00<00:17,  1.36it/s]Calculating loss...:   8%|▊         | 2/25 [00:01<00:16,  1.41it/s]Calculating loss...:  12%|█▏        | 3/25 [00:02<00:14,  1.48it/s]Calculating loss...:  16%|█▌        | 4/25 [00:02<00:14,  1.46it/s]Calculating loss...:  20%|██        | 5/25 [00:03<00:15,  1.31it/s]Calculating loss...:  24%|██▍       | 6/25 [00:04<00:14,  1.34it/s]Calculating loss...:  28%|██▊       | 7/25 [00:05<00:13,  1.34it/s]Calculating loss...:  32%|███▏      | 8/25 [00:05<00:12,  1.35it/s]Calculating loss...:  36%|███▌      | 9/25 [00:06<00:12,  1.26it/s]Calculating loss...:  40%|████      | 10/25 [00:07<00:12,  1.23it/s]Calculating loss...:  44%|████▍     | 11/25 [00:08<00:10,  1.31it/s]Calculating loss...:  48%|████▊     | 12/25 [00:09<00:09,  1.32it/s]Calculating loss...:  52%|█████▏    | 13/25 [00:09<00:08,  1.35it/s]Calculating loss...:  56%|█████▌    | 14/25 [00:10<00:07,  1.39it/s]Calculating loss...:  60%|██████    | 15/25 [00:11<00:07,  1.41it/s]Calculating loss...:  64%|██████▍   | 16/25 [00:11<00:06,  1.42it/s]Calculating loss...:  68%|██████▊   | 17/25 [00:12<00:05,  1.33it/s]Calculating loss...:  72%|███████▏  | 18/25 [00:13<00:05,  1.32it/s]Calculating loss...:  76%|███████▌  | 19/25 [00:14<00:04,  1.33it/s]Calculating loss...:  80%|████████  | 20/25 [00:14<00:03,  1.54it/s]Calculating loss...:  84%|████████▍ | 21/25 [00:14<00:02,  1.73it/s]Calculating loss...:  88%|████████▊ | 22/25 [00:15<00:01,  1.55it/s]Calculating loss...:  92%|█████████▏| 23/25 [00:16<00:01,  1.51it/s]Calculating loss...:  96%|█████████▌| 24/25 [00:17<00:00,  1.49it/s]Calculating loss...: 100%|██████████| 25/25 [00:17<00:00,  1.45it/s]Calculating loss...: 100%|██████████| 25/25 [00:17<00:00,  1.40it/s]
+Iter 600: Val loss 0.939, Val took 17.890s
+Iter 600: Train loss 1.354, Learning Rate 1.000e-05, It/sec 0.211, Tokens/sec 76.697, Trained Tokens 225877, Peak mem 36.085 GB
+Iter 600: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/0000600_adapters.safetensors.
+Saved final weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe/adapters.safetensors.
+---- [moe] fusing -> /Users/tylerthompson/.lmstudio/models/mudclient/Qwen3.6-35B-A3B-AlterAeon-MLX-4bit : Tue Jun 30 03:45:48 MDT 2026 ----
+Loading pretrained model
+---- [moe] done: Tue Jun 30 03:45:59 MDT 2026 ----
+---- [dense] training: Tue Jun 30 03:45:59 MDT 2026 ----
+Loading pretrained model
+Loading datasets
+Training
+Trainable parameters: 0.054% (14.591M/26895.994M)
+Starting training..., iters: 600
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:05<02:09,  5.40s/it]Calculating loss...:   8%|▊         | 2/25 [00:06<01:09,  3.02s/it]Calculating loss...:  12%|█▏        | 3/25 [00:10<01:09,  3.16s/it]Calculating loss...:  16%|█▌        | 4/25 [00:12<01:03,  3.04s/it]Calculating loss...:  20%|██        | 5/25 [00:16<01:03,  3.15s/it]Calculating loss...:  24%|██▍       | 6/25 [00:19<00:57,  3.05s/it]Calculating loss...:  28%|██▊       | 7/25 [00:22<00:57,  3.22s/it]Calculating loss...:  32%|███▏      | 8/25 [00:25<00:53,  3.17s/it]Calculating loss...:  36%|███▌      | 9/25 [00:28<00:49,  3.07s/it]Calculating loss...:  40%|████      | 10/25 [00:31<00:44,  3.00s/it]Calculating loss...:  44%|████▍     | 11/25 [00:35<00:45,  3.25s/it]Calculating loss...:  48%|████▊     | 12/25 [00:39<00:47,  3.64s/it]Calculating loss...:  52%|█████▏    | 13/25 [00:43<00:43,  3.62s/it]Calculating loss...:  56%|█████▌    | 14/25 [00:46<00:37,  3.39s/it]Calculating loss...:  60%|██████    | 15/25 [00:49<00:32,  3.28s/it]Calculating loss...:  64%|██████▍   | 16/25 [00:53<00:32,  3.60s/it]Calculating loss...:  68%|██████▊   | 17/25 [00:57<00:28,  3.59s/it]Calculating loss...:  72%|███████▏  | 18/25 [00:59<00:21,  3.14s/it]Calculating loss...:  76%|███████▌  | 19/25 [01:02<00:18,  3.11s/it]Calculating loss...:  80%|████████  | 20/25 [01:06<00:17,  3.40s/it]Calculating loss...:  84%|████████▍ | 21/25 [01:09<00:13,  3.45s/it]Calculating loss...:  88%|████████▊ | 22/25 [01:14<00:10,  3.64s/it]Calculating loss...:  92%|█████████▏| 23/25 [01:15<00:05,  2.89s/it]Calculating loss...:  96%|█████████▌| 24/25 [01:18<00:02,  2.87s/it]Calculating loss...: 100%|██████████| 25/25 [01:21<00:00,  2.93s/it]Calculating loss...: 100%|██████████| 25/25 [01:21<00:00,  3.24s/it]
+Iter 1: Val loss 4.992, Val took 81.101s
+Iter 10: Train loss 3.376, Learning Rate 1.000e-05, It/sec 0.044, Tokens/sec 17.077, Trained Tokens 3915, Peak mem 29.725 GB
+Iter 20: Train loss 1.985, Learning Rate 1.000e-05, It/sec 0.089, Tokens/sec 40.651, Trained Tokens 8497, Peak mem 29.745 GB
+Iter 30: Train loss 1.823, Learning Rate 1.000e-05, It/sec 0.107, Tokens/sec 39.049, Trained Tokens 12156, Peak mem 29.745 GB
+Iter 40: Train loss 1.874, Learning Rate 1.000e-05, It/sec 0.087, Tokens/sec 36.279, Trained Tokens 16342, Peak mem 31.138 GB
+Iter 50: Train loss 1.834, Learning Rate 1.000e-05, It/sec 0.089, Tokens/sec 37.386, Trained Tokens 20528, Peak mem 32.674 GB
+Iter 60: Train loss 1.357, Learning Rate 1.000e-05, It/sec 0.121, Tokens/sec 44.467, Trained Tokens 24212, Peak mem 32.674 GB
+Iter 70: Train loss 1.450, Learning Rate 1.000e-05, It/sec 0.145, Tokens/sec 44.709, Trained Tokens 27297, Peak mem 32.674 GB
+Iter 80: Train loss 1.326, Learning Rate 1.000e-05, It/sec 0.106, Tokens/sec 45.385, Trained Tokens 31564, Peak mem 32.674 GB
+Iter 90: Train loss 1.113, Learning Rate 1.000e-05, It/sec 0.118, Tokens/sec 42.145, Trained Tokens 35121, Peak mem 32.674 GB
+Iter 100: Train loss 1.292, Learning Rate 1.000e-05, It/sec 0.119, Tokens/sec 44.779, Trained Tokens 38880, Peak mem 32.674 GB
+Iter 100: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/0000100_adapters.safetensors.
+Iter 110: Train loss 1.298, Learning Rate 1.000e-05, It/sec 0.115, Tokens/sec 45.129, Trained Tokens 42794, Peak mem 32.674 GB
+Iter 120: Train loss 1.255, Learning Rate 1.000e-05, It/sec 0.110, Tokens/sec 44.980, Trained Tokens 46891, Peak mem 32.733 GB
+Iter 130: Train loss 1.524, Learning Rate 1.000e-05, It/sec 0.110, Tokens/sec 45.310, Trained Tokens 50997, Peak mem 32.733 GB
+Iter 140: Train loss 0.970, Learning Rate 1.000e-05, It/sec 0.118, Tokens/sec 45.394, Trained Tokens 54839, Peak mem 32.733 GB
+Iter 150: Train loss 1.275, Learning Rate 1.000e-05, It/sec 0.118, Tokens/sec 45.231, Trained Tokens 58668, Peak mem 32.733 GB
+Iter 160: Train loss 0.997, Learning Rate 1.000e-05, It/sec 0.110, Tokens/sec 44.483, Trained Tokens 62708, Peak mem 32.733 GB
+Iter 170: Train loss 1.081, Learning Rate 1.000e-05, It/sec 0.102, Tokens/sec 45.316, Trained Tokens 67144, Peak mem 32.733 GB
+Iter 180: Train loss 1.438, Learning Rate 1.000e-05, It/sec 0.109, Tokens/sec 44.951, Trained Tokens 71279, Peak mem 32.733 GB
+Iter 190: Train loss 1.100, Learning Rate 1.000e-05, It/sec 0.129, Tokens/sec 44.565, Trained Tokens 74739, Peak mem 32.733 GB
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:03<01:31,  3.83s/it]Calculating loss...:   8%|▊         | 2/25 [00:06<01:14,  3.25s/it]Calculating loss...:  12%|█▏        | 3/25 [00:09<01:09,  3.15s/it]Calculating loss...:  16%|█▌        | 4/25 [00:11<00:53,  2.52s/it]Calculating loss...:  20%|██        | 5/25 [00:15<01:03,  3.17s/it]Calculating loss...:  24%|██▍       | 6/25 [00:18<00:59,  3.13s/it]Calculating loss...:  28%|██▊       | 7/25 [00:20<00:47,  2.61s/it]Calculating loss...:  32%|███▏      | 8/25 [00:21<00:38,  2.28s/it]Calculating loss...:  36%|███▌      | 9/25 [00:24<00:40,  2.52s/it]Calculating loss...:  40%|████      | 10/25 [00:26<00:32,  2.16s/it]Calculating loss...:  44%|████▍     | 11/25 [00:28<00:33,  2.36s/it]Calculating loss...:  48%|████▊     | 12/25 [00:33<00:37,  2.88s/it]Calculating loss...:  52%|█████▏    | 13/25 [00:35<00:34,  2.87s/it]Calculating loss...:  56%|█████▌    | 14/25 [00:38<00:31,  2.86s/it]Calculating loss...:  60%|██████    | 15/25 [00:42<00:31,  3.15s/it]Calculating loss...:  64%|██████▍   | 16/25 [00:45<00:28,  3.12s/it]Calculating loss...:  68%|██████▊   | 17/25 [00:49<00:27,  3.40s/it]Calculating loss...:  72%|███████▏  | 18/25 [00:52<00:22,  3.16s/it]Calculating loss...:  76%|███████▌  | 19/25 [00:55<00:19,  3.27s/it]Calculating loss...:  80%|████████  | 20/25 [00:59<00:16,  3.36s/it]Calculating loss...:  84%|████████▍ | 21/25 [01:03<00:13,  3.50s/it]Calculating loss...:  88%|████████▊ | 22/25 [01:05<00:09,  3.30s/it]Calculating loss...:  92%|█████████▏| 23/25 [01:09<00:06,  3.31s/it]Calculating loss...:  96%|█████████▌| 24/25 [01:12<00:03,  3.38s/it]Calculating loss...: 100%|██████████| 25/25 [01:15<00:00,  3.22s/it]Calculating loss...: 100%|██████████| 25/25 [01:15<00:00,  3.03s/it]
+Iter 200: Val loss 0.973, Val took 75.704s
+Iter 200: Train loss 1.183, Learning Rate 1.000e-05, It/sec 0.114, Tokens/sec 44.883, Trained Tokens 78693, Peak mem 32.733 GB
+Iter 200: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/0000200_adapters.safetensors.
+Iter 210: Train loss 0.678, Learning Rate 1.000e-05, It/sec 0.120, Tokens/sec 44.768, Trained Tokens 82418, Peak mem 32.733 GB
+Iter 220: Train loss 0.918, Learning Rate 1.000e-05, It/sec 0.115, Tokens/sec 44.596, Trained Tokens 86296, Peak mem 32.733 GB
+Iter 230: Train loss 1.027, Learning Rate 1.000e-05, It/sec 0.122, Tokens/sec 41.087, Trained Tokens 89658, Peak mem 32.733 GB
+Iter 240: Train loss 1.226, Learning Rate 1.000e-05, It/sec 0.112, Tokens/sec 44.016, Trained Tokens 93574, Peak mem 32.733 GB
+Iter 250: Train loss 1.328, Learning Rate 1.000e-05, It/sec 0.121, Tokens/sec 45.105, Trained Tokens 97289, Peak mem 32.733 GB
+Iter 260: Train loss 1.119, Learning Rate 1.000e-05, It/sec 0.111, Tokens/sec 44.892, Trained Tokens 101344, Peak mem 32.733 GB
+Iter 270: Train loss 0.823, Learning Rate 1.000e-05, It/sec 0.115, Tokens/sec 45.620, Trained Tokens 105326, Peak mem 32.733 GB
+Iter 280: Train loss 1.103, Learning Rate 1.000e-05, It/sec 0.147, Tokens/sec 44.832, Trained Tokens 108366, Peak mem 32.733 GB
+Iter 290: Train loss 0.748, Learning Rate 1.000e-05, It/sec 0.123, Tokens/sec 44.873, Trained Tokens 112007, Peak mem 32.733 GB
+Iter 300: Train loss 0.607, Learning Rate 1.000e-05, It/sec 0.134, Tokens/sec 43.945, Trained Tokens 115295, Peak mem 32.733 GB
+Iter 300: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/0000300_adapters.safetensors.
+Iter 310: Train loss 0.822, Learning Rate 1.000e-05, It/sec 0.128, Tokens/sec 44.199, Trained Tokens 118756, Peak mem 32.733 GB
+Iter 320: Train loss 0.752, Learning Rate 1.000e-05, It/sec 0.138, Tokens/sec 44.372, Trained Tokens 121965, Peak mem 32.733 GB
+Iter 330: Train loss 0.649, Learning Rate 1.000e-05, It/sec 0.089, Tokens/sec 39.093, Trained Tokens 126361, Peak mem 34.245 GB
+Iter 340: Train loss 0.865, Learning Rate 1.000e-05, It/sec 0.134, Tokens/sec 44.036, Trained Tokens 129640, Peak mem 34.245 GB
+Iter 350: Train loss 0.908, Learning Rate 1.000e-05, It/sec 0.115, Tokens/sec 44.427, Trained Tokens 133498, Peak mem 34.245 GB
+Iter 360: Train loss 0.633, Learning Rate 1.000e-05, It/sec 0.106, Tokens/sec 45.162, Trained Tokens 137762, Peak mem 34.245 GB
+Iter 370: Train loss 1.112, Learning Rate 1.000e-05, It/sec 0.153, Tokens/sec 44.501, Trained Tokens 140679, Peak mem 34.245 GB
+Iter 380: Train loss 1.007, Learning Rate 1.000e-05, It/sec 0.121, Tokens/sec 44.696, Trained Tokens 144366, Peak mem 34.245 GB
+Iter 390: Train loss 1.136, Learning Rate 1.000e-05, It/sec 0.142, Tokens/sec 45.284, Trained Tokens 147558, Peak mem 34.245 GB
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:02<01:08,  2.84s/it]Calculating loss...:   8%|▊         | 2/25 [00:05<01:01,  2.69s/it]Calculating loss...:  12%|█▏        | 3/25 [00:07<00:58,  2.64s/it]Calculating loss...:  16%|█▌        | 4/25 [00:10<00:57,  2.71s/it]Calculating loss...:  20%|██        | 5/25 [00:13<00:55,  2.76s/it]Calculating loss...:  24%|██▍       | 6/25 [00:16<00:52,  2.78s/it]Calculating loss...:  28%|██▊       | 7/25 [00:18<00:42,  2.38s/it]Calculating loss...:  32%|███▏      | 8/25 [00:22<00:49,  2.92s/it]Calculating loss...:  36%|███▌      | 9/25 [00:25<00:47,  2.96s/it]Calculating loss...:  40%|████      | 10/25 [00:26<00:35,  2.39s/it]Calculating loss...:  44%|████▍     | 11/25 [00:29<00:35,  2.52s/it]Calculating loss...:  48%|████▊     | 12/25 [00:32<00:36,  2.84s/it]Calculating loss...:  52%|█████▏    | 13/25 [00:36<00:38,  3.21s/it]Calculating loss...:  56%|█████▌    | 14/25 [00:39<00:34,  3.10s/it]Calculating loss...:  60%|██████    | 15/25 [00:42<00:30,  3.02s/it]Calculating loss...:  64%|██████▍   | 16/25 [00:45<00:26,  2.97s/it]Calculating loss...:  68%|██████▊   | 17/25 [00:47<00:22,  2.85s/it]Calculating loss...:  72%|███████▏  | 18/25 [00:51<00:20,  3.00s/it]Calculating loss...:  76%|███████▌  | 19/25 [00:53<00:16,  2.80s/it]Calculating loss...:  80%|████████  | 20/25 [00:56<00:14,  2.82s/it]Calculating loss...:  84%|████████▍ | 21/25 [00:59<00:11,  2.82s/it]Calculating loss...:  88%|████████▊ | 22/25 [01:02<00:08,  2.83s/it]Calculating loss...:  92%|█████████▏| 23/25 [01:05<00:05,  2.98s/it]Calculating loss...:  96%|█████████▌| 24/25 [01:07<00:02,  2.86s/it]Calculating loss...: 100%|██████████| 25/25 [01:11<00:00,  2.92s/it]Calculating loss...: 100%|██████████| 25/25 [01:11<00:00,  2.84s/it]
+Iter 400: Val loss 1.297, Val took 71.050s
+Iter 400: Train loss 0.533, Learning Rate 1.000e-05, It/sec 0.126, Tokens/sec 44.462, Trained Tokens 151079, Peak mem 34.245 GB
+Iter 400: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/0000400_adapters.safetensors.
+Iter 410: Train loss 1.084, Learning Rate 1.000e-05, It/sec 0.123, Tokens/sec 44.855, Trained Tokens 154732, Peak mem 34.245 GB
+Iter 420: Train loss 0.666, Learning Rate 1.000e-05, It/sec 0.098, Tokens/sec 44.926, Trained Tokens 159324, Peak mem 34.245 GB
+Iter 430: Train loss 1.041, Learning Rate 1.000e-05, It/sec 0.108, Tokens/sec 45.542, Trained Tokens 163524, Peak mem 34.245 GB
+Iter 440: Train loss 0.857, Learning Rate 1.000e-05, It/sec 0.116, Tokens/sec 45.276, Trained Tokens 167441, Peak mem 34.245 GB
+Iter 450: Train loss 0.947, Learning Rate 1.000e-05, It/sec 0.127, Tokens/sec 44.226, Trained Tokens 170934, Peak mem 34.245 GB
+Iter 460: Train loss 0.519, Learning Rate 1.000e-05, It/sec 0.111, Tokens/sec 44.231, Trained Tokens 174921, Peak mem 34.245 GB
+Iter 470: Train loss 1.080, Learning Rate 1.000e-05, It/sec 0.114, Tokens/sec 44.866, Trained Tokens 178842, Peak mem 34.245 GB
+Iter 480: Train loss 0.678, Learning Rate 1.000e-05, It/sec 0.121, Tokens/sec 45.011, Trained Tokens 182552, Peak mem 34.245 GB
+Iter 490: Train loss 1.253, Learning Rate 1.000e-05, It/sec 0.124, Tokens/sec 44.766, Trained Tokens 186150, Peak mem 34.245 GB
+Iter 500: Train loss 0.689, Learning Rate 1.000e-05, It/sec 0.137, Tokens/sec 44.746, Trained Tokens 189420, Peak mem 34.245 GB
+Iter 500: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/0000500_adapters.safetensors.
+Iter 510: Train loss 0.763, Learning Rate 1.000e-05, It/sec 0.131, Tokens/sec 44.357, Trained Tokens 192816, Peak mem 34.245 GB
+Iter 520: Train loss 0.709, Learning Rate 1.000e-05, It/sec 0.119, Tokens/sec 44.489, Trained Tokens 196559, Peak mem 34.245 GB
+Iter 530: Train loss 0.948, Learning Rate 1.000e-05, It/sec 0.140, Tokens/sec 44.150, Trained Tokens 199723, Peak mem 34.245 GB
+Iter 540: Train loss 0.657, Learning Rate 1.000e-05, It/sec 0.103, Tokens/sec 44.776, Trained Tokens 204078, Peak mem 34.245 GB
+Iter 550: Train loss 0.654, Learning Rate 1.000e-05, It/sec 0.115, Tokens/sec 45.380, Trained Tokens 208017, Peak mem 34.245 GB
+Iter 560: Train loss 0.541, Learning Rate 1.000e-05, It/sec 0.121, Tokens/sec 45.161, Trained Tokens 211753, Peak mem 34.245 GB
+Iter 570: Train loss 0.939, Learning Rate 1.000e-05, It/sec 0.123, Tokens/sec 44.509, Trained Tokens 215379, Peak mem 34.245 GB
+Iter 580: Train loss 1.235, Learning Rate 1.000e-05, It/sec 0.136, Tokens/sec 44.081, Trained Tokens 218629, Peak mem 34.245 GB
+Iter 590: Train loss 0.831, Learning Rate 1.000e-05, It/sec 0.122, Tokens/sec 44.200, Trained Tokens 222248, Peak mem 34.245 GB
+Calculating loss...:   0%|          | 0/25 [00:00<?, ?it/s]Calculating loss...:   4%|▍         | 1/25 [00:03<01:13,  3.07s/it]Calculating loss...:   8%|▊         | 2/25 [00:05<01:07,  2.93s/it]Calculating loss...:  12%|█▏        | 3/25 [00:08<01:01,  2.77s/it]Calculating loss...:  16%|█▌        | 4/25 [00:11<00:58,  2.80s/it]Calculating loss...:  20%|██        | 5/25 [00:15<01:05,  3.26s/it]Calculating loss...:  24%|██▍       | 6/25 [00:18<01:00,  3.19s/it]Calculating loss...:  28%|██▊       | 7/25 [00:21<00:56,  3.15s/it]Calculating loss...:  32%|███▏      | 8/25 [00:24<00:53,  3.12s/it]Calculating loss...:  36%|███▌      | 9/25 [00:28<00:54,  3.42s/it]Calculating loss...:  40%|████      | 10/25 [00:32<00:53,  3.55s/it]Calculating loss...:  44%|████▍     | 11/25 [00:35<00:45,  3.25s/it]Calculating loss...:  48%|████▊     | 12/25 [00:38<00:41,  3.19s/it]Calculating loss...:  52%|█████▏    | 13/25 [00:40<00:37,  3.09s/it]Calculating loss...:  56%|█████▌    | 14/25 [00:43<00:33,  3.02s/it]Calculating loss...:  60%|██████    | 15/25 [00:46<00:29,  2.97s/it]Calculating loss...:  64%|██████▍   | 16/25 [00:49<00:26,  2.93s/it]Calculating loss...:  68%|██████▊   | 17/25 [00:53<00:25,  3.20s/it]Calculating loss...:  72%|███████▏  | 18/25 [00:56<00:22,  3.24s/it]Calculating loss...:  76%|███████▌  | 19/25 [00:59<00:19,  3.18s/it]Calculating loss...:  80%|████████  | 20/25 [01:00<00:12,  2.56s/it]Calculating loss...:  84%|████████▍ | 21/25 [01:01<00:08,  2.13s/it]Calculating loss...:  88%|████████▊ | 22/25 [01:05<00:07,  2.55s/it]Calculating loss...:  92%|█████████▏| 23/25 [01:08<00:05,  2.64s/it]Calculating loss...:  96%|█████████▌| 24/25 [01:11<00:02,  2.70s/it]Calculating loss...: 100%|██████████| 25/25 [01:14<00:00,  2.80s/it]Calculating loss...: 100%|██████████| 25/25 [01:14<00:00,  2.97s/it]
+Iter 600: Val loss 1.031, Val took 74.238s
+Iter 600: Train loss 1.422, Learning Rate 1.000e-05, It/sec 0.124, Tokens/sec 45.041, Trained Tokens 225877, Peak mem 34.245 GB
+Iter 600: Saved adapter weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors and /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/0000600_adapters.safetensors.
+Saved final weights to /Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-dense/adapters.safetensors.
+---- [dense] fusing -> /Users/tylerthompson/.lmstudio/models/mudclient/Qwen3.6-27B-AlterAeon-MLX-4bit : Tue Jun 30 05:19:09 MDT 2026 ----
+Loading pretrained model
+---- [dense] done: Tue Jun 30 05:19:18 MDT 2026 ----
+================ dual-train finished: Tue Jun 30 05:19:18 MDT 2026 ================
+Restart LM Studio to index, then load each and keep the smarter one:
+  MoE (fast):    /Users/tylerthompson/.lmstudio/models/mudclient/Qwen3.6-35B-A3B-AlterAeon-MLX-4bit
+  dense (smart): /Users/tylerthompson/.lmstudio/models/mudclient/Qwen3.6-27B-AlterAeon-MLX-4bit
+Serve tuned with: tools/finetune/serve.sh <model-key from 'lms ls'>
+both models present — disabling agent.

@@ -4,8 +4,15 @@ swift_test(
     name = "MudClientTests",
     size = "small",
     srcs = glob(["*.swift"]),
+    # The Lua-script load test and the raw-log repro read these from runfiles (resolved via #filePath).
+    data = [
+        "//Scripts:AlterAeon.lua",
+        "//Scripts:AIPilot.lua",
+        "fixtures/pellam_kxwt_capture.log",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//Sources/MudClient:MudClientLib",
+        "@swiftpkg_dependencyinjection//:DependencyInjection",
     ],
 )

@@ -1,0 +1,5619 @@
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+
+
+ -----+     +-----+-----+-----+
+ FIELD FIELD ROAD  FIELD  YOU |
+      +     +     +     +-----+
+ ROAD
+      +
+ FIELD
+      +
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<72hp 158m 157mv>
+
+rest
+
+
+You wake up and begin resting.
+
+
+<72hp 158m 157mv>
+
+w
+
+
+You stand up.
+Before a small tent
+Now well within the hills and the small camp set among them, the view is a
+bit more clear, and so is the situation. Several humanoids are dragging
+bodies to the west, while others either gather their weapons and equip
+themselves or help carrying food and water. A small pool of water can be
+seen off to the distance in the southwest.
+
+Light from outside lights up the area.
+
+[Exits: east south west ]
+
+s
+
+
+Walking the edge of the camp
+This spot of the camp seems to be a bit more calm, given the fact that it's
+a bit away of the center of the noise and fights. Still, the smell is
+horrible, and the trash on the ground is no less than before. Tents of
+various sizes can be seen throughout this camp with tiny, ugly child-like
+beings rushing in and out of them.
+
+The sun shines brightly overhead.
+
+A thin kobold stands here, looking at you suspiciously.
+[Exits: north south west ]
+
+A kobold's claw scratches you.
+
+<69hp 158m 153mv 21ac> A kobold <excellent>
+
+A kobold's stab hits you.
+
+
+
+
+<65hp 158m 153mv 21ac> A kobold <excellent>
+
+c shower
+
+
+A shower of bright purple sparks suddenly engulfs A kobold!
+
+Your blood freezes as you hear A kobold's death cry!
+A kobold is DEAD!
+You receive 533 experience.
+-----------------------------------------------------------------
+(on ground) the corpse of A kobold contains:
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+-----------------------------------------------------------------
+
+<66hp 154m 153mv>
+
+get all corpse
+
+
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold.
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold.
+You get a sharp metal spear from the corpse of A kobold.
+
+
+<69hp 156m 157mv>
+
+autoloot
+
+
+You will now automatically loot corpses for non-binding equipment.
+
+<70hp 156m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+|
+ -----+-----+     +-----+-----+-----+
+|ROAD  FIELD FIELD ROAD  FIELD BUILD|
+      +     +     +     +     +-----+
+|ROAD  ROAD               YOU |
+      +     +           +     +
+ FIELD FIELD
+      +     +
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<71hp 156m 157mv>
+
+s
+
+
+The edge of a camp in the hills
+This particular spot of the camp seems to be the place for stacking all the
+valuable possessions obtained from the battles fought recently, or at least
+it appears to be that way. It seems that they're being saved here for further
+examination, right now it's just a pile of many different objects.
+
+The sun shines brightly overhead.
+
+A thin kobold stands here, looking at you suspiciously.
+[Exits: north south west ]
+
+
+<72hp 156m 154mv>
+
+A kobold approaches as if to attack, then hesitates for a moment.
+
+<72hp 157m 155mv>
+
+A kobold approaches as if to attack, then hesitates for a moment.
+
+
+<72hp 157m 157mv>
+
+A kobold approaches as if to attack, then hesitates for a moment.
+
+<72hp 157m 157mv>
+
+c shower kobold
+
+
+A shower of brilliant white sparks suddenly engulfs A kobold!
+
+Your blood freezes as you hear A kobold's death cry!
+A kobold is DEAD!
+You receive 254 experience.
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold.
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold.
+You get a sharp metal spear from the corpse of A kobold.
+The pantheon of gods appreciates your sacrifice of the corpse of A kobold.
+
+
+<72hp 154m 157mv>
+
+e
+
+
+Alas, you cannot go that way.
+
+
+<72hp 155m 157mv>
+
+map
+
+
+
+You now have enough experience to reach level 9!
+
+To level, you can use the 'level' command.
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+|
+ -----+-----+     +-----+-----+-----+
+|ROAD  FIELD FIELD ROAD  FIELD BUILD|
+      +     +     +     +     +-----+
+|ROAD  ROAD              ROAD |
+      +     +           +     +
+ FIELD FIELD              YOU |
+      +     +           +     +
+
+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<72hp 156m 157mv>
+
+s
+
+
+A small camp in the hills
+From this spot a small group of tents around a pool of water can be
+appreciated, with several humanoids quickly walking around, as if they were
+rushed by someone. The view though, is somewhat obstructed by all the hills
+around here. The only way to really know what's going on is by walking in
+there.
+
+The sun shines brightly overhead.
+
+A kobold guard monitors the edge of the camp.
+A kobold guard monitors the edge of the camp.
+[Exits: north west southeast ]
+You dodge A kobold guard's attack.
+A kobold guard's stab decimates you!
+
+A kobold guard disarms you and sends your weapon flying!
+A kobold guard's stab hits you.
+You miss A kobold guard.
+A kobold guard's stab wounds you.
+
+
+<42hp 155m 156mv 19ac> A kobold guard <excellent>
+
+c shower
+
+
+A shower of fiery blue sparks suddenly engulfs A kobold guard!
+
+A kobold guard's kick hits you.
+
+
+<37hp 150m 156mv 19ac> A kobold guard <quite a few>
+
+You scramble to retrieve a quartz-tipped wooden cane!
+You wield a quartz-tipped wooden cane.
+
+c shower
+
+
+
+<38hp 150m 156mv 21ac> A kobold guard <quite a few>
+
+A kobold guard's kick mauls you.
+
+
+<26hp 150m 156mv 21ac> A kobold guard <quite a few>
+
+You fail to cast the spell 'shower of sparks'.
+
+
+<27hp 148m 156mv 21ac> A kobold guard <quite a few>
+
+A kobold guard tries to disarm you, but fails.
+A kobold guard's stab wounds you.
+
+A kobold guard's kick mauls you.
+You miss A kobold guard.
+
+<7hp 148m 156mv 21ac> A kobold guard <quite a few>
+
+c shower
+
+
+A shower of bright yellow sparks suddenly engulfs A kobold guard!
+
+Your blood freezes as you hear A kobold guard's death cry!
+A kobold guard is DEAD!
+You receive 1580 experience.
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold guard.
+You get a sharp metal spear from the corpse of A kobold guard.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A kobold guard contains:
+light brown armor
+-----------------------------------------------------------------
+You jump to attack A kobold guard!
+
+
+<8hp 144m 156mv 21ac> A kobold guard <excellent>
+
+A kobold guard's stab hits you.
+
+
+<2hp 144m 156mv 21ac> A kobold guard <excellent>
+
+
+       You receive a combat point!
+
+You now have 6 combat points you can spend.
+
+(See 'help combat points' for information on how to use them.)
+
+hom
+
+
+
+<2hp 144m 156mv 21ac> A kobold guard <excellent>
+
+A kobold guard's stab wounds you.
+You have been KILLED!!!!  (-7 hp)
+You weep as you think of the 2928 experience that you lost.
+
+The gods grant you a new lease on life!
+You awake to find yourself in recall.
+You lose 20 gold coins!
+As the world goes black you feel pieces of your mind fading...
+You lose a bit of your knowledge of chill touch!
+
+
+<10hp 0m 15mv>
+
+lev
+
+
+Class     Level   Micro     Exp Cost  Percent
+-----------------------------------------------------------------
+Mage          8                27000   ( 97%)
+Cleric        1                17000   (100%)   <- You can level!
+Thief         0                68000   ( 38%)
+Warrior       0                68000   ( 38%)
+Necromancer   0                68000   ( 38%)
+Druid         0                68000   ( 38%)
+
+You have 26353 experience and 9 total levels.
+
+Remember that it's always a good idea to level your cheapest class,
+                   even if it's not your main.
+
+
+<13hp 2m 20mv>
+
+lev cleric
+
+
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+                          YOU GAIN A LEVEL!
+
+          You are now level 2 cleric, with 10 total levels!
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+You gain: 4/76 hit, 2/160 mana, 0/157 movement, 5/55 practices.
+You can now learn the spell 'inflict wounds'!
+You can now learn the spell 'continual light'!
+
+
+<76hp 160m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+
+
+                        +-----+-----+-----+-----+-----+
+                        | YOU  TRAIL TRAIL TRAIL FIELD
+                  +-----+     +     +-----+-----+-----+
+                   TRAIL TRAIL FIELD|      TRAIL FIELD|
+                  +-----+     +-----+     +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +           +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +-----+     +     +     +
+                        |FIELD FIELD FIELD TRAIL FIELD|
+                        +-----+     +-----+-----+-----+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 160m 157mv>
+
+
+
+
+
+<76hp 160m 157mv>
+
+s
+
+
+At the edge of the cemetery grounds
+The Pellam Cemetery is a sunken pit in the landscape.  The interior is
+surrounded by a stone fence that has several large gaps in it.  A massive
+tree grows in the very center. There is a path leading around the fenced in
+area of the cemetery.  There are some graves outside of the fenced area, but
+they are the unmarked graves of the poor.
+
+The sun shines brightly overhead.
+
+An animated skeleton shuffles around the graveyard.
+[Exits: north east south west ]
+
+<76hp 160m 155mv>
+
+a walking skeleton's claw injures you.
+
+a walking skeleton's claw hits you.
+
+
+<62hp 160m 155mv 21ac> a walking skeleton <excellent>
+
+s
+
+
+You can't just walk away from a fight!
+(Use the 'run' or 'flee' commands to run away.)
+
+
+<62hp 160m 155mv 21ac> a walking skeleton <excellent>
+
+Your blast hits a walking skeleton.
+
+
+<62hp 160m 155mv 21ac> a walking skeleton <quite a few>
+
+c shower
+
+
+a walking skeleton's claw hits you.
+
+A shower of brilliant white sparks suddenly engulfs a walking skeleton!
+
+A walking skeleton falls apart into a heap of bones.
+a walking skeleton is DEAD!
+You learn very little from this battle.  You receive 376 experience.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of a walking skeleton contains:
+a tombstone
+-----------------------------------------------------------------
+
+
+<57hp 156m 155mv>
+
+map
+
+
+You recover your morale!
+
+
+<58hp 157m 155mv>
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+                        +-----+-----+-----+-----+-----+
+                        |WAYPT TRAIL TRAIL TRAIL FIELD
+                  +-----+     +     +-----+-----+-----+
+                   TRAIL  YOU  FIELD|      TRAIL FIELD|
+                  +-----+     +-----+     +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +           +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +-----+     +     +     +
+                        |FIELD FIELD FIELD TRAIL FIELD|
+                        +-----+     +-----+-----+-----+
+                              |FIELD FIELD ROAD
+                              +-----+-----+     +
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<59hp 158m 156mv>
+
+s
+
+
+Wandering the edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence, though there
+are gates in it.  Clusters of unmarked graves dot the narrow strip of grass
+between the pit wall and the stone fence.  Some writing has been carved
+into the west wall, and although it is heavily worn-out, it may have been
+names and dates.  Instead of individual stones, someone was just carving
+the names and death dates of the deceased right into the wall.
+
+The sun shines brightly overhead.
+
+A mindless zombie shuffles around the graveyard.
+[Exits: north south ]
+
+a wandering zombie's claw scratches you.
+
+s
+
+
+You can't just walk away from a fight!
+(Use the 'run' or 'flee' commands to run away.)
+a wandering zombie's claw scratches you.
+
+<53hp 158m 153mv 21ac> a wandering zombie <excellent>
+
+
+
+Your blast MUTILATES a wandering zombie!
+
+A wandering zombie crumples and falls to the ground as the red soulstones animating it stop glowing.
+You learn very little from this battle.  You receive 300 experience.
+You receive 10 gold coins for your sacrifice of the corpse of a wandering zombie.
+
+
+<53hp 158m 153mv>
+
+c shower
+
+
+You are not currently in battle.  What enemy do you want to cast it on?
+
+
+<54hp 159m 155mv>
+
+s
+
+
+Wandering the edge of the cemetery
+The Pellam Cemetery occupies the interior of this large pit.  The immediate
+area is lined with rows of small, misshapen gravestones.  The interior of
+the cemetery lies eastward and is surrounded by a stone fence with several
+gates in it.
+
+The sun shines brightly overhead.
+
+An animated skeleton shuffles around the graveyard.
+[Exits: north south ]
+
+
+<55hp 160m 154mv>
+
+a walking skeleton's claw scratches you.
+
+a walking skeleton's claw scratches you.
+
+
+<52hp 160m 154mv 21ac> a walking skeleton <excellent>
+
+c shower
+
+
+A shower of fiery blue sparks suddenly engulfs a walking skeleton!
+
+A walking skeleton falls apart into a heap of bones.
+a walking skeleton is DEAD!
+You learn very little from this battle.  You receive 148 experience.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of a walking skeleton contains:
+a leg bone
+-----------------------------------------------------------------
+
+
+<53hp 157m 154mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+                        +-----+-----+-----+-----+-----+
+                        |WAYPT TRAIL TRAIL TRAIL FIELD
+                  +-----+     +     +-----+-----+-----+
+                   TRAIL TRAIL FIELD|      TRAIL FIELD|
+                  +-----+     +-----+     +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +           +     +     +
+                        | YOU |            TRAIL FIELD
+                        +     +-----+     +     +     +
+                        |FIELD FIELD FIELD TRAIL FIELD|
+                        +-----+     +-----+-----+-----+
+                              |FIELD FIELD ROAD
+                              +-----+-----+     +
+                                          |ROAD |
+                                          +     +
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<54hp 157m 154mv>
+
+s
+
+
+Wandering the edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence, though there
+are gates in it.  The grass grows wild between clusters of graves which
+occupy the narrow strip of land between the pit walls and the stone fence.
+
+The sun shines brightly overhead.
+
+An animated skeleton shuffles around the graveyard.
+[Exits: north east ]
+
+
+<55hp 157m 153mv>
+
+e
+
+
+A collapsed section of fence
+The fence lies broken to the east, leaving an opening to the inner grounds.
+The tombstones within are larger and fancier than those outside the fence,
+though the grounds show the same state of general disrepair.
+
+The sun shines brightly overhead.
+
+A mindless zombie shuffles around the graveyard.
+[Exits: east south west ]
+a wandering zombie's claw injures you.
+
+a wandering zombie's claw hits you.
+
+s
+
+
+You can't just walk away from a fight!
+(Use the 'run' or 'flee' commands to run away.)
+
+
+<43hp 157m 150mv 21ac> a wandering zombie <excellent>
+
+c shower
+
+
+Your blast injures a wandering zombie.
+
+A shower of bright green sparks suddenly engulfs a wandering zombie!
+
+A wandering zombie crumples and falls to the ground as the red soulstones animating it stop glowing.
+You learn very little from this battle.  You receive 340 experience.
+You receive 18 gold coins for your sacrifice of the corpse of a wandering zombie.
+
+
+<43hp 153m 150mv>
+
+s
+
+
+The edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence, though there
+are gates in it.  A stack of stones has been piled up next to the
+cemetery's western wall.  Groups of unmarked graves dot the narrow strip of
+land between the pit walls and the stone fence.
+
+The sun shines brightly overhead.
+
+[Exits: north east ]
+
+
+<45hp 155m 147mv>
+
+#ai off
+
+[ai] disengaged.
+
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+             -----             ----- ----- -----
+             TRAIL TRAIL FIELD|      TRAIL FIELD|FIELD
+            +-----+     +-----+     +     +     +     +
+                  |FIELD|            TRAIL FIELD      |
+                  +     +           +     +     +     +
+                  |FIELD|            TRAIL FIELD HILL |
+                  +     +-----+     +     +     +-----+
+                  |FIELD FIELD FIELD TRAIL FIELD|FIELD
+                  +-----+     +-----+-----+-----+     +
+                        | YOU  FIELD ROAD        FIELD
+                        +-----+-----+     +     +-----+
+                                    |ROAD |
+                                    +     +
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<47hp 156m 151mv>
+
+e
+
+
+The edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence.  There is a
+gate in the fence east of here. Clusters of unmarked graves dot the narrow
+strip of land between the pit walls and the stone fence.
+
+The sun shines brightly overhead.
+
+A zombie slowly stumbles through the graveyard.
+[Exits: east west ]
+You dodge a dyslexic zombie's attack.
+
+<47hp 156m 148mv 21ac> a dyslexic zombie <excellent>
+
+You parry a dyslexic zombie's attack.
+
+e
+
+
+You can't just walk away from a fight!
+(Use the 'run' or 'flee' commands to run away.)
+
+
+<47hp 156m 148mv 21ac> a dyslexic zombie <excellent>
+
+Your blast hits a dyslexic zombie.
+
+c shower
+
+
+You become better at shower of sparks!
+You gain 800 experience.
+A shower of bright green sparks suddenly engulfs a dyslexic zombie!
+
+Your blood freezes as you hear a dyslexic zombie's death cry!
+A dyslexic zombie is DEAD!
+You receive 1065 experience.
+You receive 12 gold coins for your sacrifice of the corpse of a dyslexic zombie.
+
+<47hp 152m 148mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+       -----             ----- ----- -----
+       TRAIL TRAIL FIELD|      TRAIL FIELD|FIELD FIELD|
+      +-----+     +-----+     +     +     +     +     +
+            |FIELD|            TRAIL FIELD      |ROCK |
+            +     +           +     +     +     +     +
+            |FIELD|            TRAIL FIELD HILL |ROCK |
+            +     +-----+     +     +     +-----+     +
+            |FIELD FIELD FIELD TRAIL FIELD|FIELD ROCK |
+            +-----+     +-----+-----+-----+     +     +
+                  |FIELD  YOU  ROAD        FIELD ROCK |
+                  +-----+-----+     +     +-----+-----+
+                              |ROAD |
+                              +     +
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<49hp 154m 150mv>
+
+e
+
+
+Before a rusted iron gate
+An iron gate is set in the stone fence to the north.  It is pitted and
+rusted so badly it hardly looks like metal anymore.  Beyond the gate,
+within the inner grounds, the top of a gigantic oak tree can be seen.  A
+gap in the wall surrounding the cemetary lies to the south.
+
+The sun shines brightly overhead.
+
+[Exits: east south west ]
+
+
+Ahria has given you a gift!
+
+You receive 1760 experience!
+
+To thank this player, use the command 'tell ahria thanks!'
+
+
+<49hp 154m 149mv>
+
+s
+
+
+The road to Pellam (Level 8+ Recommended)
+The road winds southward toward Pellam through the stone ridge.  The ridge
+is actually a wall of hewn stones, half buried by age and time.  To the
+south, the path leads into the hills.  North of here is a gated cemetary.
+
+The sun shines brightly overhead.
+
+[Exits: north south ]
+
+
+<51hp 156m 150mv>
+
+map
+
+
+Map Scale - Large (Landscape)
+
+
+
+
+
+
+                        +-----+
+                         ROAD
+                        +     +
+                        | YOU |
+                        +     +
+                        |ROAD |
+                        +     +
+                        |ROAD |
+                        +-----+-----+
+                              |ROAD
+                              +     +
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+s
+
+
+A path up a hill
+The terrain here starts to be more irregular, with several hills to the south
+and southeast. A small camp can be seen from here in that direction, but it's
+hard to distinguish any details besides a few tents.
+
+The sun shines brightly overhead.
+
+[Exits: north south ]
+
+
+<53hp 158m 150mv>
+
+s
+
+
+You ascend southward.
+At the top of a small hill
+Now the view to the southeast is more clear, this hill being slightly taller
+than the rest around here. A small camp has been set up within the hills
+around a small source of water, while further away there seems to be a city
+of some sort, although no movement can be appreciated.
+
+The sun shines brightly overhead.
+
+The kobold camp sprawls out before you to the southeast.
+[Exits: north ]
+
+
+<54hp 159m 149mv>
+
+se
+
+
+You don't really see any way around the camp, you'll have to 'enter camp' to proceed.
+
+
+<54hp 159m 149mv>
+
+enter camp
+
+
+You enter the kobold camp.
+
+Nearing the kobold camp
+The way through the hills isn't an easy one, especially since there's no
+trail or established way to go through them, and the view is obviously
+blocked by them. The smell of burnt bodies nearby and the noise of people
+walking and yelling at each other are the only guide to continue through this
+unwelcoming place.
+
+The sun shines brightly overhead.
+
+[Exits: east south northwest ]
+
+
+<56hp 160m 152mv>
+
+e
+
+
+Walking the edge of the camp
+This spot of the camp seems to be a bit more calm, given the fact that it's
+a bit away of the center of the noise and fights. Still, the smell is
+horrible, and the trash on the ground is no less than before. Tents of
+various sizes can be seen throughout this camp with tiny, ugly child-like
+beings rushing in and out of them.
+
+The sun shines brightly overhead.
+
+[Exits: east south west ]
+
+
+<57hp 160m 150mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+            +     +
+            |ROAD |
+            +-----+-----+-----+     +-----+-----+-----+
+                  |ROAD   YOU  FIELD ROAD  FIELD BUILD|
+                  +     +     +     +     +     +-----+
+                  |ROAD  ROAD              ROAD |
+                  +     +     +           +     +
+                   FIELD FIELD             FIELD|
+                  +     +     +           +     +
+                                           ROAD |
+                                          +-----+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<58hp 160m 152mv>
+
+e
+
+
+Before a large tent
+The smell of burnt, rotting roasting meat is very strong here. To the east,
+it appears there is a stack of bodies, while to the north, inside the large
+tent, dirt and filth even makes its home there too. Everybody is doing
+something around here, either eating, rushing to get a new armor,
+sharpening their weapons or taking a break before another battle ensues.
+
+The sun shines brightly overhead.
+
+[Exits: north east south west ]
+
+<58hp 160m 149mv>
+
+e
+
+
+Inside the camp
+Several bodies have been stacked here in this encampment, now covered by
+flies and worms. Tents can be seen throughout this camp and a small pool of
+water is off into the distance to the south. Not many goblins come to this
+place, it's too smelly, even for them.
+
+The sun shines brightly overhead.
+
+[Exits: east south west ]
+
+
+<59hp 160m 149mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+      +
+|ROAD |
+ -----+-----+-----+     +-----+-----+-----+
+      |ROAD  FIELD FIELD  YOU  FIELD BUILD|
+      +     +     +     +     +     +-----+
+      |ROAD  ROAD              ROAD |
+      +     +     +           +     +
+       FIELD FIELD             FIELD|
+      +     +     +           +     +
+                               ROAD |
+                              +-----+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<60hp 160m 151mv>
+
+e
+
+
+Before a small tent
+Now well within the hills and the small camp set among them, the view is a
+bit more clear, and so is the situation. Several humanoids are dragging
+bodies to the west, while others either gather their weapons and equip
+themselves or help carrying food and water. A small pool of water can be
+seen off to the distance in the southwest.
+
+Light from outside lights up the area.
+
+[Exits: east south west ]
+
+
+<60hp 160m 148mv>
+
+s
+
+
+Walking the edge of the camp
+This spot of the camp seems to be a bit more calm, given the fact that it's
+a bit away of the center of the noise and fights. Still, the smell is
+horrible, and the trash on the ground is no less than before. Tents of
+various sizes can be seen throughout this camp with tiny, ugly child-like
+beings rushing in and out of them.
+
+The sun shines brightly overhead.
+
+A kobold is here, dragging corpses to stack them up in a pile.
+The corpse of A kobold is lying here.
+[Exits: north south west ]
+
+A kobold approaches as if to attack, then hesitates for a moment.
+
+
+<61hp 160m 149mv>
+
+A kobold approaches as if to attack, then hesitates for a moment.
+
+
+<62hp 160m 151mv>
+
+A kobold's claw scratches you.
+
+<62hp 160m 153mv 21ac> A kobold <excellent>
+
+You dodge A kobold's attack.
+
+c shower kobold
+
+
+A shower of brilliant white sparks suddenly engulfs A kobold!
+
+Your blood freezes as you hear A kobold's death cry!
+A kobold is DEAD!
+You receive 264 experience.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A kobold contains:
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a small vial of red liquid that you can drink
+a scroll of magic missile
+-----------------------------------------------------------------
+
+<62hp 156m 153mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+|
+ -----+-----+     +-----+-----+-----+
+|ROAD  FIELD FIELD ROAD  FIELD BUILD|
+      +     +     +     +     +-----+
+|ROAD  ROAD               YOU |
+      +     +           +     +
+ FIELD FIELD             FIELD|
+      +     +           +     +
+                         ROAD |
+                        +-----+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<64hp 158m 153mv>
+
+inv
+
+
+You are carrying:
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+
+
+<65hp 159m 155mv>
+
+look liquid
+
+
+(item is in your inventory)
+A small glass vial of translucent yellowish liquid. It looks rather like a
+fruit drink, except the color.  Uncorking the stopper, you note the it
+smells tangy and sweet.
+It is in almost new condition and will last for only a few minutes.
+
+
+<69hp 160m 157mv>
+
+check liquid
+
+
+Sorry, but there's no checker for playing style 'liquid'.
+
+
+<73hp 160m 157mv>
+
+help equipment
+
+
+There is help available on the following topics:
+------------------------------------------------------------------
+[  1] binding bound equipment (weight: 3) (usage: 0)
+[  2] clan equipment (weight: 3) (usage: 0)
+[  3] clan equipment unstring (weight: 3) (usage: 0)
+[  4] thief skill salvaging equipment parts salvage (weight: 3) (usage: 0)
+[  5] thief skill scrap equipment scrapping scrapper (weight: 3) (usage: 0)
+[  6] eqsets equipment sets management (weight: 3) (usage: 0)
+[  7] equipment searching (weight: 3) (usage: 0)
+[  8] inventory equipment gear (weight: 3) (usage: 0)
+
+To pick a particular help page, add in the number of the page.
+For example, 'help 7.equipment'
+
+
+<76hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+drink vial
+
+
+You quaff a small vial of yellow liquid that you can drink.
+You feel less tired.
+
+
+<76hp 160m 157mv>
+
+drop liquid
+
+
+You drop a small vial of yellow liquid that you can drink.
+
+
+<76hp 160m 157mv>
+
+drop liquid
+
+
+You drop a small vial of yellow liquid that you can drink.
+
+drop liquid
+
+
+
+<76hp 160m 157mv>
+
+You drop a small vial of yellow liquid that you can drink.
+
+drop liquid
+
+
+You drop a small vial of yellow liquid that you can drink.
+
+drop liquid
+
+
+You do not seem to be carrying anything with that name.
+
+
+<76hp 160m 157mv>
+
+The corpse of A kobold decays into nothingness.
+
+<76hp 160m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+|
+ -----+-----+     +-----+-----+-----+
+|ROAD  FIELD FIELD ROAD  FIELD BUILD|
+      +     +     +     +     +-----+
+|ROAD  ROAD               YOU |
+      +     +           +     +
+ FIELD FIELD             FIELD|
+      +     +           +     +
+                         ROAD |
+                        +-----+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 160m 157mv>
+
+s
+
+
+The edge of a camp in the hills
+This particular spot of the camp seems to be the place for stacking all the
+valuable possessions obtained from the battles fought recently, or at least
+it appears to be that way. It seems that they're being saved here for further
+examination, right now it's just a pile of many different objects.
+
+The sun shines brightly overhead.
+
+[Exits: north south west ]
+
+
+<76hp 160m 154mv>
+
+s
+
+
+A small camp in the hills
+From this spot a small group of tents around a pool of water can be
+appreciated, with several humanoids quickly walking around, as if they were
+rushed by someone. The view though, is somewhat obstructed by all the hills
+around here. The only way to really know what's going on is by walking in
+there.
+
+The sun shines brightly overhead.
+
+The disfigured corpse of Elminster is lying here.
+The corpse of A kobold guard is lying here.
+A kobold guard monitors the edge of the camp.
+[Exits: north west southeast ]
+
+You dodge A kobold guard's attack.
+
+
+<76hp 160m 155mv 21ac> A kobold guard <excellent>
+
+
+
+Your blast scratches A kobold guard.
+
+
+<76hp 160m 155mv 21ac> A kobold guard <scratches>
+
+c shower
+
+
+A shower of fiery blue sparks suddenly engulfs A kobold guard!
+
+A kobold guard's kick injures you.
+
+<68hp 157m 155mv 21ac> A kobold guard <pretty hurt>
+
+c shower
+
+
+A shower of bright red sparks suddenly engulfs A kobold guard!
+
+Your blood freezes as you hear A kobold guard's death cry!
+A kobold guard is DEAD!
+You receive 1760 experience.
+You get a small vial of red liquid that you can drink from the corpse of A kobold guard.
+You get a sharp metal spear from the corpse of A kobold guard.
+You get light brown armor from the corpse of A kobold guard.
+The pantheon of gods appreciates your sacrifice of the corpse of A kobold guard.
+
+
+<68hp 153m 155mv>
+
+l
+
+
+A small camp in the hills
+From this spot a small group of tents around a pool of water can be
+appreciated, with several humanoids quickly walking around, as if they were
+rushed by someone. The view though, is somewhat obstructed by all the hills
+around here. The only way to really know what's going on is by walking in
+there.
+
+The sun shines brightly overhead.
+
+The disfigured corpse of Elminster is lying here.
+The corpse of A kobold guard is lying here.
+[Exits: north west southeast ]
+
+
+<70hp 155m 155mv>
+
+get all corpse
+
+
+You see nothing left to loot from the corpse of Elminster.
+
+
+<71hp 156m 157mv>
+
+wave corpse
+
+
+You're too late.
+
+
+<74hp 158m 156mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+|
+ -----+-----+     +-----+-----+-----+
+|ROAD  FIELD FIELD ROAD  FIELD BUILD|
+      +     +     +     +     +-----+
+|ROAD  ROAD              ROAD |
+      +     +           +     +
+ FIELD FIELD             FIELD|
+      +     +           +     +
+                          YOU |
+                        +-----+
+
+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 160m 157mv>
+
+w
+
+
+Before a small tent
+This tent lies next to the leader's tent to provide more protection in case
+there is ever a need. The area is a bit cleaner here and the area is marked
+by short flagged poles with skulls atop them. Just outside the perimeter
+chaos reigns, with more of the camp visible to the north.
+
+The sun shines brightly overhead.
+
+[Exits: north east south west ]
+
+
+<76hp 160m 157mv>
+
+s
+
+
+Inside a small tent
+This tent is made of rough canvas and sits beside the larger tent. There
+are broken spears and armor in one corner and empty, cracked barrels in
+another. A pair of lone, sorry stools occupy the center of this room. The
+tent looks like it is used for storing unusable equipment.
+
+
+A warrior kobold sits in the far corner taking a break.
+[Exits: north ]
+
+A warrior kobold's claw scratches you.
+
+A warrior kobold's bite scratches you.
+
+
+<71hp 160m 155mv 21ac> A warrior kobold <excellent>
+
+Your blast wounds A warrior kobold.
+
+
+<71hp 160m 155mv 21ac> A warrior kobold <scratches>
+
+c shower
+
+
+A shower of fiery blue sparks suddenly engulfs A warrior kobold!
+
+
+<71hp 156m 155mv 21ac> A warrior kobold <quite a few>
+
+c shower
+
+
+A warrior kobold's bite scratches you.
+
+
+<68hp 156m 155mv 21ac> A warrior kobold <quite a few>
+
+A shower of bright green sparks suddenly engulfs A warrior kobold!
+
+
+<68hp 152m 155mv 21ac> A warrior kobold <pretty hurt>
+
+A warrior kobold's bite scratches you.
+
+
+<67hp 152m 155mv 21ac> A warrior kobold <awful>
+
+c shower
+
+
+A shower of brilliant white sparks suddenly engulfs A warrior kobold!
+
+Your blood freezes as you hear A warrior kobold's death cry!
+A warrior kobold is DEAD!
+You receive 490 experience.
+You get a pair of leather pants from the corpse of A warrior kobold.
+-----------------------------------------------------------------
+(on ground) the corpse of A warrior kobold contains:
+a greasy leather bracer
+a greasy leather bracer
+-----------------------------------------------------------------
+
+
+<68hp 149m 155mv>
+
+spells
+
+
+You know the following spells:
+
+Mage
+-----------------------------------------------------------------
+        chill touch                         very good  81%
+        shower of sparks                    very good  87%
+          burning hands                          poor  28%
+        static blast                        very good  89%
+
+
+<70hp 150m 155mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<74hp 151m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<75hp 150m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<76hp 149m 157mv>
+
+c burning hands
+
+
+A pale red glow suddenly surrounds your hands.
+
+
+<76hp 144m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+ ----- ----- -----       ----- ----- -----
+      |ROAD  FIELD FIELD ROAD  FIELD BUILD|
+      +     +     +     +     +     +-----+
+      |ROAD  ROAD              ROAD |
+      +     +     +           +     +
+       FIELD FIELD             FIELD|
+      +     +     +     +     +     +
+                         ROAD  ROAD |
+                        +     +-----+
+                        | YOU |
+                        +-----+
+
+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 146m 157mv>
+
+n
+
+
+Before a small tent
+This tent lies next to the leader's tent to provide more protection in case
+there is ever a need. The area is a bit cleaner here and the area is marked
+by short flagged poles with skulls atop them. Just outside the perimeter
+chaos reigns, with more of the camp visible to the north.
+
+The sun shines brightly overhead.
+
+[Exits: north east south west ]
+
+
+<76hp 148m 156mv>
+
+w
+
+
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+The sun shines brightly overhead.
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north east south west ]
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+
+<76hp 149m 155mv>
+
+A burly kobold guard misses you.
+
+As you hit A burly kobold guard, a bright flash of red fire leaps from your hands to scorch him!
+The dim red flames on your hands fade.
+A burly kobold guard's chop mauls you.
+
+
+<65hp 150m 157mv 21ac> A burly kobold guard <quite a few>
+
+c shower guard
+
+
+A shower of bright green sparks suddenly engulfs A burly kobold guard!
+
+Your blood freezes as you hear A burly kobold guard's death cry!
+A burly kobold guard is DEAD!
+You receive 1080 experience.
+You get a small vial of yellow liquid that you can drink from the corpse of A burly kobold guard.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A burly kobold guard contains:
+a gleaming crescent bladed axe
+a hard leather helm
+hard leather armor
+a leather greatcloak
+-----------------------------------------------------------------
+
+
+<65hp 146m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<69hp 148m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<71hp 148m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<72hp 147m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<74hp 146m 157mv>
+
+c burning hands
+
+
+You fail to cast the spell 'burning hands'.
+
+
+<75hp 145m 157mv>
+
+c burning hands
+
+
+A pale red glow suddenly surrounds your hands.
+
+
+<76hp 141m 157mv>
+
+inv
+
+
+You are carrying:
+a small vial of yellow liquid that you can drink
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a small vial of red liquid that you can drink
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 141m 157mv>
+
+wield spear
+
+
+You stop using a quartz-tipped wooden cane.
+You wield a sharp metal spear.
+
+
+<77hp 143m 157mv>
+
+wield cane
+
+
+You stop using a sharp metal spear.
+You wield a quartz-tipped wooden cane.
+
+
+<79hp 144m 159mv>
+
+inv
+
+
+You are carrying:
+a sharp metal spear
+a small vial of yellow liquid that you can drink
+a pair of leather pants
+light brown armor
+a small vial of red liquid that you can drink
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 145m 158mv>
+
+look spear
+
+
+(item is in your inventory)
+This spear is commonly seen among kobolds, made of a decent kind of metal,
+and somewhat light for its size. It can inflict good damage, and it's easy to
+handle.
+
+
+<76hp 147m 157mv>
+
+drop vial
+
+
+You drop a small vial of yellow liquid that you can drink.
+
+
+<76hp 150m 157mv>
+
+drop vial
+
+
+You drop a small vial of red liquid that you can drink.
+
+
+<76hp 150m 157mv>
+
+wear all
+
+
+You didn't find anything obvious to wear.
+
+
+<76hp 151m 157mv>
+
+get all corpse
+
+
+You get a gleaming crescent bladed axe from the corpse of A burly kobold guard.
+You get a hard leather helm from the corpse of A burly kobold guard.
+You can't carry that many items.
+You can't carry that many items.
+
+
+<76hp 152m 157mv>
+
+wear all
+
+
+You didn't find anything obvious to wear.
+
+
+<76hp 155m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a sharp metal spear
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 156m 157mv>
+
+wear helm
+
+
+You stop using a tarnished raven diadem.
+You wear a hard leather helm on your head.
+
+<76hp 156m 157mv>
+
+wear diadem
+
+
+You stop using a hard leather helm.
+You wear a tarnished raven diadem on your head.
+
+
+<79hp 156m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a sharp metal spear
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+examine helm
+
+
+This is an open-face, rigid leather helmet studded with iron rivets. It is
+quite a bit heavier than a regular leather helm, but the iron studs deflect
+blows much more.
+
+
+<76hp 160m 157mv>
+
+help equipment
+
+
+There is help available on the following topics:
+------------------------------------------------------------------
+[  1] binding bound equipment (weight: 3) (usage: 0)
+[  2] clan equipment (weight: 3) (usage: 0)
+[  3] clan equipment unstring (weight: 3) (usage: 0)
+[  4] thief skill salvaging equipment parts salvage (weight: 3) (usage: 0)
+[  5] thief skill scrap equipment scrapping scrapper (weight: 3) (usage: 0)
+[  6] eqsets equipment sets management (weight: 3) (usage: 0)
+[  7] equipment searching (weight: 3) (usage: 0)
+[  8] inventory equipment gear (weight: 3) (usage: 0)
+
+To pick a particular help page, add in the number of the page.
+For example, 'help 7.equipment'
+
+
+<76hp 160m 157mv>
+
+help 8.equipment
+
+
+Keywords are:  'inventory equipment gear'
+The 'inventory' command (abbreviated 'inv') gives a list of all the items
+in your inventory, that is all of the things that you are carrying.
+
+You are able to carry items according to your dexterity, so the higher your
+dex, the more items you can carry.  You are also limited in the total weight
+of items you can carry by your strength.
+
+The 'equipment' command (abbreviated 'eq') shows all the items and
+equipment you are wearing and where you are wearing it.  You can wear or
+wield things using the 'wear' or 'wield' commands, and you can stop using
+equipment with the 'remove' command.
+
+The inventory command has several tags that can be used to manage output:
+
+inv -dclient  - optimises display for use with dclient windows
+inv -weight   - show item weight and sort from heaviest to lightest
+inv -insult   - show the insult string instead of the item name
+inv -total    - display a total at the bottom of the list
+inv <keyword> - display all carried objects that match the keyword
+
+The tags can stack. For example, 'inv book -insult -total' will display a list of
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+objects with the keyword 'book', ordered by weight, with a total number
+and combined weight at the bottom of the list.
+
+
+<76hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a sharp metal spear
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+It is mid-afternoon.
+
+inv spear
+
+
+You are carrying:
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+help inventory
+
+
+Keywords are:  'inventory equipment gear'
+The 'inventory' command (abbreviated 'inv') gives a list of all the items
+in your inventory, that is all of the things that you are carrying.
+
+You are able to carry items according to your dexterity, so the higher your
+dex, the more items you can carry.  You are also limited in the total weight
+of items you can carry by your strength.
+
+The 'equipment' command (abbreviated 'eq') shows all the items and
+equipment you are wearing and where you are wearing it.  You can wear or
+wield things using the 'wear' or 'wield' commands, and you can stop using
+equipment with the 'remove' command.
+
+The inventory command has several tags that can be used to manage output:
+
+inv -dclient  - optimises display for use with dclient windows
+inv -weight   - show item weight and sort from heaviest to lightest
+inv -insult   - show the insult string instead of the item name
+inv -total    - display a total at the bottom of the list
+inv <keyword> - display all carried objects that match the keyword
+
+The tags can stack. For example, 'inv book -insult -total' will display a list of
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+objects with the keyword 'book', ordered by weight, with a total number
+and combined weight at the bottom of the list.
+
+
+Other matching help pages:
+------------------------------------------------------------------
+[  2] mush-z mushz config inventory
+
+To pick a particular help page, add in the number of the page.
+For example, 'help 2.inventory'
+
+
+<76hp 160m 157mv>
+
+help check
+
+
+Keywords are:  'check spells skills'
+Format:
+check
+check <class name> <args>
+
+The check command will give you recommendations on what skills and spells
+you should learn
+
+When checking a class, it will recommend what stats you should train and
+the kinds of stats to look for in equipment.
+
+You can see abbreviated checks for each class according to importance.
+The options are 'helpful', 'important', and 'critical'.
+For example, 'check mage important'.
+
+
+Other matching help pages:
+------------------------------------------------------------------
+[  2] stealing passwords check scam
+[  3] credits money order check
+[  4] shadow check
+[  5] waypoints check timeout
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+[  6] set room check
+[  7] books great library subject topic checkout
+
+To pick a particular help page, add in the number of the page.
+For example, 'help 7.check'
+
+
+<76hp 160m 157mv>
+
+The corpse of A burly kobold guard decays into nothingness.
+
+<76hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a sharp metal spear
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+eq helm
+
+
+You stop using a tarnished raven diadem.
+You wear a hard leather helm on your head.
+
+
+<76hp 160m 157mv>
+
+eq diadem
+
+
+You stop using a hard leather helm.
+You wear a tarnished raven diadem on your head.
+
+
+<79hp 157m 157mv>
+
+score
+
+
+You are Elminster
+You are level 8 with 55 practices  (3 hours)
+You are carrying 9/9 items with weight 50/160 pounds.  Encumbrance:  2%
+You have 76/76 hit, 160/160 mana, 157/157 movement.
+
+Str: 13  Int: 19  Wis: 14  Dex: 12  Con: 12  Chr: 13
+Your levels are:  Ma 8  Cl 2  Th 0  Wa 0  Nc 0  Dr 0
+You have 20013 experience points, and 124 gold coins.
+Hitroll: 1  Damroll: 2
+Armor: 21    (you are only wearing 9 of 15 pieces of armor)
+You are not hungry.
+Alignment: 0 (You are neutral.)
+You are not suffering from any major debilitating conditions.
+You have one quest in progress.  (Use the 'quests' command to list them.)
+You are affected by:
+Spell 'burning hands'
+
+
+<76hp 160m 157mv>
+
+newbie
+
+
+Turning on channel 'newbie'.
+
+
+<76hp 160m 157mv>
+
+The dim red flames on your hands fade.
+
+
+<76hp 160m 157mv>
+
+newbie
+
+
+Turning off channel 'newbie'.
+
+
+<76hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a sharp metal spear
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+drop spear
+
+
+You drop a sharp metal spear.
+
+
+<76hp 160m 157mv>
+
+drop spear
+
+
+You drop a sharp metal spear.
+
+drop spear
+
+
+You drop a sharp metal spear.
+
+
+<76hp 160m 157mv>
+
+l
+
+
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+The sun shines brightly overhead.
+
+A metal spear is lying on the ground before you.
+A metal spear is lying on the ground before you.
+A metal spear is lying on the ground before you.
+A small vial of red liquid lies on the ground here.
+A small vial of yellow liquid lies on the ground here.
+[Exits: north east south west ]
+
+
+<76hp 160m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+      |ROAD |
+      +-----+-----+-----+     +-----+-----+-----+
+            |ROAD  FIELD FIELD ROAD  FIELD BUILD|
+            +     +     +     +     +     +-----+
+            |ROAD  ROAD              ROAD |
+            +     +     +           +     +
+             FIELD FIELD             FIELD|
+            +     +     +     +     +     +
+                          YOU  ROAD  ROAD |
+                        +     +     +-----+
+                              |BUILD|
+                              +-----+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 160m 157mv>
+
+s
+
+
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north south ]
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+
+<76hp 160m 155mv>
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+
+<76hp 160m 155mv>
+
+A burly kobold guard's chop devastates you!
+
+You parry A burly kobold guard's attack.
+
+<58hp 160m 157mv 21ac> A burly kobold guard <excellent>
+
+A burly kobold guard's chop wounds you.
+
+A burly kobold guard's chop decimates you!
+
+
+<36hp 160m 157mv 21ac> A burly kobold guard <excellent>
+
+
+
+A burly kobold guard's claw wounds you.
+A burly kobold guard dodges your attack.
+
+
+<27hp 160m 157mv 21ac> A burly kobold guard <excellent>
+
+A burly kobold guard's chop mauls you.
+You run away from the battle like a yellow bellied coward!!
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+The sun shines brightly overhead.
+
+A metal spear is lying on the ground before you.
+A metal spear is lying on the ground before you.
+A metal spear is lying on the ground before you.
+A small vial of red liquid lies on the ground here.
+A small vial of yellow liquid lies on the ground here.
+[Exits: north east south west ]
+
+c shower
+
+
+
+<15hp 160m 139mv>
+
+They are no longer here.
+
+
+<16hp 160m 139mv>
+
+sleep
+
+
+You go to sleep.
+
+
+<17hp 160m 141mv>
+
+help stats
+
+
+There is help available on the following topics:
+------------------------------------------------------------------
+[  1] dexterity stats statistic (weight: 3) (usage: 2)
+[  2] stats statistics attributes cap (weight: 3) (usage: 1)
+[  3] strength stats statistic (weight: 3) (usage: 1)
+[  4] charisma chrisma stats statistic (weight: 3) (usage: 1)
+[  5] wisdom stats statistic (weight: 3) (usage: 1)
+[  6] intelligence stats (weight: 3) (usage: 0)
+[  7] constitution stats statistic (weight: 3) (usage: 0)
+[  8] brag share stats (weight: 3) (usage: 0)
+[  9] show character stats information (weight: 3) (usage: 0)
+
+To pick a particular help page, add in the number of the page.
+For example, 'help 8.stats'
+
+
+<26hp 160m 155mv>
+
+help examine
+
+
+Keywords are:  'thief skill examine locks'
+
+Skill: examine lock             Lvl 18 Thie  (28%)
+                                (helpful)   Requires: lock picking
+                                Group: Thief tinkering
+
+Usage:
+examine <door>
+examine <door> <direction>
+examine <object>
+
+Examining a lock gives the thief an estimate on how difficult the lock is to
+pick. It can also indicate specific properties of the lock, such as whether it
+will automatically lock when closed.
+
+Examine locks also works passively when attempting to pick a lock, lowering the
+intelligence required and allowing the lock to be picked much more quickly.
+
+
+<42hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+
+
+<53hp 160m 157mv>
+
+con helm
+
+
+In your dreams or what?
+(you are currently asleep)
+
+<54hp 160m 157mv>
+
+You find yourself feeling sharp and ready to take on anything!
+
+
+<55hp 160m 157mv>
+
+stand
+
+
+You stand up.
+
+
+<56hp 160m 157mv>
+
+con helm
+
+
+Consider killing who?
+
+
+<58hp 160m 157mv>
+
+l
+
+
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+The sun shines brightly overhead.
+
+A metal spear is lying on the ground before you.
+A metal spear is lying on the ground before you.
+A metal spear is lying on the ground before you.
+A small vial of red liquid lies on the ground here.
+A small vial of yellow liquid lies on the ground here.
+[Exits: north east south west ]
+
+
+<60hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+
+
+<76hp 160m 157mv>
+
+eq search helm
+
+
+Sorry, no effect by the name 'helm' found.
+
+
+<76hp 160m 157mv>
+
+eq
+
+
+You are using:
+head        -              a tarnished raven diadem
+neck        -              a minor ward crystal pendant (glow)
+neck        -
+arms        -
+wrist       -
+wrist       -
+hands       - (rare)       well made leather gloves
+finger      -              a rainbow obsidian ring
+finger      -              a rainbow obsidian ring
+on body     -              light brown armor
+about body  -
+waist       -
+legs        -              a pair of leather pants
+feet        -              a pair of indigo blue sandals
+shield      -
+weapon      -              a quartz-tipped wooden cane (light)
+
+<76hp 160m 157mv>
+
+eq search hitroll
+
+
+     1 hands       -  (rare)       well made leather gloves
+
+
+<76hp 160m 157mv>
+
+identify helm
+
+
+You are carrying a hard leather helm.
+
+Item: 'hard leather helm'
+Weight: 3  Size: 2'0"  Level: 7  Item Quality: WELL CRAFTED
+Type: ARMOR   Composition: FLESH, SKIN   Defense: 6 ac-apply
+Weapon damage: 3 to 15 average, pound, 12 strength to use.
+Object is:
+Wear locations are:  HEAD
+Item has other effects:
+Affects:  HIT_POINTS by 9
+
+
+
+<76hp 160m 157mv>
+
+identify cane
+
+
+You are wielding a quartz-tipped wooden cane.
+
+Item: 'quartz wooden wood cane'
+Weight: 2  Size: 4'0"  Level: 1  Item Quality: WELL CRAFTED
+Type: WEAPON   Composition: TIMBER, ASH
+Weapon damage: 5 to 25 average, magic blast, 11 strength to use.
+Object is:  LIGHT MAGE
+Item has other effects:
+Affects:  MANA_REGEN by 1.0
+Affects:  MANA by 10
+Affects:  ARMOR by 2
+
+This item is bound to you.
+Damage Type: NONSOLID BLUNT   Damage Traits:
+Strong against: MECHANICAL SKELETAL CRYSTALLINE
+Weak against:   BLOBS
+Special Qualities:
+  Cannot be parried.
+  Effective against ethereal creatures.
+
+
+
+<76hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+
+<76hp 160m 157mv>
+
+identify armor
+
+
+You are carrying light brown armor.
+
+Item: 'light brown leather armor'
+Weight: 5  Size: 2'10"  Level: 7  Item Quality: WELL CRAFTED
+Type: ARMOR   Composition: FLESH, SKIN   Defense: 2 ac-apply
+Weapon damage: 4 to 16 average, pound, 14 strength to use.
+Object is:
+Wear locations are:  ON_BODY
+Item has other effects:
+Affects:  DAMROLL by 1
+Affects:  STR by 1
+
+
+
+<76hp 160m 157mv>
+
+identify axe
+
+
+You are carrying a gleaming crescent bladed axe.
+
+Item: 'axe crescent gleaming large bladed blade'
+Weight: 9  Size: 1'10"  Level: 7  (you can't use this yet)  Item Quality: WELL CRAFTED
+Type: WEAPON   Composition: BASE METAL, IRON
+Weapon damage: 3 to 21 average, chop, 18 strength to use.
+Object is:  WARRIOR
+Item has other effects:
+Affects:  HITROLL by 2
+Affects:  DAMROLL by 2
+Affects:  ATTACK_SPEED by 1
+Affects:  PARRY by 2
+
+Damage Type: EDGED   Damage Traits: IMPACT BLADED
+Strong against: BLOBS PLANTS
+Weak against:   MECHANICAL SKELETAL CRYSTALLINE
+Special Qualities:   (none)
+
+
+<76hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a pair of leather pants
+light brown armor
+a sharp metal spear
+a sharp metal spear
+
+<76hp 160m 157mv>
+
+drop spear
+
+
+You drop a sharp metal spear.
+
+
+<76hp 160m 157mv>
+
+drop spear
+
+
+You drop a sharp metal spear.
+
+
+<76hp 160m 157mv>
+
+c
+
+
+Cast what which where?
+
+
+<76hp 160m 157mv>
+
+s
+
+
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north south ]
+A burly kobold guard's chop hits you.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+
+
+
+<72hp 160m 155mv 21ac> A burly kobold guard <excellent>
+
+c shower
+
+
+A shower of bright yellow sparks suddenly engulfs A burly kobold guard!
+A burly kobold guard appears to be blinded!
+
+
+<72hp 156m 155mv 21ac> A burly kobold guard <awful>
+
+You parry A burly kobold guard's attack.
+
+c shower
+
+
+A burly kobold guard begins to regain his vision.
+
+<72hp 156m 155mv 21ac> A burly kobold guard <awful>
+
+A burly kobold guard's chop mauls you.
+
+<60hp 156m 155mv 21ac> A burly kobold guard <awful>
+
+A burly kobold guard's chop injures you.
+
+A shower of bright yellow sparks suddenly engulfs A burly kobold guard!
+
+Your blood freezes as you hear A burly kobold guard's death cry!
+A burly kobold guard is DEAD!
+You receive 1760 experience.
+You get a small vial of yellow liquid that you can drink from the corpse of A burly kobold guard.
+You get a small vial of red liquid that you can drink from the corpse of A burly kobold guard.
+You get a scroll of magic missile from the corpse of A burly kobold guard.
+You get a gleaming crescent bladed axe from the corpse of A burly kobold guard.
+You get a hard leather helm from the corpse of A burly kobold guard.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A burly kobold guard contains:
+hard leather armor
+a leather greatcloak
+-----------------------------------------------------------------
+You jump to attack A burly kobold guard!
+
+
+<53hp 152m 155mv 21ac> A burly kobold guard <excellent>
+
+Your blast scratches A burly kobold guard.
+
+
+<53hp 152m 155mv 21ac> A burly kobold guard <scratches>
+
+c shower
+
+
+A burly kobold guard's claw wounds you.
+
+<43hp 152m 155mv 21ac> A burly kobold guard <scratches>
+
+A shower of bright red sparks suddenly engulfs A burly kobold guard!
+
+
+<43hp 148m 155mv 21ac> A burly kobold guard <big nasty>
+
+c shower
+
+
+A burly kobold guard's chop hits you.
+
+A shower of fiery blue sparks suddenly engulfs A burly kobold guard!
+
+Your blood freezes as you hear A burly kobold guard's death cry!
+A burly kobold guard is DEAD!
+You receive 1760 experience.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A burly kobold guard contains:
+a scroll of magic missile
+a gleaming crescent bladed axe
+a hard leather helm
+hard leather armor
+a leather greatcloak
+-----------------------------------------------------------------
+
+
+<37hp 144m 155mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a gleaming crescent bladed axe
+a scroll of magic missile
+a small vial of red liquid that you can drink
+a small vial of yellow liquid that you can drink
+a hard leather helm
+a gleaming crescent bladed axe
+a pair of leather pants
+light brown armor
+
+<42hp 147m 157mv>
+
+drop vial
+
+
+You drop a small vial of red liquid that you can drink.
+
+
+<45hp 149m 157mv>
+
+drop axe
+
+
+You drop a gleaming crescent bladed axe.
+
+
+<47hp 150m 157mv>
+
+get greatcloak corpse
+
+
+You get a leather greatcloak from the corpse of A burly kobold guard.
+Type 'wear leather' to start using a leather greatcloak.
+
+
+<54hp 154m 157mv>
+
+identify cloak
+
+
+You are carrying a leather greatcloak.
+
+Item: 'leather greatcloak cloak'
+Weight: 8  Size: 3'10"  Level: 7  Item Quality: WELL CRAFTED
+Type: ARMOR   Composition: FLESH, SKIN   Defense: 5 ac-apply
+Weapon damage: 4 to 16 average, whip, 17 strength to use.
+Object is:
+Wear locations are:  ABOUT_BODY
+Item has other effects:
+Affects:  HIDE by -1
+Affects:  SNEAK by -1
+Affects:  HITROLL by 1
+
+
+Type 'wear leather' to start using a leather greatcloak.
+
+
+<56hp 156m 157mv>
+
+wear cloak
+
+
+You wear a leather greatcloak about your body.
+
+
+<59hp 160m 157mv>
+
+inv
+
+
+You are carrying:
+a hard leather helm
+a scroll of magic missile
+a small vial of yellow liquid that you can drink
+a hard leather helm
+a gleaming crescent bladed axe
+a pair of leather pants
+light brown armor
+
+
+<62hp 160m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+       ----- ----- -----       ----- ----- -----
+            |ROAD  FIELD FIELD ROAD  FIELD BUILD|
+            +     +     +     +     +     +-----+
+            |ROAD  ROAD              ROAD |
+            +     +     +           +     +
+             FIELD FIELD             FIELD|
+            +     +     +     +     +     +
+                         FIELD ROAD  ROAD |
+                        +     +     +-----+
+                        | YOU |BUILD|
+                        +     +-----+
+
+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<63hp 160m 157mv>
+
+s
+
+
+Inside Uffspigot's tent
+Here is the back of the largest part of the tent. If anything is going to
+indicate that this is the leader's tent, it would be the absence of debris
+and size of this tent. Splayed out on a large table in the center of this
+room, is a large map with unreadable symbols on it. This must be the place
+where all planning and strategizing goes on.
+
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+Uffspigot, leader of this tribe of kobolds, looks at you suspiciously.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north ]
+A burly kobold guard's chop hits you.
+Uffspigot's bite injures you.
+
+Uffspigot's bite scratches you.
+A burly kobold guard dodges your attack.
+A burly kobold guard's chop hits you.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard's chop injures you.
+
+<35hp 160m 155mv 31ac> A burly kobold guard <excellent>
+
+A burly kobold guard misses you.
+
+
+<35hp 160m 155mv 31ac> A burly kobold guard <excellent>
+
+c shower
+
+
+A shower of fiery blue sparks suddenly engulfs A burly kobold guard!
+
+
+<35hp 156m 155mv 31ac> A burly kobold guard <quite a few>
+
+c shower
+
+
+A burly kobold guard trips you, sending you sprawling!
+Uffspigot's bite injures you.
+A burly kobold guard's chop wounds you.
+You run away from the battle like a yellow bellied coward!!
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+A large worn axe with a short handle has been dropped.
+A small vial of red liquid lies on the ground here.
+The corpse of A burly kobold guard is lying here.
+The corpse of A burly kobold guard is lying here.
+[Exits: north south ]
+
+
+<12hp 156m 138mv>
+
+They are no longer here.
+
+sleep
+
+
+You go to sleep.
+
+
+<15hp 158m 140mv>
+
+rest
+
+
+You wake up and begin resting.
+
+
+<19hp 160m 146mv>
+
+hom
+
+
+You pray to the pantheon of gods for transportation...
+-----------------------------------------------------------------
+The Pellam Cemetery Waypoint
+Waypoints are a quick way to get from place to place without needing to walk.
+You can travel between waypoints using the 'waypoint' command.  You can use
+the 'pray here' command to add this waypoint to your waypoint list.
+
+The far north rim of the pit is lightly forested with tall cedars.  Very old
+headstones, so worn they no longer bear any text, are hidden within the wooded
+area. To the south, a path leads down from the hills into the cemetery.
+
+The sun shines brightly overhead.
+
+A small candle with a bright blue flame sits here.
+A small camp fire is slowly burning away to ash here.
+[Exits: east south ]
+
+
+<21hp 160m 94mv>
+
+sleep
+
+
+You go to sleep.
+
+
+<23hp 160m 96mv>
+
+The warmth of a camp fire settles into you, soothing aches and settling your mind.
+
+
+<36hp 160m 114mv>
+
+The warmth of a camp fire settles into you, soothing aches and settling your mind.
+
+
+<76hp 160m 157mv>
+
+stand
+
+
+You stand up.
+
+
+<76hp 160m 157mv>
+
+waypoints
+
+
+Waypoints you can get to from here:
+------------------------------------------------------------
+     1 - A heavily warded waypoint
+     2 - A large waypoint in a stony field
+->   3 - The Pellam Cemetery Waypoint
+    99 - Central Bulletin Board Hall
+
+
+To use a waypoint, give its number, for example 'waypoint 2'.
+
+
+<76hp 160m 157mv>
+
+way 2
+
+
+You are surrounded by a flickering blue glow.  When it fades, you find yourself elsewhere...
+-----------------------------------------------------------------
+A large waypoint in a stony field
+Waypoints are a quick way to get from place to place without needing to walk.
+You can travel between waypoints using the 'waypoint' command.  You can use
+the 'pray here' command to add this waypoint to your waypoint list.
+
+The sun hangs low on the western horizon.
+
+Someone has left a cache of food here.
+A small sack can be picked up and used as a container.
+A small candle with a bright blue flame sits here.
+A crude sign has been posted in the ground next to the waypoint.
+[Exits: north east south west ]
+
+
+<76hp 160m 147mv>
+
+map
+
+
+Map Scale - Large (Landscape)
+
+
+ -----+
+ FIELD|
+      +-----+                       +-----+-----+-----+
+ FIELD FIELD|                        FIELD FIELD FIELD
+ -----+     +-----+           +     +     +     +     +
+|     |FIELD FIELD|            TRAIL TRAIL TRAIL TRAIL
+      +     +     +-----+     +     +-----+-----+     +
+             ROAD  ROAD   YOU  TRAIL            |FIELD
+            +     +-----+     +     +           +     +
+                                                |FIELD
+                                                +     +
+                                                 FIELD
+                                                +     +
+                                                 FIELD
+                                                +-----+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 160m 147mv>
+
+way 1
+
+
+You are surrounded by a flickering blue glow.  When it fades, you find yourself elsewhere...
+-----------------------------------------------------------------
+A heavily warded waypoint
+Waypoints are special places throughout the land that allow quick
+transportation.  When at a waypoint, you may use it to go to other
+waypoints you have recently been to.  You can set this as your current
+waypoint with the 'waypoint set' command. You may also use the 'recall'
+command to return to your most recently used waypoint.
+
+You can see the imp infested fields in the distance to the east.
+
+The sun hangs low on the western horizon.
+
+(linkdead)Silvermist is here.
+A small candle with a bright blue flame sits here.
+A small candle with a bright blue flame sits here.
+[Exits: north east south west ]
+
+
+<76hp 160m 142mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+                        +-----+-----+
+                        |TOWN  TOWN |
+                  +-----+     +     +-----+-----+
+                  |TOWN   YOU  ROAD  ROAD  ROAD
+                  +-----+     +     +-----+-----+
+
+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 160m 144mv>
+
+n
+
+
+A makeshift, cluttered shop - http://alteraeon.com:8080/shops/50001
+This hastily constructed forge and armory bears witness for how long the
+members of this encampment have been forced to remain here. Rather than a
+canvas tent which would be prone to fire, the working area is shadowed from
+the elements by a log and mud structure.  A heavy slab of iron has been
+laid across three rocks to give the blacksmith working space.
+
+You may buy weapons and armor here.  Use the 'list' command to see items,
+and the 'buy' command to buy things.
+
+To see the stats of an item, try 'list <item name>', for example, 'list
+dagger' to see the stats of a dagger for sale.
+
+Light from outside lights up the area.
+
+A pair of well made leather gloves lies on the ground here.
+A bracer covered in dark red stains lies on the ground.
+A slab of iron rests on some rocks here.
+Lojban the blacksmith works the fires and tends the armory.
+[Exits: east south ]
+
+
+<76hp 160m 142mv>
+
+e
+
+
+A small, well kept lean-to
+This lean-to is formed by a few dozen straight branches and logs leaning up
+against the northern wall of the encampment.  A small raised cot with soft
+straw below it for insulation serves as the bed.
+
+Kamrah was the leading huntress and ranger for Pellam before the attack,
+and now she serves as one of the leading scouts and trainers for the
+refugees.  She can try to teach you skills, should you have the ability to
+learn them.
+
+To see what skills are available,  use the 'slist' command.  To practice a
+skill use the 'practice' command, and to raise your stats use the 'train'
+command.  Some skills require high stats, so you may need to pick and
+choose.
+
+Not all skills are available at all trainers. To find a trainer that
+teaches a certain skill or spell, type 'skill find <skill name>'.
+
+To see the skills and stats that are best for you, try the 'check' command.
+
+Light from outside lights up the area.
+
+Kamrah the Huntress offers to teach you fighting skills.
+[Exits: south west ]
+
+
+<76hp 160m 145mv>
+
+skills list
+
+
+What skill, or level range, do you want to display?
+
+
+<76hp 160m 150mv>
+
+check
+
+
+Things every character should consider getting...
+-----------------------------------------------------------------
+WARNING: Equipment slot 'neck' is empty.
+WARNING: Equipment slot 'arms' is empty.
+WARNING: Equipment slot 'wrists' is empty.
+WARNING: Equipment slot 'wrists' is empty.
+WARNING: Equipment slot 'waist' is empty.
+
+Mage spells and skills
+-----------------------------------------------------------------
+Important spell:     fly                            not learned
+Important spell:     infravision                    not learned
+
+You can see specific checks for a class with the following:
+check mage
+check cleric
+check warrior
+check thief
+check necromancer
+check druid
+
+You can see abbreviated checks for each class according to importance.
+The options are 'helpful', 'important', and 'critical'.
+For example, 'check mage important'.
+
+Class skills and spells can also be sorted by whether they use 'combat' or 'profession' points.
+
+If you are looking for a trainer for a particular ability, try 'spell find <spell or skill name>'.
+To find trainers in a city, try 'where trainers'.
+
+
+<76hp 160m 157mv>
+
+check mage
+
+
+Things mages should consider getting...
+-----------------------------------------------------------------
+WARNING: Equipment slot 'neck' is empty.
+WARNING: Equipment slot 'arms' is empty.
+WARNING: Equipment slot 'wrists' is empty.
+WARNING: Equipment slot 'wrists' is empty.
+WARNING: Equipment slot 'waist' is empty.
+Find equipment with mana regeneration to decrease your regen time.
+Your wisdom is too low for your level.
+
+Mage Spells and Skills Level 8 and under that are 'critical'
+-----------------------------------------------------------------
+Recommended spell: mana shield                   not learned
+Recommended spell: burning hands                 poor
+Recommended spell: frostflower                   not learned
+
+
+<76hp 160m 157mv>
+
+learn mana shield
+
+
+You spend one practice to learn mana shield (28 percent gained).
+Hint: 'mana shield' is used to lower the damage you take by converting some of the hp loss in to mana loss.
+It can also prevent you from being dispelled if an enemy casts 'dispel magic' on you.
+You can add this to your recast list using the 'recast' command to have the game automatically cast it for you again when the spell ends.
+Use 'help mana shield' for information on this ability!
+
+
+<76hp 160m 157mv>
+
+learn frostflower
+
+
+Your wisdom is too low - you need at least 15 wisdom to learn frostflower.
+(you can use the 'train' command to raise your wisdom)
+
+
+<76hp 160m 157mv>
+
+train wisdom
+
+
+You use 5 practices...
+Your wisdom increases to 15!
+You gain 0/76 hp, 3/163 mana, and 0/157 movement!
+
+
+<76hp 160m 157mv>
+
+learn frostflower
+
+
+You spend one practice to learn frostflower (28 percent gained).
+Hint: 'frostflower' will attack all creatures in the room for ice and pierce damage.
+Pierce damage is more effective against machines, and less effective against plants and skeletal creatures.
+Use 'help frostflower' for information on this ability!
+
+
+<76hp 163m 157mv>
+
+check mage
+
+
+Things mages should consider getting...
+-----------------------------------------------------------------
+WARNING: Equipment slot 'neck' is empty.
+WARNING: Equipment slot 'arms' is empty.
+WARNING: Equipment slot 'wrists' is empty.
+WARNING: Equipment slot 'wrists' is empty.
+WARNING: Equipment slot 'waist' is empty.
+Find equipment with mana regeneration to decrease your regen time.
+Your wisdom is too low for your level.
+
+Mage Spells and Skills Level 8 and under that are 'critical'
+-----------------------------------------------------------------
+Recommended spell: mana shield                   poor
+Recommended spell: burning hands                 poor
+Recommended spell: frostflower                   poor
+
+
+<76hp 163m 157mv>
+
+c mana shield
+
+
+You learn from your mistakes, and become more adept at casting mana shield.
+You gain 800 experience.
+You can feel an invisible mana shield connect to your mana.
+
+
+<76hp 155m 157mv>
+
+help mana shield
+
+
+Keywords are:  'mage spell manashield shield'
+
+Spell: mana shield              Mana:   8  Int: 14  Wis: 11  Lvl  4 Mage  (28%)
+                                (critical)
+                                Group: Mage force fields
+
+Usage:
+cast mana shield [up/down]
+
+This spell surrounds you in a weak bubble of force that can absorb damage
+and help protect you, but each hit weakens the shield and requires extra
+mana to keep the shield up.  If you run out of mana, the shield will be
+so thin that it can't protect you anymore.
+
+The shield normally lasts a long time, but you can take the spell down
+by recasting it with the 'down' keyword.
+
+The effectiveness of the shield is based strictly on your mage level.
+
+
+<76hp 158m 157mv>
+
+
+
+
+
+<76hp 163m 157mv>
+
+c burhning hands
+
+
+You do not know of any spell by that name.
+
+
+<76hp 163m 157mv>
+
+c burning hands
+
+
+A pale red glow suddenly surrounds your hands.
+
+
+<76hp 158m 157mv>
+
+help frostflower
+
+
+Keywords are:  'mage spell frostflower flower'
+
+Spell: frostflower              Mana:   4  Int: 19  Wis: 15  Lvl  8 Mage  (28%)
+                                (critical)   Requires: chill touch
+                                Group: Mage elemental cold spellgroup
+                                Damage Type: ice / pierce
+                                Damage: moderate area
+                                Speed: average
+                                (Can Be Channeled)
+
+Usage:
+cast frostflower <target>
+
+The 'frostflower' spell is one of the first, lowest level ice spells,
+requiring very little mana and effort to cast.  The caster summons a
+handful of ice crystals to act as seeds, then scatters them.  A short time
+later, the crystals suddenly grow into spiked balls of ice, reinforced by
+the magic within them.  From a distance, they are considered beautiful,
+and resemble crystal flowers.
+
+Because the crystals grow so fast, and because the original crystals are
+scattered, their sudden appearance can deal significant damage to nearby
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+targets.
+
+The reason this otherwise difficult spell is castable at low levels is
+due to a strange quirk of the elemental channel.  Each of the seeds is
+a small channel to the ethereal plane, and when forming the flowers mana
+pours from the ice plane into ours.  A few seconds later, the flow begins
+to reverse, and just as quickly the flowers are pulled back and vanish.
+
+You can create the spell 'frostflower' on the following consumables:
+   Scrolls
+
+
+<76hp 163m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+
+
+                  +-----+-----+
+                  |TOWN   YOU |
+            +-----+     +     +-----+-----+
+            |TOWN  WAYPT ROAD  ROAD  ROAD
+            +-----+     +     +-----+-----+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 163m 157mv>
+
+s
+
+
+The guarded entrance to the encampment
+The only entrance to (or exit from) the encampment is here, through a narrow
+gap in the tall fence of sharpened poles.  Looking out through the guarded
+entryway, you see a narrow stone bridge leading over a fairly deep gully.
+Though there is no gate on the fence, you suspect from the heavy wards and
+runes bound on the nearby poles that not many things will be able to enter.
+
+The next phase of your journey lies there, across the bridge to the east.
+
+The sun hangs low on the western horizon.
+
+A camouflaged archer stands guard from a platform next to the fence.
+A large pile of glowing embers provides warmth, light, and safety.
+[Exits: north east south west ]
+
+
+<76hp 163m 156mv>
+
+where trainer
+
+
+Dir  Nearby Teachers and Trainers
+-----------------------------------------------------------------
+N    Kamrah the Huntress              -> A small, well kept lean-to
+S    Stiboli the Spellcaster          -> Before a covered wagon
+
+
+<76hp 163m 157mv>
+
+Nyssra the archer looks like she wants to talk to you.
+
+
+<76hp 163m 157mv>
+
+s
+
+
+Before a covered wagon
+The wagon is near one of the corners of the encampment, protected on one
+side by rock and on the other by the tall fence that lines the river bank.
+
+You can learn mage, cleric, druid or necromancer spellcasting here.
+
+You can use the 'slist' command to see what spells you can learn, and use
+the 'learn' command to learn new spells.  If your intelligence or wisdom
+are too low, you can use the 'train' command to raise them.
+
+Training and learning uses 'practice points' that you get when you level,
+and as you gain levels you can learn more powerful spells and skills.
+
+Not all spells are available at all trainers. To find a trainer that
+teaches a certain skill or spell, type 'spell find <spell name>'.
+
+To see the spells and stats that are best for you, try the 'check' command.
+
+The sun hangs low on the western horizon.
+
+Stiboli, the resident spellcaster, stands before you.
+[Exits: north west ]
+
+
+<76hp 163m 155mv>
+
+spell list
+
+
+What spell, or level range, do you want to display?
+
+
+<76hp 163m 157mv>
+
+slist
+
+
+You have 48 practices left.
+Stiboli the Spellcaster looks you over and tells you, 'I can teach you the following abilities:'
+
+Mage elemental cold spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+      frostflower                   poor          19  15       8 mag
+
+Mage crystal spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    crystal light                   not learned   13  11       2 mag
+      shards                        not learned   18  14       7 mag
+
+Mage elemental fire spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+      burning hands                 poor          15  11       6 mag
+        infravision                 not learned   17  13       8 mag
+
+Mage illusion spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    dancing lights                  not learned   15  11       5 mag
+
+Mage basic magics
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+------------------------------------------------ Int Wis Chr Lvl ---
+    spell lore                      not learned                6 mag
+
+Mage force fields
+------------------------------------------------ Int Wis Chr Lvl ---
+    mana shield                     poor          14  11       4 mag
+      fly                           not learned   17  13       7 mag
+
+Cleric divine aid spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    armor aegis                     not learned       13  11   3 cle
+
+Cleric healing spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    soothe wounds                   not learned       12  11   1 cle
+
+Cleric divine might spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    inflict wounds                  not learned       15  11   2 cle
+
+Cleric divine conjuration spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+    continual light                 not learned       13  11   2 cle
+
+Cleric tribulation spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    afflict                         not learned       12  11   1 cle
+      faerie fire                   not learned       13  11   3 cle
+
+(If you run out, you can buy extra practices using the 'credit buy' command.)
+(If you are trying to find a particular skill or spell and don't see it on this list, try 'spell find <spell or skill name>' to locate a teacher.)
+
+
+<76hp 163m 157mv>
+
+learn soothe wounds
+
+
+You spend one practice to learn soothe wounds (42 percent gained).
+Hint: 'soothe wounds' restores a small amount of hit points.
+It also helps mitigate ongoing acid damage on the target, and can help prevent stunning.
+Use 'help soothe wounds' for information on this ability!
+
+
+<76hp 163m 157mv>
+
+c soothe
+
+
+You do not need that much healing right now.
+
+<76hp 163m 157mv>
+
+learn armor aegis
+
+
+'armor aegis' is a little beyond your abilities right now.
+You need to gain a level or two before you can learn it.
+
+
+<76hp 163m 157mv>
+
+c continual light
+
+
+You don't know 'continual light' at all, but attempt to cast it anyway.
+You fail to cast the spell 'continual light'.
+
+
+<76hp 158m 157mv>
+
+learn continual light
+
+
+You spend one practice to learn continual light (85 percent gained).
+Hint: 'continual light' creates a ball of light that follows you around and provides a light source in the room you are in.
+The ball of light is not very durable so be aware that you could lose your light source if enemies use area attacks.
+Use 'help continual light' for information on this ability!
+
+
+<76hp 163m 157mv>
+
+c continual light
+
+
+A ball of light forms near your head.
+
+
+<76hp 150m 157mv>
+
+slist
+
+
+You have 46 practices left.
+Stiboli the Spellcaster looks you over and tells you, 'I can teach you the following abilities:'
+
+Mage elemental cold spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+      frostflower                   poor          19  15       8 mag
+
+Mage crystal spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    crystal light                   not learned   13  11       2 mag
+      shards                        not learned   18  14       7 mag
+
+Mage elemental fire spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+      burning hands                 poor          15  11       6 mag
+        infravision                 not learned   17  13       8 mag
+
+Mage illusion spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    dancing lights                  not learned   15  11       5 mag
+
+Mage basic magics
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+q
+
+
+
+<76hp 155m 157mv>
+
+The dim red flames on your hands fade.
+
+
+<76hp 156m 157mv>
+
+learn shards
+
+
+You need to know 'crystal light' to learn shards.
+
+
+<76hp 157m 157mv>
+
+learn crystal light
+
+
+You spend one practice to learn crystal light (42 percent gained).
+Hint: 'crystal light' creates a light source that can be used to light up the room you're in.
+You can also throw it in to an adjacent room to illuminate it.
+Use 'help crystal light' for information on this ability!
+
+
+<76hp 162m 157mv>
+
+c shards
+
+
+You are not currently in battle.  What enemy do you want to cast it on?
+
+
+<76hp 163m 157mv>
+
+learn shards
+
+
+You need to know 'crystal light' a little better first.
+
+
+<76hp 163m 157mv>
+
+learn crystal light
+
+
+You spend one practice to learn crystal light (42 percent gained).
+
+
+<76hp 163m 157mv>
+
+learn shards
+
+
+You spend one practice to learn shards (42 percent gained).
+Hint: 'shards' is used to do slice damage to the target.
+Slice damage is more effective against blobs and plants, but less effective against mechanical, skeletal and crystalline mobs.
+Use 'help shards' for information on this ability!
+
+
+<76hp 163m 157mv>
+
+help shards
+
+
+Keywords are:  'mage spell crystal shards'
+
+Spell: shards                   Mana:   4  Int: 18  Wis: 14  Lvl  7 Mage  (42%)
+                                (important)   Requires: crystal light
+                                Group: Mage crystal spellgroup
+                                Damage Type: slice
+                                Damage: moderate
+                                Speed: average
+                                (Can Be Channeled)
+
+Usage:
+cast shards <target>
+
+This low level spell allows the caster to summon shards from the elemental
+plane of crystal, and direct them at a target.  This spell provides the
+basis for many other crystal spells at higher levels.
+
+Heavy armor will help protect against this spell. Lightly armored targets
+have a small chance to start bleeding.
+
+You can create the spell 'shards' on the following consumables:
+   Potions   Scrolls
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+
+
+
+
+Other matching help pages:
+------------------------------------------------------------------
+[  2] mage spell shardstorm storm
+
+To pick a particular help page, add in the number of the page.
+For example, 'help 2.shards'
+
+
+<76hp 163m 157mv>
+
+learn shards
+
+
+You spend one practice to learn shards (42 percent gained).
+
+<76hp 163m 157mv>
+
+learn shards
+
+
+You are already well versed in the 'shards' spell.
+
+
+<76hp 163m 157mv>
+
+slist
+
+
+You have 42 practices left.
+Stiboli the Spellcaster looks you over and tells you, 'I can teach you the following abilities:'
+
+Mage elemental cold spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+      frostflower                   poor          19  15       8 mag
+
+Mage elemental fire spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+      burning hands                 poor          15  11       6 mag
+        infravision                 not learned   17  13       8 mag
+
+Mage illusion spellgroup
+------------------------------------------------ Int Wis Chr Lvl ---
+    dancing lights                  not learned   15  11       5 mag
+
+Mage basic magics
+------------------------------------------------ Int Wis Chr Lvl ---
+    spell lore                      not learned                6 mag
+
+Mage force fields
+------------------------------------------------ Int Wis Chr Lvl ---
+
+
+Press <return> or 'cont' to continue, anything else to quit...
+
+q
+
+
+
+<76hp 163m 157mv>
+
+learn infravision
+
+
+You need to know 'burning hands' a little better first.
+
+
+<76hp 163m 157mv>
+
+learn burning hands
+
+
+You spend one practice to learn burning hands (28 percent gained).
+
+
+<76hp 163m 157mv>
+
+learn infravision
+
+
+You spend one practice to learn infravision (42 percent gained).
+Hint: 'infravision' allows you to see creatures and objects in the dark.
+You can add this to your recast list using the 'recast' command to have the game automatically cast it for you again when the spell ends.
+Use 'help infravision' for information on this ability!
+
+
+<76hp 163m 157mv>
+
+c infravision
+
+
+You fail to cast the spell 'infravision'.
+
+
+<76hp 157m 157mv>
+
+c infravision
+
+
+Things take on a ghostly red hue.
+
+
+<76hp 147m 157mv>
+
+recast
+
+
+Automatic recasting is ENABLED.
+Your recasting floor is 50 mana.
+
+You don't have any recast spells set yet.
+(Use 'recast add' to add spells to your recast list.)
+
+<76hp 149m 157mv>
+
+recast infravision
+
+
+Sorry, unknown recasting option.
+(Try 'recast help' for valid options.)
+
+
+<76hp 156m 157mv>
+
+recast help
+
+
+Syntax:
+recast help            - this help screen
+recast show            - show current settings
+recast start           - turn on recasting
+recast stop            - turn off recasting
+recast floor <mana>    - stop recasting below this much mana
+recast add <spell>     - add <spell> to your recasting config
+recast remove <spell>  - remove <spell> from your recasting config
+recast reset           - remove all spells from recast
+
+The 'recast' command lets your character automatically recast spells
+when they fall.  You can configure which spells to have recast, as
+well as how much mana to keep in reserve.
+
+
+<76hp 159m 157mv>
+
+recast add continual light
+
+
+Sorry, you can't recast that spell.
+
+
+<76hp 163m 157mv>
+
+recast add infravision
+
+
+You will now attempt to recast 'infravision'.
+
+
+<76hp 163m 157mv>
+
+recast add mana shield
+
+
+You don't know the spell well enough to recast it.
+
+
+<76hp 163m 157mv>
+
+learn mana shield
+
+
+You spend one practice to learn mana shield (28 percent gained).
+
+
+<76hp 163m 157mv>
+
+recast add mana shield
+
+
+You will now attempt to recast 'mana shield'.
+
+
+<76hp 163m 157mv>
+
+The sun sets in the west.
+
+
+<76hp 163m 157mv>
+
+You no longer feel sharp and at your best.
+
+
+<76hp 163m 157mv>
+
+Fugsy has arrived.
+
+
+<76hp 163m 157mv>
+
+Fugsy leaves west.
+
+
+<76hp 163m 157mv>
+
+Fugsy has arrived.
+
+
+<76hp 163m 157mv>
+
+Fugsy leaves north.
+
+
+<76hp 163m 157mv>
+
+l
+
+
+Before a covered wagon
+The wagon is near one of the corners of the encampment, protected on one
+side by rock and on the other by the tall fence that lines the river bank.
+
+You can learn mage, cleric, druid or necromancer spellcasting here.
+
+You can use the 'slist' command to see what spells you can learn, and use
+the 'learn' command to learn new spells.  If your intelligence or wisdom
+are too low, you can use the 'train' command to raise them.
+
+Training and learning uses 'practice points' that you get when you level,
+and as you gain levels you can learn more powerful spells and skills.
+
+Not all spells are available at all trainers. To find a trainer that
+teaches a certain skill or spell, type 'spell find <spell name>'.
+
+To see the spells and stats that are best for you, try the 'check' command.
+
+It is night.
+
+A ball of light hovers peacefully here.
+Stiboli, the resident spellcaster, stands before you.
+[Exits: north west ]
+
+
+<76hp 163m 157mv>
+
+ca infravision
+
+
+You are already affected by that spell.
+
+
+<76hp 163m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+                  +-----+-----+
+                  |TOWN  TOWN |
+            +-----+     +     +-----+-----+
+            |TOWN  WAYPT ROAD  ROAD  ROAD
+            +-----+     +     +-----+-----+
+                          YOU |
+                        +-----+
+
+
+
+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<76hp 163m 157mv>
+
+w
+
+
+The healer's tent
+Two walls of the tent consist of the same kind of interleaved fence that
+makes up the outer perimeter of the camp.  Strong rough canvas has been drawn
+over it and anchored down with cords, while strong posts buried deep in the
+ground support the structure.
+
+You may 'rest' or 'sleep' here, or buy various cures from the healers for a
+small donation.  Use the 'list' and 'buy' commands to see available spells.
+
+
+Sonja the Elder stands before you in flowing robes.
+A pretty young acolyte of some religious order cleans up here.
+A small cot stands here, to sleep in it type 'sleep cot'.
+A small cot stands here, to sleep in it type 'sleep cot'.
+[Exits: north east south ]
+
+
+<76hp 163m 155mv>
+
+Sonja the Elder utters the words, 'wirugtao borgsuirkug'
+You feel as though the pantheon of gods is watching over you.
+
+
+<76hp 163m 155mv>
+
+e
+
+
+Before a covered wagon
+The wagon is near one of the corners of the encampment, protected on one
+side by rock and on the other by the tall fence that lines the river bank.
+
+You can learn mage, cleric, druid or necromancer spellcasting here.
+
+You can use the 'slist' command to see what spells you can learn, and use
+the 'learn' command to learn new spells.  If your intelligence or wisdom
+are too low, you can use the 'train' command to raise them.
+
+Training and learning uses 'practice points' that you get when you level,
+and as you gain levels you can learn more powerful spells and skills.
+
+Not all spells are available at all trainers. To find a trainer that
+teaches a certain skill or spell, type 'spell find <spell name>'.
+
+To see the spells and stats that are best for you, try the 'check' command.
+
+It is night.
+
+Stiboli, the resident spellcaster, stands before you.
+[Exits: north west ]
+
+
+<76hp 163m 155mv>
+
+way
+
+
+  # -> Destination
+------------------------------------------------------------
+  1 -> A heavily warded waypoint
+  2 -> A large waypoint in a stony field
+  3 -> The Pellam Cemetery Waypoint
+ 99 -> Central Bulletin Board Hall
+
+This location is not a waypoint.
+Note that you must be at a waypoint to use it.
+
+
+<76hp 163m 156mv>
+
+way 3
+
+
+You must be at a waypoint to reach another waypoint.
+
+
+<76hp 163m 157mv>
+
+hom
+
+
+You pray to the pantheon of gods for transportation...
+-----------------------------------------------------------------
+A heavily warded waypoint
+Waypoints are special places throughout the land that allow quick
+transportation.  When at a waypoint, you may use it to go to other
+waypoints you have recently been to.  You can set this as your current
+waypoint with the 'waypoint set' command. You may also use the 'recall'
+command to return to your most recently used waypoint.
+
+You can see the imp infested fields in the distance to the east.
+
+It is night.
+
+A small candle with a bright blue flame sits here.
+A small candle with a bright blue flame sits here.
+[Exits: north east south west ]
+
+
+<76hp 163m 105mv>
+
+way 3
+
+
+A vial of yellow liquid begins to emit a foul smell, so you discard it. (carried by you)
+
+<76hp 163m 105mv>
+
+You are surrounded by a flickering blue glow.  When it fades, you find yourself elsewhere...
+-----------------------------------------------------------------
+The Pellam Cemetery Waypoint
+Waypoints are a quick way to get from place to place without needing to walk.
+You can travel between waypoints using the 'waypoint' command.  You can use
+the 'pray here' command to add this waypoint to your waypoint list.
+
+The far north rim of the pit is lightly forested with tall cedars.  Very old
+headstones, so worn they no longer bear any text, are hidden within the wooded
+area. To the south, a path leads down from the hills into the cemetery.
+
+It is night.
+
+The disfigured corpse of Elminster is lying here.
+A small candle with a bright blue flame sits here.
+A small camp fire is slowly burning away to ash here.
+[Exits: east south ]
+
+
+<76hp 163m 95mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+
+
+                        +-----+-----+-----+-----+-----+
+                        | YOU  TRAIL TRAIL TRAIL FIELD
+                  +-----+     +     +-----+-----+-----+
+                   TRAIL TRAIL FIELD|      TRAIL FIELD|
+                  +-----+     +-----+     +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +           +     +     +
+                        |FIELD|            TRAIL FIELD
+                        +     +-----+     +     +     +
+                        |FIELD FIELD FIELD TRAIL FIELD|
+                        +-----+     +-----+-----+-----+
+
+To see a map without roads and trails, use 'map -r'.
+
+<76hp 163m 97mv>
+
+s
+
+
+At the edge of the cemetery grounds
+The Pellam Cemetery is a sunken pit in the landscape.  The interior is
+surrounded by a stone fence that has several large gaps in it.  A massive
+tree grows in the very center. There is a path leading around the fenced in
+area of the cemetery.  There are some graves outside of the fenced area, but
+they are the unmarked graves of the poor.
+
+It is night.
+
+An animated skeleton shuffles around the graveyard.
+[Exits: north east south west ]
+a walking skeleton's claw scratches you.
+
+s
+
+
+a walking skeleton's claw scratches you.
+
+You can't just walk away from a fight!
+(Use the 'run' or 'flee' commands to run away.)
+
+
+<74hp 161m 97mv 31ac> a walking skeleton <excellent>
+
+s
+
+
+You can't just walk away from a fight!
+(Use the 'run' or 'flee' commands to run away.)
+
+
+
+
+<74hp 162m 97mv 31ac> a walking skeleton <excellent>
+
+Your blast hits a walking skeleton.
+
+c shower
+
+
+A shower of brilliant white sparks suddenly engulfs a walking skeleton!
+
+A walking skeleton falls apart into a heap of bones.
+a walking skeleton is DEAD!
+You learn very little from this battle.  You receive 111 experience.
+You get a leg bone from the corpse of a walking skeleton.
+The pantheon of gods appreciates your sacrifice of the corpse of a walking skeleton.
+
+<74hp 158m 97mv>
+
+s
+
+
+Wandering the edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence, though there
+are gates in it.  Clusters of unmarked graves dot the narrow strip of grass
+between the pit wall and the stone fence.  Some writing has been carved
+into the west wall, and although it is heavily worn-out, it may have been
+names and dates.  Instead of individual stones, someone was just carving
+the names and death dates of the deceased right into the wall.
+
+It is night.
+
+[Exits: north south ]
+
+<76hp 160m 94mv>
+
+s
+
+
+Wandering the edge of the cemetery
+The Pellam Cemetery occupies the interior of this large pit.  The immediate
+area is lined with rows of small, misshapen gravestones.  The interior of
+the cemetery lies eastward and is surrounded by a stone fence with several
+gates in it.
+
+It is night.
+
+[Exits: north south ]
+
+
+<76hp 162m 94mv>
+
+s
+
+
+Wandering the edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence, though there
+are gates in it.  The grass grows wild between clusters of graves which
+occupy the narrow strip of land between the pit walls and the stone fence.
+
+It is night.
+
+[Exits: north east ]
+
+
+<76hp 163m 93mv>
+
+e
+
+
+A collapsed section of fence
+The fence lies broken to the east, leaving an opening to the inner grounds.
+The tombstones within are larger and fancier than those outside the fence,
+though the grounds show the same state of general disrepair.
+
+It is night.
+
+[Exits: east south west ]
+
+
+<76hp 163m 92mv>
+
+s
+
+
+The edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence, though there
+are gates in it.  A stack of stones has been piled up next to the
+cemetery's western wall.  Groups of unmarked graves dot the narrow strip of
+land between the pit walls and the stone fence.
+
+It is night.
+
+[Exits: north east ]
+
+
+<76hp 163m 89mv>
+
+s
+
+
+Alas, you cannot go that way.
+
+e
+
+
+The edge of the cemetery
+The Pellam Cemetery occupies the interior of a large pit, not unlike an old
+abandoned quarry.  The interior is surrounded by a high fence.  There is a
+gate in the fence east of here. Clusters of unmarked graves dot the narrow
+strip of land between the pit walls and the stone fence.
+
+It is night.
+
+[Exits: east west ]
+
+
+<76hp 163m 88mv>
+
+e
+
+
+Before a rusted iron gate
+An iron gate is set in the stone fence to the north.  It is pitted and
+rusted so badly it hardly looks like metal anymore.  Beyond the gate,
+within the inner grounds, the top of a gigantic oak tree can be seen.  A
+gap in the wall surrounding the cemetary lies to the south.
+
+It is night.
+
+[Exits: east south west ]
+
+
+<76hp 163m 89mv>
+
+s
+
+
+The road to Pellam (Level 8+ Recommended)
+The road winds southward toward Pellam through the stone ridge.  The ridge
+is actually a wall of hewn stones, half buried by age and time.  To the
+south, the path leads into the hills.  North of here is a gated cemetary.
+
+It is night.
+
+[Exits: north south ]
+
+
+<76hp 163m 90mv>
+
+s
+
+
+A path up a hill
+The terrain here starts to be more irregular, with several hills to the south
+and southeast. A small camp can be seen from here in that direction, but it's
+hard to distinguish any details besides a few tents.
+
+It is night.
+
+Sebastos is here.
+[Exits: north south ]
+
+
+<76hp 163m 87mv>
+
+s
+
+
+You ascend southward.
+At the top of a small hill
+Now the view to the southeast is more clear, this hill being slightly taller
+than the rest around here. A small camp has been set up within the hills
+around a small source of water, while further away there seems to be a city
+of some sort, although no movement can be appreciated.
+
+It is night.
+
+The kobold camp sprawls out before you to the southeast.
+[Exits: north ]
+
+
+<76hp 163m 86mv>
+
+enter camp
+
+
+You enter the kobold camp.
+
+Nearing the kobold camp
+The way through the hills isn't an easy one, especially since there's no
+trail or established way to go through them, and the view is obviously
+blocked by them. The smell of burnt bodies nearby and the noise of people
+walking and yelling at each other are the only guide to continue through this
+unwelcoming place.
+
+It is night.
+
+A kobold guard monitors the edge of the camp.
+A kobold guard monitors the edge of the camp.
+[Exits: east south northwest ]
+A kobold guard misses you.
+A kobold guard's kick scratches you.
+
+A kobold guard's kick hits you.
+A kobold guard knocks your legs out from under you!
+
+<59hp 160m 88mv 31ac> A kobold guard <scratches>
+
+c shards
+
+
+A kobold guard's stab mauls you.
+You stand up.
+
+You create and magically throw white shards of crystal at A kobold guard!
+
+Your blood freezes as you hear A kobold guard's death cry!
+A kobold guard is DEAD!
+You receive 1760 experience.
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold guard.
+You get a small vial of yellow liquid that you can drink from the corpse of A kobold guard.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A kobold guard contains:
+a small vial of red liquid that you can drink
+a sharp metal spear
+light brown armor
+-----------------------------------------------------------------
+You jump to attack A kobold guard!
+
+
+       You receive a combat point!
+
+You now have 7 combat points you can spend.
+
+(See 'help combat points' for information on how to use them.)
+
+Your blast hits A kobold guard.
+
+<50hp 156m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+You parry A kobold guard's attack.
+A kobold guard rolls his weapon over your parry to catch you with a glancing blow!
+A kobold guard's remise hits you.
+
+You fail to cast the spell 'frostflower'.
+
+
+<46hp 153m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+You fail to cast the spell 'frostflower'.
+A kobold guard's kick hits you.
+
+
+<41hp 150m 88mv 31ac> A kobold guard <small wounds>
+
+Your blast hits, but has no effect on A kobold guard.
+
+<41hp 150m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+A kobold guard misses you.
+
+
+<41hp 150m 88mv 31ac> A kobold guard <small wounds>
+
+You fail to cast the spell 'frostflower'.
+
+
+<41hp 148m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+A kobold guard's stab scratches you.
+
+
+<38hp 147m 88mv 31ac> A kobold guard <small wounds>
+
+You fail to cast the spell 'frostflower'.
+
+
+<39hp 145m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+A kobold guard's kick hits you.
+
+
+<34hp 144m 88mv 31ac> A kobold guard <small wounds>
+
+You fail to cast the spell 'frostflower'.
+
+A kobold guard's stab hits you.
+
+
+<31hp 140m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+Your blast hits A kobold guard.
+
+
+<31hp 140m 88mv 31ac> A kobold guard <small wounds>
+
+A kobold guard's stab injures you.
+
+<24hp 139m 88mv 31ac> A kobold guard <small wounds>
+
+You fail to cast the spell 'frostflower'.
+
+
+<24hp 137m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+You fail to cast the spell 'frostflower'.
+
+A kobold guard's stab scratches you.
+
+
+<25hp 134m 88mv 31ac> A kobold guard <small wounds>
+
+c frostflower
+
+
+A kobold guard's stab scratches you.
+
+You fail to cast the spell 'frostflower'.
+
+A kobold guard dodges your attack.
+
+
+<23hp 130m 88mv 31ac> A kobold guard <small wounds>
+
+c shower
+
+
+A kobold guard's kick hits you.
+
+c shards
+
+
+
+<18hp 128m 88mv 31ac> A kobold guard <small wounds>
+
+A shower of bright red sparks suddenly engulfs A kobold guard!
+
+Your blood freezes as you hear A kobold guard's death cry!
+A kobold guard is DEAD!
+You receive 1760 experience.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A kobold guard contains:
+a small vial of yellow liquid that you can drink
+a scroll of magic missile
+a sharp metal spear
+light brown armor
+-----------------------------------------------------------------
+
+
+<19hp 124m 88mv>
+
+You are not currently in battle.  What enemy do you want to cast it on?
+
+
+<20hp 124m 88mv>
+
+c soothe
+
+
+You fail to cast the spell 'soothe wounds'.
+
+
+<22hp 122m 92mv>
+
+c soothe
+
+
+You fail to cast the spell 'soothe wounds'.
+
+<23hp 120m 92mv>
+
+c soothe
+
+
+You feel a little better.
+
+
+<35hp 114m 92mv>
+
+c soothe
+
+
+You fail to cast the spell 'soothe wounds'.
+
+
+<36hp 112m 92mv>
+
+c soothe
+
+
+You feel your invisible mana shield flicker and go out.
+
+<36hp 112m 92mv>
+
+You can feel an invisible mana shield connect to your mana.
+
+
+<37hp 105m 94mv>
+
+You fail to cast the spell 'soothe wounds'.
+
+
+<39hp 104m 94mv>
+
+c soothe
+
+
+You feel a little better.
+
+
+<53hp 97m 94mv>
+
+c soothe
+
+
+You fail to cast the spell 'soothe wounds'.
+
+
+<54hp 94m 95mv>
+
+c soothe
+
+
+You feel a little better.
+
+
+<70hp 88m 95mv>
+
+rest
+
+
+You sit down and rest your tired bones.
+
+
+<72hp 90m 99mv>
+
+
+You now have enough experience to reach level 9!
+
+To level, you can use the 'level' command.
+
+
+<75hp 92m 104mv>
+
+lev
+
+
+Class     Level   Micro     Exp Cost  Percent
+-----------------------------------------------------------------
+Mage          8                27000   (100%)   <- You can level!
+Cleric        2                23000   (100%)   <- You can level!
+Thief         0                68000   ( 45%)
+Warrior       0                68000   ( 45%)
+Necromancer   0                68000   ( 45%)
+Druid         0                68000   ( 45%)
+
+You have 30764 experience and 10 total levels.
+
+Remember that it's always a good idea to level your cheapest class,
+                   even if it's not your main.
+
+<76hp 93m 106mv>
+
+lev cleric
+
+
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+                          YOU GAIN A LEVEL!
+
+          You are now level 3 cleric, with 11 total levels!
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+You gain: 2/78 hit, 1/164 mana, 0/157 movement, 5/44 practices.
+You can now learn the spell 'armor aegis'!
+You can now learn the spell 'faerie fire'!
+
+
+<78hp 164m 157mv>
+
+cheer
+
+
+You jump up and cheer everyone on.
+
+
+<78hp 164m 156mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+
+
+
+
+                  +     +
+                  |ROAD |
+                  +-----+-----+-----+     +-----+-----+
+                        | YOU  FIELD FIELD ROAD  FIELD
+                        +     +     +     +     +     +
+                        |ROAD  ROAD              ROAD |
+                        +     +     +           +     +
+                         FIELD FIELD             FIELD|
+                        +     +     +     +     +     +
+                                     FIELD ROAD  ROAD |
+                                    +     +     +-----+
+                                    |BUILD|BUILD|
+                                    +     +-----+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<78hp 164m 157mv>
+
+s
+
+
+You stand up.
+Just inside the camp
+Just inside this foul smelling camp, trash is strewn all over the ground.
+Small humanoids are dragging bodies across the ground and heading in the
+same direction to do something with the corpses. The beings that occupy
+this area can also be seen putting on armor, sharpening weapons as if
+preparing for battle. There is constant activity going on in this camp as
+they clamber over anyone and anything that stands in their way.
+
+It is night.
+
+[Exits: north east south ]
+
+
+<78hp 164m 156mv>
+
+s
+
+
+The red in your vision disappears.
+
+Before a small tent
+This spot of the camp seems to be a bit more calm, given the fact that it's
+a bit away of the center of the noise and fights. Still, the smell is
+horrible, and the trash on the ground is no less than before. A small tent
+has been set to the west, but nobody can be seen inside of it.
+
+It is night.
+
+[Exits: north east south west ]
+
+Things take on a ghostly red hue.
+
+
+<78hp 152m 154mv>
+
+e
+
+
+Inside Uffspigot's kobold camp
+This spot of the camp seems to be a bit more calm, given the fact that it's
+a bit away of the center of the noise and fights. Still, the smell is
+horrible, and the trash on the ground is no less than before. A small tent
+has been set to the far south, but nobody can be seen inside of it.
+
+It is night.
+
+A wounded kobold is dying on the ground before you.
+[Exits: north east south west ]
+
+
+<78hp 152m 152mv>
+
+c shower kobold
+
+
+A shower of brilliant white sparks suddenly engulfs A wounded kobold!
+A wounded kobold appears to be blinded!
+
+Your blood freezes as you hear A wounded kobold's death cry!
+A wounded kobold is DEAD!
+You receive 26 experience.
+The pantheon of gods appreciates your sacrifice of the corpse of A wounded kobold.
+
+
+<78hp 151m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+
+            +     +
+            |ROAD |
+            +-----+-----+-----+     +-----+-----+-----+
+                  |ROAD  FIELD FIELD ROAD  FIELD BUILD|
+                  +     +     +     +     +     +-----+
+                  |ROAD  ROAD              ROAD |
+                  +     +     +           +     +
+                   FIELD  YOU              FIELD|
+                  +     +     +     +     +     +
+                               FIELD ROAD  ROAD |
+                              +     +     +-----+
+                              |BUILD|BUILD|
+                              +     +-----+
+                              |BUILD|
+                              +-----+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<78hp 152m 157mv>
+
+s
+
+
+Before a small tent
+This tent lies next to the leader's tent to provide more protection in case
+there is ever a need. The area is a bit cleaner here and the area is marked
+by short flagged poles with skulls atop them. Just outside the perimeter
+chaos reigns, with more of the camp visible to the north.
+
+It is night.
+
+[Exits: north east south west ]
+
+
+<78hp 154m 157mv>
+
+e
+
+
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+It is night.
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north east south west ]
+
+A burly kobold guard's claw hits you.
+
+A burly kobold guard's chop wounds you.
+
+<63hp 152m 154mv 31ac> A burly kobold guard <scratches>
+
+
+
+c shards
+
+
+You create and magically throw white shards of crystal at A burly kobold guard!
+A burly kobold guard's chop scratches you.
+
+<61hp 147m 154mv 31ac> A burly kobold guard <big nasty>
+
+Your blast wounds A burly kobold guard.
+
+
+<61hp 147m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+A burly kobold guard's claw scratches you.
+
+c frsotflower
+
+
+You do not know of any spell by that name.
+
+
+<59hp 145m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+Your blast scratches A burly kobold guard.
+
+<59hp 145m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+A burly kobold guard's chop mauls you.
+
+
+<48hp 143m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+You miss A burly kobold guard.
+
+c frostflower
+
+
+You fail to cast the spell 'frostflower'.
+
+
+<48hp 142m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+c frostflower
+
+
+A burly kobold guard's chop injures you.
+
+<41hp 140m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+You fail to cast the spell 'frostflower'.
+
+
+<41hp 138m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+A burly kobold guard's chop scratches you.
+
+c frostflower
+
+
+
+<39hp 137m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+Your blast hits, but does no damage to A burly kobold guard.
+
+<39hp 138m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+You fail to cast the spell 'frostflower'.
+
+You dodge A burly kobold guard's attack.
+
+<39hp 136m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+c frostflower
+
+
+You fail to cast the spell 'frostflower'.
+
+
+<40hp 135m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+c frostflower
+
+
+A burly kobold guard disarms you and sends your weapon flying!
+A burly kobold guard's chop scratches you.
+
+
+<38hp 134m 154mv 29ac> A burly kobold guard <pretty hurt>
+
+You miss A burly kobold guard.
+
+<38hp 134m 154mv 29ac> A burly kobold guard <pretty hurt>
+
+You fail to cast the spell 'frostflower'.
+
+
+<38hp 132m 154mv 29ac> A burly kobold guard <pretty hurt>
+
+c frostflower
+
+
+You scramble to retrieve a quartz-tipped wooden cane!
+You wield a quartz-tipped wooden cane.
+
+
+<38hp 132m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+A burly kobold guard's chop wounds you.
+
+You fail to cast the spell 'frostflower'.
+
+
+<29hp 128m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+c frostflower
+
+
+Your blast scratches A burly kobold guard.
+
+<29hp 128m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+You fail to cast the spell 'frostflower'.
+
+A burly kobold guard's claw hits you.
+
+
+<25hp 125m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+c frostflower
+
+
+You fail to cast the spell 'frostflower'.
+
+A burly kobold guard's chop hits you.
+
+<21hp 122m 154mv 31ac> A burly kobold guard <pretty hurt>
+
+c shower
+
+
+A burly kobold guard's claw wounds you.
+You run away from the battle like a yellow bellied coward!!
+Before a small tent
+This tent lies next to the leader's tent to provide more protection in case
+there is ever a need. The area is a bit cleaner here and the area is marked
+by short flagged poles with skulls atop them. Just outside the perimeter
+chaos reigns, with more of the camp visible to the north.
+
+It is night.
+
+[Exits: north east south west ]
+
+
+<13hp 122m 138mv>
+
+They are no longer here.
+
+
+<15hp 123m 138mv>
+
+sleep
+
+
+You go to sleep.
+
+
+<16hp 124m 139mv>
+
+You find yourself feeling sharp and ready to take on anything!
+
+
+<47hp 153m 157mv>
+
+map
+
+
+Map Scale - Small (Local/Town/Building)
+
+            |ROAD |
+            +-----+-----+-----+     +-----+-----+-----+
+                  |ROAD  FIELD FIELD ROAD  FIELD BUILD|
+                  +     +     +     +     +     +-----+
+                  |ROAD  ROAD              ROAD |
+                  +     +     +           +     +
+                   FIELD FIELD             FIELD|
+                  +     +     +     +     +     +
+                          YOU  FIELD ROAD  ROAD |
+                        +     +     +     +-----+
+                              |BUILD|BUILD|
+                              +     +-----+
+                              |BUILD|
+                              +-----+
+
+
+
+
+
+To see a map without roads and trails, use 'map -r'.
+
+
+<78hp 164m 157mv>
+
+stand
+
+
+You stand up.
+
+e
+
+
+
+<78hp 164m 157mv>
+
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+It is night.
+
+Shards and pieces of crystal litter the ground at your feet.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north east south west ]
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+A burly kobold guard's claw injures you.
+
+
+
+Your blast hits, but does no damage to A burly kobold guard.
+
+
+<71hp 163m 154mv 31ac> A burly kobold guard <big nasty>
+
+c shards
+
+
+You create and magically throw white shards of crystal at A burly kobold guard!
+
+Your blood freezes as you hear A burly kobold guard's death cry!
+A burly kobold guard is DEAD!
+You receive 1960 experience.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A burly kobold guard contains:
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a small vial of red liquid that you can drink
+a gleaming crescent bladed axe
+a hard leather helm
+hard leather armor
+a leather greatcloak
+-----------------------------------------------------------------
+
+
+<71hp 159m 154mv>
+
+(notify) Flik landed a heinous backstab on a landwhale for 2496 damage, freak 8!
+
+
+<75hp 161m 156mv>
+
+l
+
+
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+It is night.
+
+The corpse of A burly kobold guard is lying here.
+Shards and pieces of crystal litter the ground at your feet.
+A ball of light hovers peacefully here.
+Shards and pieces of crystal litter the ground at your feet.
+[Exits: north east south west ]
+
+
+<77hp 162m 157mv>
+
+s
+
+
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north south ]
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+<78hp 164m 155mv>
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+<78hp 164m 157mv>
+
+A burly kobold guard's chop mauls you.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+<66hp 163m 157mv 31ac> A burly kobold guard <excellent>
+
+A burly kobold guard misses you.
+
+c frostflower
+
+
+
+<66hp 163m 157mv 31ac> A burly kobold guard <excellent>
+
+You fail to cast the spell 'frostflower'.
+
+
+<66hp 161m 157mv 31ac> A burly kobold guard <excellent>
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+c frostflower
+
+
+Your blast hits A burly kobold guard.
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+<66hp 161m 157mv 31ac> A burly kobold guard <scratches>
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard's claw hits you.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard's claw hits you.
+
+<56hp 159m 157mv 31ac> A burly kobold guard <scratches>
+
+A burly kobold guard's claw hits you.
+
+You fail to cast the spell 'frostflower'.
+
+
+<52hp 156m 157mv 31ac> A burly kobold guard <scratches>
+
+c frostflower
+
+
+A burly kobold guard's chop injures you.
+
+A burly kobold guard's claw scratches you.
+
+
+<43hp 154m 157mv 31ac> A burly kobold guard <scratches>
+
+You fail to cast the spell 'frostflower'.
+
+c shards
+
+
+
+<43hp 153m 157mv 31ac> A burly kobold guard <scratches>
+
+Your blast hits A burly kobold guard.
+
+
+<43hp 153m 157mv 31ac> A burly kobold guard <small wounds>
+
+A burly kobold guard's chop devastates you!
+
+You create and magically throw white shards of crystal at A burly kobold guard!
+
+A burly kobold guard knocks your legs out from under you!
+
+
+<20hp 146m 157mv 31ac> A burly kobold guard <pretty hurt>
+
+c shards
+
+
+A burly kobold guard's chop injures you.
+You run away from the battle like a yellow bellied coward!!
+Before a large tent
+This is clearly the tent of the leader of the camp.  The area is much
+cleaner and there is some hint of organization.  The area perimeter is
+marked by short poles with skulls atop them.  Just outside the
+perimeter chaos reigns, with more of the camp visible to the north.
+
+It is night.
+
+The corpse of A burly kobold guard is lying here.
+Shards and pieces of crystal litter the ground at your feet.
+Shards and pieces of crystal litter the ground at your feet.
+[Exits: north east south west ]
+
+
+<15hp 147m 139mv>
+
+They are no longer here.
+
+
+<15hp 147m 139mv>
+
+sleep
+
+
+You go to sleep.
+
+
+<17hp 148m 142mv>
+
+
+
+
+
+<26hp 157m 157mv>
+
+rest
+
+
+You wake up and begin resting.
+
+
+<30hp 162m 157mv>
+
+c sooth
+
+
+You stand up.
+You feel a little better.
+
+
+<42hp 155m 157mv>
+
+c sooth
+
+
+You feel a little better.
+
+
+<55hp 149m 157mv>
+
+c sooth
+
+
+You fail to cast the spell 'soothe wounds'.
+
+
+<58hp 148m 157mv>
+
+c sooth
+
+
+You fail to cast the spell 'soothe wounds'.
+
+
+<60hp 146m 157mv>
+
+c sooth
+
+
+You feel a little better.
+
+
+<75hp 141m 157mv>
+
+s
+
+
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+Shards and pieces of crystal litter the ground at your feet.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north south ]
+A burly kobold guard's chop hits you.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+<73hp 141m 155mv 31ac> A burly kobold guard <big nasty>
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard's chop scratches you.
+
+<71hp 140m 155mv 31ac> A burly kobold guard <big nasty>
+
+c shards
+
+
+You create and magically throw white shards of crystal at A burly kobold guard!
+
+Your blood freezes as you hear A burly kobold guard's death cry!
+A burly kobold guard is DEAD!
+You receive 1960 experience.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A burly kobold guard contains:
+a small vial of yellow liquid that you can drink
+a small vial of red liquid that you can drink
+a gleaming crescent bladed axe
+a hard leather helm
+hard leather armor
+a leather greatcloak
+-----------------------------------------------------------------
+You jump to attack A burly kobold guard!
+Your blast injures A burly kobold guard.
+
+
+<71hp 136m 155mv 31ac> A burly kobold guard <small wounds>
+
+c shards
+
+
+You create and magically throw white shards of crystal at A burly kobold guard!
+
+A burly kobold guard's claw hits you.
+
+<67hp 131m 155mv 31ac> A burly kobold guard <big nasty>
+
+c shards
+
+
+A burly kobold guard's chop hits you.
+
+You fail to cast the spell 'shards'.
+
+
+<61hp 127m 155mv 31ac> A burly kobold guard <big nasty>
+
+A burly kobold guard dodges your attack.
+
+c shards
+
+
+A burly kobold guard's chop hits you.
+
+<56hp 125m 155mv 31ac> A burly kobold guard <big nasty>
+
+You create and magically throw white shards of crystal at A burly kobold guard!
+
+Your blood freezes as you hear A burly kobold guard's death cry!
+A burly kobold guard is DEAD!
+You receive 1960 experience.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+You can't carry that many items.
+-----------------------------------------------------------------
+(on ground) the corpse of A burly kobold guard contains:
+a small vial of yellow liquid that you can drink
+a small vial of yellow liquid that you can drink
+a gleaming crescent bladed axe
+a hard leather helm
+hard leather armor
+a leather greatcloak
+-----------------------------------------------------------------
+
+
+<57hp 121m 155mv>
+
+l
+
+
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+The corpse of A burly kobold guard is lying here.
+Shards and pieces of crystal litter the ground at your feet.
+The corpse of A burly kobold guard is lying here.
+Shards and pieces of crystal litter the ground at your feet.
+A ball of light hovers peacefully here.
+Shards and pieces of crystal litter the ground at your feet.
+[Exits: north south ]
+
+
+<59hp 123m 157mv>
+
+s
+
+
+Inside Uffspigot's tent
+Here is the back of the largest part of the tent. If anything is going to
+indicate that this is the leader's tent, it would be the absence of debris
+and size of this tent. Splayed out on a large table in the center of this
+room, is a large map with unreadable symbols on it. This must be the place
+where all planning and strategizing goes on.
+
+
+A bigger than usual kobold guard watches the tent of the tribal leader.
+Uffspigot, leader of this tribe of kobolds, looks at you suspiciously.
+A bigger than usual kobold guard watches the tent of the tribal leader.
+[Exits: north ]
+
+Uffspigot's bite scratches you.
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+A burly kobold guard's chop hits you.
+
+A burly kobold guard disarms you and sends your weapon flying!
+A burly kobold guard's chop hits you.
+Uffspigot's bite scratches you.
+
+<51hp 122m 155mv 29ac> Uffspigot <excellent>
+
+A burly kobold guard approaches as if to attack, then hesitates for a moment.
+
+A burly kobold guard misses you.
+
+<51hp 122m 155mv 29ac> Uffspigot <excellent>
+
+A burly kobold guard's chop decimates you!
+Your punch scratches Uffspigot.
+
+hom
+
+
+You pray to the gods for transportation...
+You were distracted by the battle!
+
+
+<37hp 120m 155mv 29ac> Uffspigot <scratches>
+
+Uffspigot calls upon his god to curse you!
+Your strength fails you for a moment, then returns.
+Uffspigot's bite scratches you.
+
+
+<35hp 119m 155mv 29ac> Uffspigot <scratches>
+
+hom
+
+
+You dodge A burly kobold guard's attack.
+You scramble to retrieve a quartz-tipped wooden cane!
+You wield a quartz-tipped wooden cane.
+
+
+<35hp 119m 155mv 31ac> Uffspigot <scratches>
+
+You pray to the gods for transportation...
+You were distracted by the battle!
+
+Uffspigot calls upon his god to strike you down!
+You are engulfed in a jet of magical blue flame!
+
+A burly kobold guard's chop hits you.
+
+<13hp 114m 155mv 31ac> Uffspigot <scratches>
+
+Uffspigot's bite scratches you.
+
+
+<10hp 113m 155mv 31ac> Uffspigot <scratches>
+
+A burly kobold guard's chop wounds you.
+
+Your blast scratches Uffspigot.
+
+flee
+
+
+You run away from the battle like a yellow bellied coward!!
+Inside the tent
+This tent is the largest tent in the camp. There is no sign of any garbage
+at all. Even without the debris or dead bodies occupying this area, the
+odor of rotting bodies has found its way into this tent. Large lanterns on
+each side of the room keep this place well lit.
+
+
+The corpse of A burly kobold guard is lying here.
+Shards and pieces of crystal litter the ground at your feet.
+The corpse of A burly kobold guard is lying here.
+Shards and pieces of crystal litter the ground at your feet.
+Shards and pieces of crystal litter the ground at your feet.
+[Exits: north south ]
+
+
+<1hp 111m 138mv>
+
+hom
+
+
+You pray to the pantheon of gods for transportation...
+-----------------------------------------------------------------
+The Pellam Cemetery Waypoint
+Waypoints are a quick way to get from place to place without needing to walk.
+You can travel between waypoints using the 'waypoint' command.  You can use
+the 'pray here' command to add this waypoint to your waypoint list.
+
+The far north rim of the pit is lightly forested with tall cedars.  Very old
+headstones, so worn they no longer bear any text, are hidden within the wooded
+area. To the south, a path leads down from the hills into the cemetery.
+
+It is night.
+
+The disfigured corpse of Elminster is lying here.
+A small candle with a bright blue flame sits here.
+A small camp fire is slowly burning away to ash here.
+[Exits: east south ]
+
+<4hp 113m 88mv>
+
+sleep
+
+
+You go to sleep.
+
+<8hp 115m 90mv>
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------

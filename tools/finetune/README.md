@@ -28,26 +28,29 @@ mlx_lm.fuse      -> fused_model/                          (merge -> load in LM S
 > only makes real choices), not fine-tuning. Fine-tune once you have trace data worth
 > distilling.
 
-## 0. Which model to run? (you're on gemma-4-e4b — step up)
+## 0. Which model to run? — use the newest you have
 
-`gemma-4-e4b` is ~4B effective; it follows the `CMD:`/`SCRIPT:` contract unreliably
-(in testing it answered `CMD: look around` instead of resting at low HP). On a 128 GB
-M1 Ultra you have huge headroom. Recommended, in order of latency↔quality tradeoff —
-and remember the loop *waits* on each turn, so latency is real:
+Run **Qwen3.6-27B (MLX)** — the current Qwen generation. On a 128 GB M1 Ultra the
+8-bit fits comfortably; the 4-bit is faster per turn. Train the LoRA on the SAME local
+quant you'll run, because the adapter binds to those exact base weights.
 
-| Model | ~Q4 size | Feel on M1 Ultra | Use |
-|-------|----------|------------------|-----|
-| **Qwen2.5-14B-Instruct** | ~9 GB | ~40–60 tok/s, snappy | **recommended daily driver** |
-| Qwen2.5-32B-Instruct | ~19 GB | ~20–30 tok/s | sharper judgment, still fine for turns |
-| Llama-3.3-70B-Instruct / Qwen2.5-72B | ~40 GB | ~10–15 tok/s | best play, slower turns |
-| Qwen2.5-7B-Instruct | ~5 GB | very fast | low-latency, fine once Lua handles reflexes |
+| Local model (in `~/.lmstudio/models`) | Use |
+|---------------------------------------|-----|
+| **Qwen3.6-27B-MLX-8bit** | best judgment; run this if turn latency is acceptable |
+| **Qwen3.6-27B-MLX-4bit** | faster turns / faster LoRA training; slightly lower quality |
+| gemma-4-E4B-it-MLX-4bit | tiny/fast; follows the contract unreliably (fallback only) |
+| Qwen2.5-14B-Instruct-1M-GGUF | superseded by Qwen3.6 — don't bother |
 
-The Qwen2.5-Instruct family is the strongest pick here: excellent instruction-following
-and concise output. Grab one in LM Studio (search "Qwen2.5 14B Instruct", MLX or GGUF),
-load it, and the pilot auto-discovers it via `/v1/models` (or pin with `#ai model <id>`).
+Qwen3 uses a thinking-mode chat template: our terse `CMD:` rows render with an empty
+`<think></think>` block, i.e. non-thinking mode, which is what we want (no wasted
+reasoning tokens in combat). The pilot auto-discovers the loaded model via `/v1/models`
+(or pin with `#ai model <id>`).
 
-Because the design offloads deterministic reflexes to Lua, you don't need a giant model
-to play well — a 14B reserved for genuine judgment is plenty.
+> Earlier versions of this README recommended Qwen2.5 — that was outdated advice;
+> Qwen3.6 is the current generation and the right base to fine-tune.
+
+Because the design offloads deterministic reflexes to Lua, the model only makes genuine
+judgment calls, so a 27B is plenty.
 
 ## 1. Scrape the docs
 
@@ -72,14 +75,17 @@ Produces `data/train.jsonl` and `data/valid.jsonl` as MLX chat rows
 
 ## 3. Fine-tune with MLX-LM LoRA (Apple Silicon native)
 
+This is a **QLoRA** — we train adapters directly on the already-quantized local MLX
+model (no re-download, no full-precision base needed). Use the venv set up in
+`tools/finetune/.venv`. Point `--model` at the SAME local quant you'll run.
+
 ```bash
-pip install mlx-lm
-# Pick a base you'll actually run; 7B/14B iterate fastest.
-mlx_lm.lora \
-  --model Qwen/Qwen2.5-7B-Instruct \
+MODEL="$HOME/.lmstudio/models/lmstudio-community/Qwen3.6-27B-MLX-8bit"   # or -4bit
+tools/finetune/.venv/bin/mlx_lm.lora \
+  --model "$MODEL" \
   --train \
   --data tools/finetune/data \
-  --batch-size 4 \
+  --batch-size 2 \
   --num-layers 16 \
   --iters 600 \
   --adapter-path tools/finetune/adapters
@@ -88,7 +94,7 @@ mlx_lm.lora \
 Try a prompt against the adapter:
 
 ```bash
-mlx_lm.generate --model Qwen/Qwen2.5-7B-Instruct \
+tools/finetune/.venv/bin/mlx_lm.generate --model "$MODEL" \
   --adapter-path tools/finetune/adapters \
   --prompt "Explain the recall spell in Alter Aeon."
 ```
@@ -96,8 +102,8 @@ mlx_lm.generate --model Qwen/Qwen2.5-7B-Instruct \
 ## 4. Fuse and load in LM Studio
 
 ```bash
-mlx_lm.fuse \
-  --model Qwen/Qwen2.5-7B-Instruct \
+tools/finetune/.venv/bin/mlx_lm.fuse \
+  --model "$MODEL" \
   --adapter-path tools/finetune/adapters \
   --save-path tools/finetune/fused_model
 ```

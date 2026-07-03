@@ -22,10 +22,18 @@ struct Connect: ParsableCommand {
         let sigIntSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         sigIntSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleSigInt)
         sigIntSource.resume()
-        
+
+        // On resize the scroll region's bottom row moves, so re-set it and repaint the top panel.
+        signal(SIGWINCH, SIG_IGN)
+        let sigWinchSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
+        sigWinchSource.setEventHandler(qos: .default, flags: []) { Container.panelHost().flush(force: true) }
+        sigWinchSource.resume()
+
         Container.terminalService().setup()
-        
+
         try Container.scriptInterpreter().parser.parse("#load {AlterAeon}")
+        try Container.scriptInterpreter().parser.parse("#load {AIPilot}")
+        try Container.scriptInterpreter().parser.parse("#load {HUD}")
         
         Task {
 //            let connection = Connection(host: "godwars2.org", port: 3000)
@@ -34,7 +42,14 @@ struct Connect: ParsableCommand {
             try await connection.connect()
             Task {
                 for try await string in connection {
-                    Container.terminalService().print(string, terminator: "")
+                    // A fully-gagged chunk (e.g. an idle kxwt_ status batch) renders to "". Don't print
+                    // it — print() unconditionally paints a divider line, so print("") leaves a blank line
+                    // on screen. But DO still refresh the panel: those gagged kxwt_ batches are exactly
+                    // the status updates (hp/mana/room) the HUD is built from.
+                    if !string.isEmpty {
+                        Container.terminalService().print(string, terminator: "")
+                    }
+                    Container.scriptInterpreter().engine.notifyUpdate()
                 }
             }
             Task {

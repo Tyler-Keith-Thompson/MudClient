@@ -1,0 +1,8 @@
+DECODE 4bit: 11.8 tok/s  (149 gen in 12.6s)
+REALISTIC turns (cached sys + ~400 ctx, terse):
+  36.1s | prompt=2700 gen=6 -> 'CMD: kill goblin'
+  9.2s | prompt=2700 gen=6 -> 'CMD: kill goblin'
+BEHAVIOR check:
+  hurt no enemy: 'CMD: look' (3.1s)
+  in combat: 'CMD: attack kobold' (2.8s)
+DONE

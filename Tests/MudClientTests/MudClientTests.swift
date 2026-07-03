@@ -1,3 +1,4 @@
+import DependencyInjection
 import Foundation
 import Testing
 
@@ -150,3 +151,279 @@ private actor RecordedWrites {
     }
     print("REPLAY chunks=\(chunks.count) directives=\(directives) leakedSOUND=\(terminal.contains("!!SOUND"))")
 }
+
+@Test func gaggedKxwtBatchesRenderNothing() async throws {
+    // Regression for "a bunch of blank lines before my command". When the player is idle, AlterAeon
+    // streams kxwt_ status batches (group HP, prompt, sky/time) as their OWN network packets. Each
+    // is fully gagged, so processServerOutputForScripts returns "" for it. The display consumer
+    // (MudClient.swift) must SKIP those empty chunks: TerminalService.print() paints a divider line
+    // unconditionally, so print("") leaves a blank line on screen — one per idle kxwt batch.
+    //
+    // This drives a REAL capture through the REAL pipeline and asserts that every chunk which was
+    // nothing but gagged kxwt_ lines renders to "" (so the consumer's `guard !string.isEmpty` drops
+    // it, emitting no blank line).
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    let capture = try String(
+        contentsOfFile: repoFile("Tests/MudClientTests/fixtures/pellam_kxwt_capture.log"), encoding: .utf8)
+    let chunks = capture.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
+    #expect(!chunks.isEmpty)
+
+    let interp = Container.scriptInterpreter()
+    interp.engine.clearRules()
+    try interp.engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
+    let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+
+    // Replicate processServerOutputForScripts per chunk so we can correlate INPUT with rendered
+    // OUTPUT, then rebuild the screen the way the consumer does (dropping empty chunks).
+    var leaks = [String]()
+    var kept = [String]()
+    for try await output in stream.handleIACCommunication(writeToStream: { _ in })
+        .normalizeLineEndings().processMSP() {
+        let lines = output.replacingOccurrences(of: "\r", with: "").components(separatedBy: CharacterSet.newlines)
+        let gagged = lines.map { interp.engine.processLine($0) }
+        var out = [String]()
+        for (i, line) in lines.enumerated() {
+            if gagged[i] { continue }
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                if (i > 0 && gagged[i - 1]) || (i + 1 < lines.count && gagged[i + 1]) { continue }
+            }
+            out.append(line)
+        }
+        let rendered = out.joined(separator: "\n")
+        // A chunk that was nothing but kxwt_ machinery (+ framing blanks) MUST render to "", so the
+        // consumer's `guard !string.isEmpty` drops it. If it renders a stray "\n", it paints a blank.
+        let hasKxwt = lines.contains { $0.hasPrefix("kxwt_") }
+        let onlyKxwtOrBlank = lines.allSatisfy {
+            $0.hasPrefix("kxwt_") || $0.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        if hasKxwt && onlyKxwtOrBlank && !rendered.isEmpty { leaks.append(rendered.debugDescription) }
+        if !rendered.isEmpty { kept.append(rendered) }    // mirror consumer: skip empty chunks
+    }
+    #expect(leaks.isEmpty, "kxwt-only batches that still render a (blank) line: \(leaks)")
+
+    // Concretely: the idle updates between the "Tboss" notify and the following "A wide tunnel" room
+    // must not introduce a blank-line run. Concatenate kept chunks the way the terminal does.
+    let screen = kept.joined()
+    if let n = screen.range(of: "Tboss stole"),
+       let r = screen.range(of: "A wide tunnel", range: n.upperBound..<screen.endIndex) {
+        let between = String(screen[n.upperBound..<r.lowerBound])
+        #expect(!between.contains("\n\n\n"), "blank-line run between notify and room: \(between.debugDescription)")
+    }
+}
+
+@Test func scriptRegisteredCommandsDispatch() throws {
+    // `#` commands are owned by scripts (via the `command` builtin), not hardcoded in the Swift client.
+    // The host forwards `#<word> <rest>` to whatever script claimed <word>.
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    let engine = LuaScriptEngine()
+    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
+    var echoed = [String]()
+    engine.onEcho = { echoed.append($0) }
+
+    #expect(engine.dispatchCommand("nope", "") == false)   // nobody claimed it
+    #expect(engine.dispatchCommand("kxwt", "dump") == true) // AlterAeon.lua registered `#kxwt`
+
+    // `#kxwt dump N` shows the last N gagged kxwt lines the ring buffer captured.
+    _ = engine.processLine("kxwt_mdeath A grey scaled imp")
+    _ = engine.processLine("kxwt_prompt 1 2 3 4 5 6")
+    echoed.removeAll()
+    _ = engine.dispatchCommand("kxwt", "dump 5")
+    let dump = echoed.joined(separator: "\n")
+    #expect(dump.contains("kxwt_mdeath A grey scaled imp"))
+    #expect(dump.contains("kxwt_prompt 1 2 3 4 5 6"))
+
+    // `#kxwt corpse on` toggles the harvest→bsac→sac automation.
+    echoed.removeAll()
+    _ = engine.dispatchCommand("kxwt", "corpse on")
+    #expect(echoed.contains { $0.lowercased().contains("corpse automation on") })
+    echoed.removeAll()
+    _ = engine.dispatchCommand("kxwt", "corpse status")
+    #expect(echoed.contains { $0.contains("corpse ON") })
+}
+
+@Test func luaAfterTimerFiresCallback() async throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    // `after` is a generic primitive: schedule a Lua callback, which calls back into the host.
+    try engine.load(source: #"after(0.05, function() echo("fired") end)"#)
+    #expect(echoed.isEmpty)              // not yet
+    try await Task.sleep(nanoseconds: 200_000_000)
+    #expect(echoed == ["fired"])         // timer fired the Lua callback
+}
+
+@Test func luaOnUserInputHookIsCalled() throws {
+    let engine = LuaScriptEngine()
+    var seen: [String] = []
+    engine.onEcho = { seen.append($0) }
+    try engine.load(source: #"function on_user_input(cmd) echo("typed:" .. cmd) end"#)
+    engine.notifyUserInput("north")
+    #expect(seen == ["typed:north"])
+}
+
+@Test func luaGameScriptsLoadCleanly() throws {
+    // Load the real game scripts through the engine to catch syntax errors and missing builtins —
+    // they're otherwise only exercised at runtime. Resolved relative to this source file.
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    let engine = LuaScriptEngine()
+    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // throws on syntax/runtime error
+    try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+}
+
+@Test func aiPilotToolDefinitionsAreValidJSON() throws {
+    // The AI pilot hands the model a JSON array of OpenAI tool definitions (built by AIPilot.lua's
+    // hand-rolled JSON encoder). `#ai tools` echoes that exact array — parse it and assert the
+    // shape LM Studio expects, so an encoder regression can't ship silently malformed tools.
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    let engine = LuaScriptEngine()
+    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
+    try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+
+    var echoed = [String]()
+    engine.onEcho = { echoed.append($0) }
+    engine.callGlobal("ai_command", "tools")
+
+    let json = echoed.last ?? ""
+    let parsed = try JSONSerialization.jsonObject(with: Data(json.utf8))
+    let tools = try #require(parsed as? [[String: Any]])
+    #expect(tools.count >= 10)
+
+    var names = Set<String>()
+    for tool in tools {
+        #expect(tool["type"] as? String == "function")
+        let fn = try #require(tool["function"] as? [String: Any])
+        let name = try #require(fn["name"] as? String)
+        names.insert(name)
+        #expect(fn["description"] is String)
+        let params = try #require(fn["parameters"] as? [String: Any])
+        #expect(params["type"] as? String == "object")
+        // Even no-arg tools must carry an object (not array) for `properties`.
+        #expect(params["properties"] is [String: Any])
+    }
+    // The structured actions that replace free-text command parsing must all be present.
+    for expected in ["move", "attack", "cast", "get", "drop", "wear", "recover", "command", "wait", "remember"] {
+        #expect(names.contains(expected))
+    }
+}
+
+@Test func humanPlayMapsToToolCallTrainingExamples() throws {
+    // "Tune the model on me": a command the human types is captured as an OpenAI tool-call SFT
+    // example (system + user prompt, assistant tool_call). `#ai demo <cmd>` builds that record
+    // without writing to disk. Assert the JSON shape and that raw commands classify into the right
+    // structured tool, with a verbatim `command` fallback for anything unstructured.
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    let engine = LuaScriptEngine()
+    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
+    try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+
+    var echoed = [String]()
+    engine.onEcho = { echoed.append($0) }
+
+    func demo(_ command: String) throws -> (name: String, args: [String: Any]) {
+        echoed.removeAll()
+        engine.callGlobal("ai_command", "demo \(command)")
+        let record = try JSONSerialization.jsonObject(with: Data((echoed.last ?? "").utf8)) as? [String: Any]
+        let messages = try #require(record?["messages"] as? [[String: Any]])
+        #expect(messages.count == 3)
+        #expect(messages[0]["role"] as? String == "system")
+        #expect(messages[1]["role"] as? String == "user")
+        let assistant = messages[2]
+        #expect(assistant["role"] as? String == "assistant")
+        let calls = try #require(assistant["tool_calls"] as? [[String: Any]])
+        let fn = try #require(calls.first?["function"] as? [String: Any])
+        let name = try #require(fn["name"] as? String)
+        // arguments is a JSON *string* per the OpenAI shape — decode it.
+        let argsStr = try #require(fn["arguments"] as? String)
+        let args = (try? JSONSerialization.jsonObject(with: Data(argsStr.utf8))) as? [String: Any] ?? [:]
+        return (name, args)
+    }
+
+    let move = try demo("west")
+    #expect(move.name == "move"); #expect(move.args["direction"] as? String == "west")
+
+    let abbrev = try demo("ne")
+    #expect(abbrev.name == "move"); #expect(abbrev.args["direction"] as? String == "northeast")
+
+    let attack = try demo("kill goblin")
+    #expect(attack.name == "attack"); #expect(attack.args["target"] as? String == "goblin")
+
+    let cast = try demo("cast 'shower of sparks' kobold")
+    #expect(cast.name == "cast")
+    #expect(cast.args["spell"] as? String == "shower of sparks")
+    #expect(cast.args["target"] as? String == "kobold")
+
+    let recover = try demo("sleep")
+    #expect(recover.name == "recover"); #expect(recover.args["method"] as? String == "sleep")
+
+    // No structured tool fits 'train' -> verbatim command fallback (a still-valid demonstration).
+    let train = try demo("train dagger")
+    #expect(train.name == "command"); #expect(train.args["text"] as? String == "train dagger")
+}
+
+@Test func rawLogPipelineGagsKxwtNoLeak() async throws {
+    // Repro from a real raw capture: run actual server bytes through the real text pipeline
+    // (IAC strip + CRLF normalize + MSP strip) and the AlterAeon gag, and prove kxwt machinery and
+    // IAC Go-Ahead do NOT leak to the display.
+    let chunks = RAW_SAMPLE.compactMap { Data(base64Encoded: $0) }
+    #expect(!chunks.isEmpty)
+    let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+
+    var text = ""
+    for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
+        .normalizeLineEndings()
+        .processMSP() {
+        text += piece
+    }
+
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    let engine = LuaScriptEngine()
+    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
+    let lines = text.components(separatedBy: "\n")
+    let gagged = lines.map { engine.processLine($0) }
+    var out = [String]()
+    for (i, line) in lines.enumerated() {
+        if gagged[i] { continue }
+        if line.trimmingCharacters(in: .whitespaces).isEmpty {
+            if (i > 0 && gagged[i - 1]) || (i + 1 < lines.count && gagged[i + 1]) { continue }
+        }
+        out.append(line)
+    }
+    let display = out.joined(separator: "\n")
+
+    #expect(!display.contains("kxwt_"))   // machinery gagged, not leaked
+    #expect(!display.unicodeScalars.contains { $0.value == 0xFF || $0.value == 0xF9 })  // IAC GA stripped
+    // sanity: real content survived
+    #expect(display.contains("Pellam Cemetery") || display.contains("Exits"))
+}
+
+/// A real slice of a server capture (8 network chunks) containing kxwt_ machinery, IAC Go-Ahead
+/// terminators, MSP directives, and room text — used by rawLogPipelineGagsKxwtNoLeak.
+let RAW_SAMPLE: [String] = [
+    "DQpreHd0X3N1cHBvcnRlZA0KISFTT1VORChzeXN0ZW0vbG9naW5fc291bmQud2F2KQ0KDQpMb2dnaW5nIGluIGNoYXJhY3RlciAnZWxtaW5zdGVyJw0KG1sxbVRoZSBQZWxsYW0gQ2VtZXRlcnkgV2F5cG9pbnQNChtbMG1XYXlwb2ludHMgYXJlIGEgcXVpY2sgd2F5IHRvIGdldCBmcm9tIHBsYWNlIHRvIHBsYWNlIHdpdGhvdXQgbmVlZGluZyB0byB3YWxrLg0KWW91IGNhbiB0cmF2ZWwgYmV0d2VlbiB3YXlwb2ludHMgdXNpbmcgdGhlICcbWzFtG1szM213YXlwb2ludBtbMzdtG1swbScgY29tbWFuZC4gIFlvdSBjYW4gdXNlDQp0aGUgJxtbMW0bWzMzbXByYXkgaGVyZRtbMzdtG1swbScgY29tbWFuZCB0byBhZGQgdGhpcyB3YXlwb2ludCB0byB5b3VyIHdheXBvaW50IGxpc3QuDQoNClRoZSBmYXIgbm9ydGggcmltIG9mIHRoZSBwaXQgaXMgbGlnaHRseSBmb3Jlc3RlZCB3aXRoIHRhbGwgY2VkYXJzLiAgVmVyeSBvbGQNCmhlYWRzdG9uZXMsIHNvIHdvcm4gdGhleSBubyBsb25nZXIgYmVhciBhbnkgdGV4dCwgYXJlIGhpZGRlbiB3aXRoaW4gdGhlIHdvb2RlZA0KYXJlYS4gVG8gdGhlIHNvdXRoLCBhIHBhdGggbGVhZHMgZG93biBmcm9tIHRoZSBoaWxscyBpbnRvIHRoZSBjZW1ldGVyeS4NCg0KG1sxbRtbMzRtSXQgaXMgbmlnaHQuDQobWzM3bRtbMG1bRXhpdHM6IGVhc3Qgc291dGggXQ0K//k=",
+    "DQpreHd0X215bmFtZSBlbG1pbnN0ZXINCmt4d3RfZ29sZCA5NA0Ka3h3dF9leHAgMTQ5MjANCmt4d3RfZXhwY2FwIDEyNDANCmt4d3Rfc2t5IDEgMSAwDQpreHd0X3RpbWUgMTM1MCBuaWdodCAxMDozMCBwbQ0Ka3h3dF9ydm51bSA1MDE1MSAxIDEgLTEyMTExIDc3IDEgMA0Ka3h3dF90ZXJyYWluIDQNCmt4d3RfcnNob3J0IFRoZSBQZWxsYW0gQ2VtZXRlcnkgV2F5cG9pbnQNCmt4d3RfYXJlYSA1MDExIFRoZSBDZW1ldGVyeSBuZWFyIFBlbGxhbQ0Ka3h3dF9wb3NpdGlvbiBzdGFuZGluZw0KQ2xpZW50IHRyaWdnZXIgbW9kZSBlbmFibGVkLg0K//k=",
+    "a3h3dF9wcm9tcHQgNjAgNjAgMTM1IDEzNSAxNDYgMTQ2DQpreHd0X2ZpZ2h0aW5nIC0xDQoNChtbMW08NjBocCAxMzVtIDE0Nm12PhtbMG3/+Q==",
+]

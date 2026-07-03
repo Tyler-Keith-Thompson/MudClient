@@ -99,3 +99,4 @@ extension AsyncSequence where Self: Sendable, Element == String {
         return map { normalizer.normalize($0) }.eraseToAnyAsyncSequence()
     }
 }
+

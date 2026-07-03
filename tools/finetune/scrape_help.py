@@ -33,9 +33,17 @@ DEFAULT_SEEDS = [
     "https://www.alteraeon.com/guides/new-player-guide.html",
 ]
 # Only follow links whose path starts with one of these (keeps us in the docs).
-ALLOW_PREFIXES = ("/help", "/guides", "/spells", "/quests", "/maps")
+ALLOW_PREFIXES = ("/help", "/guides", "/spells", "/quests", "/maps", "/articles")
 DENY_EXT = (".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".exe",
             ".zip", ".pdf", ".mp3", ".mp4", ".svg")
+# Article slugs that are NOT gameplay knowledge — community history, interviews, fan fiction,
+# generic mud intros, client tech, design essays, and the chat-channel guide. Skipping these keeps
+# the fine-tune focused on how to PLAY rather than lore/meta noise.
+DENY_SUBSTR = (
+    "channels", "year_in_review", "dentin_interview", "ash_desert", "fifteen_years",
+    "gold-balancing", "writing-good-quest-guides", "telnet_tips", "mudding_clients",
+    "mudding_glossary", "muds_and_mudding", "a_quick_overview",
+)
 
 
 class TextExtractor(HTMLParser):
@@ -85,6 +93,8 @@ def allowed(url):
         return False
     if any(p.path.lower().endswith(e) for e in DENY_EXT):
         return False
+    if any(d in p.path.lower() for d in DENY_SUBSTR):
+        return False
     return any(p.path.startswith(pre) for pre in ALLOW_PREFIXES)
 
 
@@ -100,6 +110,8 @@ def fetch(url, timeout):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", action="append", default=[], help="extra seed URL(s)")
+    ap.add_argument("--no-defaults", action="store_true",
+                    help="crawl ONLY the --seed URLs (skip the built-in help/guides/spells seeds)")
     ap.add_argument("--max", type=int, default=300, help="max pages to fetch")
     ap.add_argument("--delay", type=float, default=0.6, help="seconds between requests")
     ap.add_argument("--depth", type=int, default=2, help="max link depth from seeds")
@@ -107,7 +119,7 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    seeds = DEFAULT_SEEDS + args.seed
+    seeds = (args.seed if args.no_defaults else DEFAULT_SEEDS + args.seed)
     queue = [(u, 0) for u in seeds]
     seen, saved = set(), 0
 

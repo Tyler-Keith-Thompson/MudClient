@@ -1,0 +1,5 @@
+         context | prompt_tok |    turn (2 trials)
+small (~150 ctx) |       2450 | 12.8s  1.8s
+current (~400 ctx) |       2892 | 12.7s  3.3s
+large (~800 ctx) |       3504 | 16.9s  17.1s
+DONE

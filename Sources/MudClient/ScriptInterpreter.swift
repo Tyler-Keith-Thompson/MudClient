@@ -20,10 +20,8 @@ final class ScriptInterpreter {
     init() {
         engine.onSend = { message in try? Container.inputService().send(verbatim: message) }
         engine.onEcho = { message in Container.terminalService().print(message) }
-        engine.onKxwt = { line in Container.kxwtHost().handle(line) }
-        // AlterAeon-specific builtins backed by the host KXWT state.
-        engine.register("recover") { _ in Container.kxwtHost().toggleRecovery(); return [] }
-        engine.register("dump_state") { _ in Container.kxwtHost().dumpState(); return [] }
+        // All game-specific behavior (KXWT parsing, state, recovery, the AI pilot) now lives in
+        // the Lua scripts (Scripts/AlterAeon.lua + Scripts/AIPilot.lua), not the Swift client.
     }
 
     lazy var echo = Parse {
@@ -67,8 +65,8 @@ final class ScriptInterpreter {
         }
     }
 
-    /// `#ai ...` — control the local-LLM pilot (see AIPilotService). Everything
-    /// after `ai` is handed to the pilot verbatim (`on`, `off`, `goal <text>`, ...).
+    /// `#ai ...` — control surface for the Lua AI pilot. `#ai reload` re-runs the scripts (host
+    /// concern); everything else is forwarded to the script's `ai_command` global.
     lazy var ai = Parse {
         "ai"
         Optionally {
@@ -77,7 +75,12 @@ final class ScriptInterpreter {
         }
     }
     .map { (arg: String?) in
-        Container.aiPilot().command(arg ?? "")
+        let a = (arg ?? "").trimmingCharacters(in: .whitespaces)
+        if a.lowercased() == "reload" {
+            Container.scriptInterpreter().reload()
+        } else {
+            Container.scriptInterpreter().engine.callGlobal("ai_command", a)
+        }
     }
 
     var parser: some Parser<Substring, Void> {
@@ -91,16 +94,18 @@ final class ScriptInterpreter {
         }
     }
 
-    /// Re-run a script file live, clearing existing rules first so triggers/aliases
-    /// aren't duplicated. Used after the AI pilot's script-edit loop rewrites the file.
-    func reload(_ scriptName: String = "AlterAeon") {
-        let path = "Scripts/\(scriptName).lua"
+    /// Re-run the game scripts live, clearing existing rules first so triggers/aliases aren't
+    /// duplicated. This is how `#ai reload` applies edits without a relaunch.
+    func reload() {
         engine.clearRules()
-        do {
-            try engine.load(path: path)
-            Container.terminalService().print("[ai] reloaded \(path)")
-        } catch {
-            Container.terminalService().print("[ai] failed to reload \(path): \(error)")
+        for name in ["AlterAeon", "AIPilot", "HUD"] {
+            let path = "Scripts/\(name).lua"
+            do {
+                try engine.load(path: path)
+                Container.terminalService().print("[ai] reloaded \(path)")
+            } catch {
+                Container.terminalService().print("[ai] failed to reload \(path): \(error)")
+            }
         }
     }
 }
@@ -124,10 +129,22 @@ extension AsyncSequence where Self: Sendable, Element == String {
     func processScriptInput() -> AnyAsyncSequence<String> {
         compactMap { input -> String? in
             let interpreter = Container.scriptInterpreter()
-            // A leading `#` command (e.g. `#load {AlterAeon}`) is consumed here.
+            // A leading `#` command the HOST owns (`#echo`, `#load`, `#ai`) is consumed here.
             if (try? interpreter.parser.parse(input)) != nil {
                 return nil
             }
+            // Any other `#<word> <rest>` is a script-defined command (registered via the Lua `command`
+            // builtin). This keeps game-specific command names (e.g. `#kxwt`) out of the generic client.
+            if input.first == Character.scriptIndicator {
+                let body = input.dropFirst()
+                let word = body.prefix { !$0.isWhitespace }
+                let rest = body[word.endIndex...].drop { $0 == " " }
+                if interpreter.engine.dispatchCommand(String(word), String(rest)) {
+                    return nil
+                }
+            }
+            // Let scripts observe the typed command without swallowing it (e.g. the AI pilot).
+            interpreter.engine.notifyUserInput(input)
             // Otherwise let a script alias claim it.
             if interpreter.engine.processAlias(input) {
                 return nil
@@ -143,15 +160,24 @@ extension AsyncSequence where Self: Sendable, Element == String {
                 .replacingOccurrences(of: "\r", with: "")
                 .components(separatedBy: CharacterSet.newlines)
             let engine = Container.scriptInterpreter().engine
-            let pilot = Container.aiPilot()
+            // Fire triggers (and gags) for every line, in order — scripts (incl. the AI pilot's
+            // catch-all) observe here. Record which lines were gagged for the blank-framing pass.
+            let gagged = lines.map { engine.processLine($0) }
+
             var out = [String]()
-            for line in lines where !engine.processLine(line) {
+            for (i, line) in lines.enumerated() {
+                if gagged[i] { continue }
+                // A blank line that sits right next to a gagged block (e.g. the empty line the MUD
+                // puts around a kxwt_ batch) is just framing for hidden machinery — drop it too, so
+                // gagging kxwt doesn't leave stray blank lines. The MUD's own spacing (blanks not
+                // touching a gag) is preserved.
+                if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                    let prevGagged = i > 0 && gagged[i - 1]
+                    let nextGagged = i + 1 < lines.count && gagged[i + 1]
+                    if prevGagged || nextGagged { continue }
+                }
                 out.append(line)
-                pilot.observe(line)
             }
-            // Output arrived; (re)arm the pilot's idle countdown so it takes a turn
-            // once the server's burst of output settles.
-            pilot.noteActivity()
             return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()

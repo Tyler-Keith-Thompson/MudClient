@@ -64,9 +64,6 @@ final class InputService: @unchecked Sendable {
     
     func parse(input: String) throws {
         for command in try parser.parse(input) {
-            // This is the user-typed entry point (the pilot/scripts use send(verbatim:)),
-            // so let the AI pilot know you acted before the command goes out.
-            Container.aiPilot().noteUserCommand(command)
             continuation.yield(command)
         }
     }

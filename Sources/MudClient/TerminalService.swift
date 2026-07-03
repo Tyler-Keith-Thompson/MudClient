@@ -280,6 +280,7 @@ final class TerminalService {
     
     func handleSigInt() {
         if lineBuffer.isEmpty {
+            Container.panelHost().teardown()   // reset the scroll region so the terminal isn't left stuck
             var tattr = termios()
             tcgetattr(STDIN_FILENO, &tattr)
             tattr.c_lflag |= tcflag_t(ECHO | ICANON)
