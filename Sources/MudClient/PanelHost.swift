@@ -2,21 +2,18 @@
 //  PanelHost.swift
 //  MudClient
 //
-//  A generic, frozen panel pinned to the TOP of the terminal, with normal output scrolling
-//  underneath it. The mechanism is the DECSTBM scroll region (`ESC[{top};{bottom}r`): the top
-//  `height` rows are excluded from the scrolling region, so ordinary output (and the bottom-split
-//  input line in TerminalService) only ever moves within the rows below the panel. The panel itself
-//  is painted with absolute cursor moves, bracketed by cursor save/restore so the input line is
-//  never disturbed.
+//  Holds the declarative model for the status panel and renders it to plain (ANSI-styled) strings.
+//  It owns NO terminal state — no scroll region, no cursor, no I/O. TerminalService is the single
+//  owner of the screen; it asks this host for `height` and `rows(width:)` and paints them into the
+//  frozen furniture band above the input line.
 //
-//  This host is deliberately game-agnostic. It renders a declarative model — an ordered list of
-//  rows, each a single styled line or a set of columns, each cell a list of styled spans — that
-//  scripts hand over via `panel.render` (see LuaScriptEngine). All widget/layout knowledge lives in
-//  Lua (Scripts/HUD.lua); this file only knows how to turn spans into ANSI and stack them.
+//  The model is a list of rows handed over by `panel.render(spec)` (see LuaScriptEngine). A row is
+//  either a single styled line or a set of columns; each column carries optional layout (`width`,
+//  `flex`, `align`) and a list of styled spans. All widget/layout intent lives in the Lua HUD script;
+//  this file only knows how to turn the spec into styled, width-clipped strings.
 //
-//  Threading: `render`/`setPinnedHeight` (engine thread) and `flush`/`teardown` (engine thread and
-//  the SIGWINCH handler on main) all take `lock`; terminal writes happen under it so a repaint and a
-//  resize can't interleave escape sequences.
+//  Threading: `render`/`setPinnedHeight` (engine thread) and `height`/`rows` (the screen owner) all
+//  take `lock`, so the model can't change mid-render.
 //
 
 import Foundation
@@ -34,105 +31,110 @@ final class PanelHost: @unchecked Sendable {
         var underline = false
     }
 
-    /// One panel row. `cols.count == 1` is a single full-width line; more than one lays the cells out
-    /// left-to-right in equal columns. Each cell is a list of spans rendered on one line.
-    struct Row { var cols: [[Span]] }
+    enum Align { case left, right, center }
+
+    /// One cell in a columned row: its styled content plus how it should be sized and aligned.
+    /// `width` pins an exact column width; otherwise the column shares the leftover space by `flex`.
+    struct Column {
+        var spans: [Span]
+        var width: Int?
+        var flex: Double
+        var align: Align
+    }
+
+    /// A panel row: either a single full-width line or a set of columns laid out left-to-right.
+    enum Row {
+        case line([Span])
+        case columns([Column])
+    }
 
     enum Color { case indexed(Int); case rgb(Int, Int, Int) }
 
     private let lock = NSLock()
-    private var rows: [Row] = []
-    private var desiredHeight = 0
+    private var parsedRows: [Row] = []
     private var pinnedHeight: Int?
-    private var dirty = false
-    // The scroll region currently set on the terminal, or -1/-1 if none. Tracked so we only re-emit
-    // the DECSTBM sequence when the panel height or terminal height actually changes.
-    private var regionTop = -1
-    private var regionBottom = -1
+
+    /// The number of terminal rows the panel occupies: the pinned height if set, else the row count of
+    /// the last render (0 when nothing has been rendered — so an unloaded HUD reserves no space).
+    var height: Int {
+        lock.lock(); defer { lock.unlock() }
+        return pinnedHeight ?? parsedRows.count
+    }
 
     // MARK: - Script-facing API
 
     /// Replace the panel model from a `panel.render(spec)` call. `spec` is a table whose array part is
-    /// the rows. Marks the panel dirty; the actual paint happens in `flush` (coalesced per update).
+    /// the rows. Pure state update — the screen owner repaints on its own cadence.
     func render(_ value: LuaValue) {
         guard case .table(let rowArray, _) = value else { return }
         let parsed = rowArray.map(Self.parseRow)
         lock.lock()
-        rows = parsed
-        desiredHeight = pinnedHeight ?? parsed.count
-        dirty = true
+        parsedRows = parsed
         lock.unlock()
     }
 
     /// Pin the panel to a fixed height (`panel.height(n)`); `n <= 0` unpins (height follows the row
-    /// count of each render). Pinning keeps the scroll region stable when a widget's row count varies.
+    /// count of each render). Pinning keeps the layout stable when a widget's row count varies.
     func setPinnedHeight(_ n: Int) {
         lock.lock()
         pinnedHeight = n > 0 ? n : nil
-        if let ph = pinnedHeight { desiredHeight = ph }
-        dirty = true
         lock.unlock()
     }
 
-    // MARK: - Rendering
+    // MARK: - Rendering (called by the screen owner)
 
-    /// Repaint the panel if it changed (or `force`, e.g. on resize). No-op until a script has rendered
-    /// something (so an unloaded HUD leaves the terminal completely untouched).
-    func flush(force: Bool = false) {
-        lock.lock(); defer { lock.unlock() }
-        guard dirty || force else { return }
-        guard desiredHeight > 0, let (h, w) = size() else { return }
-        // Leave at least a few rows below the panel for scrolling output + the input/divider lines.
-        let p = min(desiredHeight, max(0, h - 3))
-        guard p > 0 else { return }
-
-        var out = "\u{1B}7"                                  // save cursor + attributes (real input pos)
-        if regionTop != p + 1 || regionBottom != h {
-            out += "\u{1B}[\(p + 1);\(h)r"                   // freeze rows 1..p (moves cursor home — we saved)
-            regionTop = p + 1
-            regionBottom = h
-        }
-        for i in 0..<p {
-            out += "\u{1B}[\(i + 1);1H\u{1B}[2K"            // to panel row i, clear it
-            if i < rows.count { out += renderRow(rows[i], width: w) }
-        }
-        out += "\u{1B}8"                                     // restore cursor to the input line
-        write(out)
-        dirty = false
+    /// Render the panel to exactly `height` lines, each an ANSI string clipped/padded to `width`.
+    /// Rows beyond the model (when a height is pinned larger than the content) come back empty.
+    func rows(width: Int) -> [String] {
+        lock.lock(); let rs = parsedRows; let h = pinnedHeight ?? rs.count; lock.unlock()
+        guard h > 0 else { return [] }
+        return (0..<h).map { i in i < rs.count ? renderRow(rs[i], width: width) : "" }
     }
-
-    /// Reset the scroll region and drop to the bottom of the screen. Call on exit so a quit/crash
-    /// doesn't leave the terminal with a stuck region.
-    func teardown() {
-        lock.lock(); defer { lock.unlock() }
-        guard regionTop > 0 else { return }
-        var out = "\u{1B}[r"                                 // reset scroll region to the full screen
-        if let (h, _) = size() { out += "\u{1B}[\(h);1H" }
-        write(out)
-        regionTop = -1
-        regionBottom = -1
-    }
-
-    // MARK: - Row / span layout
 
     private func renderRow(_ row: Row, width: Int) -> String {
-        let cols = row.cols
-        if cols.count <= 1 {
-            return renderLine(cols.first ?? [], width: width, pad: false)
+        switch row {
+        case .line(let spans):
+            return renderLine(spans, width: width, align: .left, pad: false)
+        case .columns(let cols):
+            return renderColumns(cols, width: width)
         }
-        let n = cols.count
-        let base = width / n
+    }
+
+    /// Lay columns out left-to-right: fixed-`width` columns take their size first, and the rest share
+    /// the leftover space in proportion to `flex`. The last flexible column absorbs any rounding
+    /// remainder so the row always fills exactly `width`.
+    private func renderColumns(_ cols: [Column], width: Int) -> String {
+        let fixed = cols.reduce(0) { $0 + ($1.width ?? 0) }
+        let flexTotal = cols.reduce(0.0) { $0 + ($1.width == nil ? $1.flex : 0) }
+        let remaining = max(0, width - fixed)
+        let lastFlexIndex = cols.lastIndex { $0.width == nil }
+
+        var widths = [Int](repeating: 0, count: cols.count)
+        var flexAssigned = 0
+        for (i, c) in cols.enumerated() {
+            if let w = c.width {
+                widths[i] = w
+            } else if flexTotal > 0 {
+                if i == lastFlexIndex {
+                    widths[i] = remaining - flexAssigned    // last flexible column takes the remainder
+                } else {
+                    let w = Int(Double(remaining) * c.flex / flexTotal)
+                    widths[i] = w
+                    flexAssigned += w
+                }
+            }
+        }
+
         var out = ""
-        for (i, cell) in cols.enumerated() {
-            let cw = (i == n - 1) ? (width - base * (n - 1)) : base   // last column absorbs the remainder
-            out += renderLine(cell, width: cw, pad: true)
+        for (i, c) in cols.enumerated() {
+            out += renderLine(c.spans, width: max(0, widths[i]), align: c.align, pad: true)
         }
         return out
     }
 
     /// Render one line of spans, clipping to `width` VISIBLE characters (escape codes never count) and
-    /// optionally padding out with spaces so columns stay aligned.
-    private func renderLine(_ spans: [Span], width: Int, pad: Bool) -> String {
+    /// optionally padding with spaces per `align` so columns stay aligned.
+    private func renderLine(_ spans: [Span], width: Int, align: Align, pad: Bool) -> String {
         guard width > 0 else { return "" }
         var out = ""
         var used = 0
@@ -143,8 +145,17 @@ final class PanelHost: @unchecked Sendable {
             used += text.count
             out += sgr(span, text)
         }
-        if pad && used < width { out += String(repeating: " ", count: width - used) }
-        return out
+        guard pad, used < width else { return out }
+        let padCount = width - used
+        switch align {
+        case .left:
+            return out + String(repeating: " ", count: padCount)
+        case .right:
+            return String(repeating: " ", count: padCount) + out
+        case .center:
+            let left = padCount / 2
+            return String(repeating: " ", count: left) + out + String(repeating: " ", count: padCount - left)
+        }
     }
 
     private func sgr(_ span: Span, _ text: String) -> String {
@@ -170,25 +181,33 @@ final class PanelHost: @unchecked Sendable {
         }
     }
 
-    // MARK: - Terminal helpers
-
-    private func size() -> (rows: Int, cols: Int)? {
-        var w = winsize()
-        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 else { return nil }
-        return (Int(w.ws_row), Int(w.ws_col))
-    }
-
-    private func write(_ s: String) {
-        try? FileHandle.standardOutput.write(contentsOf: Data(s.utf8))
-    }
-
     // MARK: - Spec parsing (LuaValue -> model)
 
     private static func parseRow(_ value: LuaValue) -> Row {
         if case .table(_, let dict) = value, case .table(let colArray, _)? = dict["cols"] {
-            return Row(cols: colArray.map(parseCell))
+            return .columns(colArray.map(parseColumn))
         }
-        return Row(cols: [parseCell(value)])
+        return .line(parseCell(value))
+    }
+
+    private static func parseColumn(_ value: LuaValue) -> Column {
+        switch value {
+        case .string(let s):
+            return Column(spans: [Span(text: s)], width: nil, flex: 1, align: .left)
+        case .table(_, let dict):
+            let spans: [Span]
+            if case .table(let spanArray, _)? = dict["spans"] {
+                spans = spanArray.compactMap(parseSpanElement)
+            } else {
+                spans = [parseSpan(dict)]
+            }
+            return Column(spans: spans,
+                          width: int(dict["width"]),
+                          flex: double(dict["flex"]) ?? 1,
+                          align: alignment(dict["align"]))
+        default:
+            return Column(spans: [], width: nil, flex: 1, align: .left)
+        }
     }
 
     /// A cell is either `{ spans = { ... } }` or, for the common single-span case, a table that is
@@ -256,6 +275,15 @@ final class PanelHost: @unchecked Sendable {
         return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
     }
 
+    private static func alignment(_ value: LuaValue?) -> Align {
+        guard case .string(let s)? = value else { return .left }
+        switch s.lowercased() {
+        case "right": return .right
+        case "center", "centre": return .center
+        default: return .left
+        }
+    }
+
     private static func string(_ value: LuaValue?) -> String? {
         if case .string(let s)? = value { return s }
         return nil
@@ -265,6 +293,14 @@ final class PanelHost: @unchecked Sendable {
         switch value {
         case .int(let i)?: return Int(i)
         case .number(let d)?: return Int(d)
+        default: return nil
+        }
+    }
+
+    private static func double(_ value: LuaValue?) -> Double? {
+        switch value {
+        case .number(let d)?: return d
+        case .int(let i)?: return Double(i)
         default: return nil
         }
     }
@@ -281,5 +317,8 @@ final class PanelHost: @unchecked Sendable {
 }
 
 extension Container {
+    /// The bottom status panel (vitals, room, spells) docked above the input line.
     static let panelHost = Factory(scope: .cached) { PanelHost() }
+    /// The top panel (e.g. the group roster), frozen at the top of the screen.
+    static let topPanelHost = Factory(scope: .cached) { PanelHost() }
 }

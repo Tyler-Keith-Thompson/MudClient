@@ -164,20 +164,10 @@ extension AsyncSequence where Self: Sendable, Element == String {
             // catch-all) observe here. Record which lines were gagged for the blank-framing pass.
             let gagged = lines.map { engine.processLine($0) }
 
-            var out = [String]()
-            for (i, line) in lines.enumerated() {
-                if gagged[i] { continue }
-                // A blank line that sits right next to a gagged block (e.g. the empty line the MUD
-                // puts around a kxwt_ batch) is just framing for hidden machinery — drop it too, so
-                // gagging kxwt doesn't leave stray blank lines. The MUD's own spacing (blanks not
-                // touching a gag) is preserved.
-                if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                    let prevGagged = i > 0 && gagged[i - 1]
-                    let nextGagged = i + 1 < lines.count && gagged[i + 1]
-                    if prevGagged || nextGagged { continue }
-                }
-                out.append(line)
-            }
+            // Keep every non-gagged line verbatim — including blanks, which are the MUD's own spacing.
+            // (We used to drop blanks adjacent to a gagged kxwt_ batch as "framing", but that ate real
+            // spacing between content during combat's group-status bursts, and isn't needed.)
+            let out = lines.enumerated().filter { !gagged[$0.offset] }.map(\.element)
             return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()

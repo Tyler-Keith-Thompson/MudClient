@@ -16,6 +16,9 @@ state = state or {
   walkdir = nil, spells = {}, recover = false,
   inventory = {}, inv_known = false,   -- kxwt does NOT report inventory; we parse it from `inventory` output
   equipment = {}, eq_known = false,    -- nor what's worn/wielded; parsed from `equipment` output
+  group = {},                          -- roster of you + pets/groupmates (kxwt_group_start..end)
+  exits = {},                          -- set of available exit directions, parsed from "[Exits: ...]"
+  effects = {},                        -- timed self-effects (kxwt_spst): name -> remaining-time text
 }
 
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
@@ -102,6 +105,15 @@ trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], funct
   state.recover = false
 end)
 trigger([[^kxwt_rshort (.+)$]], function(_, n) state.room_name = n end)
+
+-- Exits are NOT a kxwt field — they print as a plain "[Exits: east west ]" line at the end of the
+-- room description. Parse the direction words into a set the HUD compass reads. (Level-1 long string
+-- [=[ ]=] so the pattern's own ] brackets don't close it.)
+trigger([=[^\[Exits: (.*?)\]]=], function(_, list)
+  local set = {}
+  for dir in (list or ""):gmatch("%a+") do set[dir:lower()] = true end
+  state.exits = set
+end)
 trigger([[^kxwt_area \d+ (.+)$]], function(_, a) state.area = a end)
 trigger([[^kxwt_terrain (\d+)]], function(_, t) state.terrain = tonumber(t) end)
 
@@ -117,6 +129,41 @@ trigger([[^kxwt_spelldown (.+)$]], function(_, s)
   if state.recover and state.position == "sleeping" and pct(state.mana, state.maxmana) > 0.3 then
     send("rest"); state.position = "sitting"
   end
+end)
+
+-- Group roster. kxwt streams the party (you + pets/groupmates) as a block bracketed by
+-- kxwt_group_start .. kxwt_group_end; each member line is "chp mhp cm mm cs ms <flags> <name>".
+-- Accumulate between start/end so a half-sent block never renders partial data.
+local group_capturing, group_buf = false, {}
+trigger([[^kxwt_group_start$]], function() group_capturing = true; group_buf = {} end)
+trigger([[^kxwt_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
+  function(_, chp, mhp, cm, mm, cs, ms, flags, name)
+    if not group_capturing then return end
+    group_buf[#group_buf + 1] = {
+      hp = tonumber(chp), maxhp = tonumber(mhp),
+      mana = tonumber(cm), maxmana = tonumber(mm),
+      stam = tonumber(cs), maxstam = tonumber(ms),
+      flags = flags, name = name,
+    }
+  end)
+trigger([[^kxwt_group_end$]], function()
+  if group_capturing then state.group = group_buf end
+  group_capturing = false
+end)
+
+-- Environment: sky/time/weather. kxwt_time is "<mud-minutes> <daypart> <clock> <am/pm>";
+-- kxwt_precipitation is a 0-100ish intensity; kxwt_sky "<light> <moon?> <...>" (kept raw-ish).
+trigger([[^kxwt_time (\d+) (\S+) (\S+) (\S+)$]], function(_, _mins, part, clock, ampm)
+  state.daypart = part; state.clock = clock .. " " .. ampm
+end)
+trigger([[^kxwt_precipitation (\d+)]], function(_, p) state.precip = tonumber(p) end)
+
+-- Timed self-effects (spell/skill durations), e.g. "kxwt_spst mana shield, two hours, 20 minutes".
+-- We keep the latest reported one keyed by name so a small "effects" widget can show remaining time.
+state.effects = state.effects or {}
+trigger([[^kxwt_spst (.+)$]], function(_, s)
+  local name, rest = s:match("^(.-),%s*(.+)$")
+  if name then state.effects[name] = rest else state.effects[s] = "" end
 end)
 
 -- Inventory tracking. kxwt never reports what you carry, so parse the `inventory` output: capture the

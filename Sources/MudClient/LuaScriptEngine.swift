@@ -78,13 +78,13 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal(name, [.string(arg)])
     }
 
-    /// Give scripts a chance to refresh the top panel after a batch of server output (triggers have
-    /// already updated `state`). Calls the optional global `on_update`, then flushes the panel once —
-    /// so multiple `panel.render` calls within one update coalesce into a single repaint. The flush is
-    /// outside the lock: it does terminal I/O and PanelHost has its own lock.
+    /// Give scripts a chance to refresh the status panel after a batch of server output (triggers have
+    /// already updated `state`). Calls the optional global `on_update`, which rebuilds the panel model
+    /// via `panel.render`. The actual repaint is the screen owner's job (TerminalService), done right
+    /// after this returns — so multiple `panel.render` calls within one update coalesce into one paint.
     func notifyUpdate() {
-        lock.lock(); try? lua.callGlobal("on_update", []); lock.unlock()
-        Container.panelHost().flush()
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_update", [])
     }
 
     // MARK: - Loading scripts
@@ -205,8 +205,25 @@ final class LuaScriptEngine: @unchecked Sendable {
             }
             return []
         }
-        // Expose them under a `panel` table so scripts call `panel.render{...}` / `panel.height(n)`.
-        try? lua.run("panel = { render = panel_render, height = panel_height }")
+        // The top panel (group roster, etc.) — same spec, a separate frozen region at the top.
+        lua.register("panel_top") { args in
+            if let first = args.first { Container.topPanelHost().render(first) }
+            return []
+        }
+        lua.register("panel_top_height") { args in
+            switch args.first {
+            case .int(let n)?: Container.topPanelHost().setPinnedHeight(Int(n))
+            case .number(let d)?: Container.topPanelHost().setPinnedHeight(Int(d))
+            default: break
+            }
+            return []
+        }
+        // Expose them under a `panel` table: `panel.render{...}` / `panel.height(n)` for the bottom
+        // status panel, `panel.top{...}` / `panel.top_height(n)` for the top panel.
+        try? lua.run("""
+            panel = { render = panel_render, height = panel_height,
+                      top = panel_top, top_height = panel_top_height }
+            """)
     }
 
     /// Dispatch a `#<name> <rest>` command to a script-registered handler. Returns whether one claimed it.

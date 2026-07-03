@@ -23,10 +23,10 @@ struct Connect: ParsableCommand {
         sigIntSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleSigInt)
         sigIntSource.resume()
 
-        // On resize the scroll region's bottom row moves, so re-set it and repaint the top panel.
+        // On resize the scroll region and furniture positions move, so rebuild the whole layout.
         signal(SIGWINCH, SIG_IGN)
         let sigWinchSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .main)
-        sigWinchSource.setEventHandler(qos: .default, flags: []) { Container.panelHost().flush(force: true) }
+        sigWinchSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleResize)
         sigWinchSource.resume()
 
         Container.terminalService().setup()
@@ -42,14 +42,11 @@ struct Connect: ParsableCommand {
             try await connection.connect()
             Task {
                 for try await string in connection {
-                    // A fully-gagged chunk (e.g. an idle kxwt_ status batch) renders to "". Don't print
-                    // it — print() unconditionally paints a divider line, so print("") leaves a blank line
-                    // on screen. But DO still refresh the panel: those gagged kxwt_ batches are exactly
-                    // the status updates (hp/mana/room) the HUD is built from.
-                    if !string.isEmpty {
-                        Container.terminalService().print(string, terminator: "")
-                    }
+                    // Refresh the panel model FIRST (triggers have already updated `state`), then paint.
+                    // render() draws output for a real chunk, or just refreshes the furniture for an
+                    // empty (fully-gagged kxwt status) batch — which is exactly when hp/mana/room change.
                     Container.scriptInterpreter().engine.notifyUpdate()
+                    Container.terminalService().render(string)
                 }
             }
             Task {

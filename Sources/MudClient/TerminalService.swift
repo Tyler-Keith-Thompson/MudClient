@@ -82,6 +82,15 @@ final class TerminalService {
     var commandHistory: [String] = []
     var currentCommandIndex: Int = 0
 
+    /// The band geometry (top panel : bottom panel heights) the scroll region is currently sized for.
+    /// An empty string forces `setupScreen` to (re)establish the region on the next paint; it's the
+    /// mismatch check that lets the region track panels appearing/growing/shrinking.
+    private var lastSignature = ""
+    /// The previous frozen-band extents, so when a band shrinks/moves we can clear the rows it vacated
+    /// (now part of the scrolling output region) instead of leaving stale panel text behind. -1 = none.
+    private var lastTopHeight = -1
+    private var lastOutputBottom = -1
+
     func handle(input: String) {
         partialInput.append(input)
         
@@ -114,33 +123,161 @@ final class TerminalService {
     }
     
     func setup() {
-        print("")
+        // Take firm control of a clean, full screen from a known state before we start managing bands:
+        //   ESC[?6l  origin mode OFF, so absolute cursor moves address the whole screen rather than
+        //            being confined to an inherited scroll region (that offset was leaving the shell
+        //            prompt visible up top and lopping a row off our panel);
+        //   ESC[r    drop any inherited scroll region;
+        //   ESC[2J   clear leftover shell-prompt / build clutter so none lingers in a frozen band.
+        writeToStandardOut(data: Data("\u{1B}[?6l\u{1B}[r\u{1B}[2J".utf8))
+        setupScreen()
     }
-    
+
+    // MARK: - Screen layout
+    //
+    // The screen frames a scrolling OUTPUT region with subtle dividers, top-to-bottom:
+    //   1. an optional TOP panel (the group roster), frozen at the top;
+    //   2. a subtle divider (top edge of the scroll frame);
+    //   3. the scrolling OUTPUT region;
+    //   4. a subtle divider (bottom edge of the scroll frame);
+    //   5. the bottom status panel;
+    //   6. a subtle divider directly above the input line;
+    //   7. the input line.
+    // A DECSTBM scroll region (`ESC[{regionTop};{outputBottom}r`) confines all scrolling output to band
+    // 3, so the panels, dividers, and input never move. Output and typing use two separate cursors: the
+    // OUTPUT cursor is parked at the bottom of the scroll region and saved/restored with DECSC/DECRC
+    // (`ESC7`/`ESC8`) around every write, while the physical cursor rests on the input line. Everything
+    // else is painted with absolute moves that never touch the saved slot, so a server line arriving
+    // mid-type repaints around the input without disturbing it.
+
+    private struct Layout {
+        let height, width, topHeight, bottomHeight: Int
+        let topDividerRow, regionTop, outputBottom, scrollDividerRow: Int
+        let bottomPanelTop, inputDividerRow, inputRow: Int
+    }
+
+    private func layout() -> Layout? {
+        guard let h = getTerminalHeight(), let w = getTerminalWidth() else { return nil }
+        let topHeight = Container.topPanelHost().height
+        let bottomHeight = Container.panelHost().height
+        // top band: group panel + one divider framing the scroll's top edge.
+        let topReserved = topHeight + 1
+        // bottom band: scroll-frame divider + status panel + input divider + input line.
+        let bottomReserved = bottomHeight + 3
+        let regionTop = topReserved + 1
+        let outputBottom = max(regionTop, h - bottomReserved)
+        return Layout(height: h, width: w, topHeight: topHeight, bottomHeight: bottomHeight,
+                      topDividerRow: topHeight + 1,               // divider below the top panel
+                      regionTop: regionTop,
+                      outputBottom: outputBottom,
+                      scrollDividerRow: outputBottom + 1,         // divider below the scroll region
+                      bottomPanelTop: outputBottom + 2,           // status panel below that divider
+                      inputDividerRow: h - 1,                     // divider directly above the input
+                      inputRow: h)
+    }
+
+    /// A compact signature of the band geometry; when it changes (panel heights, top panel appearing)
+    /// the scroll region must be re-established.
+    private func signature(_ l: Layout) -> String { "\(l.topHeight):\(l.bottomHeight)" }
+
+    /// A subtle (dim) full-width horizontal rule used to frame the scroll region.
+    private func dividerLine(width: Int) -> String {
+        "\u{1B}[90m" + String(repeating: "─", count: width) + "\u{1B}[0m"
+    }
+
+    /// Establish (or re-establish) the scroll region and park + save the output cursor at its bottom,
+    /// then paint all furniture. Called at startup, on resize, and whenever a band's height changes.
+    private func setupScreen() {
+        guard let l = layout() else { return }
+        lastSignature = signature(l)
+        var out = ""
+        // Clear rows that were frozen furniture in the PREVIOUS geometry but now fall inside the scroll
+        // region (a band shrank or moved), so no stale panel/divider text is left behind.
+        if lastTopHeight > 0 { out += clearRows(from: 1, through: lastTopHeight + 1) }
+        if lastOutputBottom >= 0 { out += clearRows(from: lastOutputBottom + 1, through: l.height) }
+        out += "\u{1B}[\(l.regionTop);\(l.outputBottom)r"      // scroll region = the output band only
+        out += "\u{1B}[\(l.outputBottom);1H\u{1B}7"            // park output cursor at region bottom, save it
+        writeToStandardOut(data: Data(out.utf8))
+        lastTopHeight = l.topHeight
+        lastOutputBottom = l.outputBottom
+        drawFurniture(l)
+    }
+
+    private func clearRows(from: Int, through: Int) -> String {
+        guard through >= from else { return "" }
+        return (from...through).reduce("") { $0 + "\u{1B}[\($1);1H\u{1B}[2K" }
+    }
+
     func print(_ string: Any, terminator: String = "\n") {
-        clearInputAndDividerLines()
-        
-        let output = String(describing: string) + terminator
-        writeToStandardOut(data: Data(output.utf8))
-        
-        let divider = String(repeating: "-", count: getTerminalWidth() ?? 80)
-        writeToStandardOut(data: Data("\n\(divider)\n".utf8))
-        refreshDisplay(cursorColumn: cursor.column)
+        guard let l = layout() else { return }
+        if lastSignature != signature(l) { setupScreen() }     // band geometry changed → resize region
+        var out = "\u{1B}8"                                 // restore output cursor (bottom of region)
+        out += String(describing: string) + terminator      // write output; scrolls within the region
+        out += "\u{1B}7"                                     // save the new output cursor
+        writeToStandardOut(data: Data(out.utf8))
+        drawFurniture(l)
     }
-    
-    private func clearInputAndDividerLines() {
-        // Move to the beginning of the input line (assumed to be the current line)
-        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
-        // Clear the entire input line
-        writeToStandardOut(data: Data("\u{1B}[2K".utf8))
-        
-        // Move cursor up one line to the divider line
-        writeToStandardOut(data: Data("\u{1B}[1A".utf8))
-        // Delete the divider line and shift content up
-        writeToStandardOut(data: Data("\u{1B}[1M".utf8))
-        
-        // Now the cursor is at the position where the divider line was,
-        // and the line has been deleted, effectively removing the newline as well.
+
+    /// Paint one server/output chunk. Empty chunks (a fully-gagged status batch) carry no text but a
+    /// panel may still have changed, so just refresh the furniture.
+    func render(_ chunk: String) {
+        if chunk.isEmpty {
+            refreshFurniture()
+        } else {
+            print(chunk, terminator: "")
+        }
+    }
+
+    /// Repaint all furniture without writing any output (e.g. after a panel-only state change).
+    func refreshFurniture() {
+        guard let l = layout() else { return }
+        if lastSignature != signature(l) { setupScreen(); return }
+        drawFurniture(l)
+    }
+
+    /// Paint the top panel, the scroll-frame dividers, the bottom status panel, and the input line —
+    /// all absolute, none touching the saved output cursor — leaving the physical cursor on the input.
+    private func drawFurniture(_ l: Layout) {
+        var out = ""
+        if l.topHeight > 0 {                                 // top panel (group), rows 1..topHeight
+            let rows = Container.topPanelHost().rows(width: l.width)
+            for i in 0..<l.topHeight {
+                out += "\u{1B}[\(1 + i);1H\u{1B}[2K"
+                if i < rows.count { out += rows[i] }
+            }
+        }
+        // subtle divider framing the top of the scroll region
+        out += "\u{1B}[\(l.topDividerRow);1H\u{1B}[2K" + dividerLine(width: l.width)
+        // subtle divider framing the bottom of the scroll region
+        out += "\u{1B}[\(l.scrollDividerRow);1H\u{1B}[2K" + dividerLine(width: l.width)
+        if l.bottomHeight > 0 {                              // status panel, below the scroll frame
+            let rows = Container.panelHost().rows(width: l.width)
+            for i in 0..<l.bottomHeight {
+                out += "\u{1B}[\(l.bottomPanelTop + i);1H\u{1B}[2K"
+                if i < rows.count { out += rows[i] }
+            }
+        }
+        // subtle divider directly above the input line
+        out += "\u{1B}[\(l.inputDividerRow);1H\u{1B}[2K" + dividerLine(width: l.width)
+        writeToStandardOut(data: Data(out.utf8))
+        drawInputLine(l, cursorColumn: cursor.column)
+    }
+
+    /// On resize the region and furniture positions move, so clear and rebuild from scratch.
+    func handleResize() {
+        writeToStandardOut(data: Data("\u{1B}[2J".utf8))
+        lastSignature = ""
+        lastTopHeight = -1
+        lastOutputBottom = -1
+        setupScreen()
+    }
+
+    /// Reset the scroll region and drop to the bottom of the screen so we don't leave the terminal in
+    /// a weird state on exit.
+    func teardownScreen() {
+        var out = "\u{1B}[r"                                // reset scroll region to the full screen
+        out += "\u{1B}[\(getTerminalHeight() ?? 24);1H"
+        writeToStandardOut(data: Data(out.utf8))
     }
     
     private func getTerminalHeight() -> Int? {
@@ -240,34 +377,36 @@ final class TerminalService {
         partialInput = ""
     }
 
+    /// Redraw just the input line (used by the keystroke handlers). Looks up the current layout so the
+    /// line always lands on the absolute input row below the panel.
     private func refreshDisplay(cursorColumn: Int) {
-        // Get the terminal width
-        guard let terminalWidth = getTerminalWidth() else { return }
+        guard let l = layout() else { return }
+        drawInputLine(l, cursorColumn: cursorColumn)
+    }
 
-        // Determine if scrolling is necessary
+    /// Draw the input buffer on the absolute input row, horizontally scrolled to keep the cursor in
+    /// view, and leave the physical cursor at the typing column. Never touches the saved output cursor.
+    private func drawInputLine(_ l: Layout, cursorColumn: Int) {
+        let terminalWidth = l.width
+
+        // Scroll the visible window so the cursor stays on screen.
         if cursorColumn < visibleStartColumn + 1 {
-            // Cursor is left of the visible window, so scroll left
             visibleStartColumn = max(0, cursorColumn - 1)
         } else if cursorColumn > visibleStartColumn + terminalWidth - 1 {
-            // Cursor is right of the visible window, so scroll right
             visibleStartColumn = cursorColumn - terminalWidth + 1
         }
 
-        // Calculate the starting index for the visible portion of the lineBuffer
-        let visibleStartIndex = lineBuffer.index(lineBuffer.startIndex, offsetBy: visibleStartColumn)
-        let visibleEndIndex = lineBuffer.index(visibleStartIndex, offsetBy: min(terminalWidth - 1, lineBuffer.distance(from: visibleStartIndex, to: lineBuffer.endIndex)))
+        let start = min(visibleStartColumn, lineBuffer.count)
+        let visibleStartIndex = lineBuffer.index(lineBuffer.startIndex, offsetBy: start)
+        let length = min(terminalWidth - 1, lineBuffer.distance(from: visibleStartIndex, to: lineBuffer.endIndex))
+        let visibleEndIndex = lineBuffer.index(visibleStartIndex, offsetBy: max(0, length))
         let visibleText = String(lineBuffer[visibleStartIndex..<visibleEndIndex])
 
-        // Move the cursor to the beginning of the line
-        writeToStandardOut(data: Data("\u{1B}[1G".utf8))
-        // Clear the current line
-        writeToStandardOut(data: Data("\u{1B}[2K".utf8))
-        // Write the visible portion of the lineBuffer to the terminal
-        writeToStandardOut(data: Data(visibleText.utf8))
-        
-        // Calculate the cursor position within the visible text
         let cursorOffset = cursorColumn - visibleStartColumn
-        writeToStandardOut(data: Data("\u{1B}[\(cursorOffset)G".utf8))
+        var out = "\u{1B}[\(l.inputRow);1H\u{1B}[2K"        // to input row, clear it
+        out += visibleText
+        out += "\u{1B}[\(l.inputRow);\(cursorOffset)H"      // park cursor at the typing column
+        writeToStandardOut(data: Data(out.utf8))
     }
 
     func writeToStandardOut(data: Data) {
@@ -280,7 +419,7 @@ final class TerminalService {
     
     func handleSigInt() {
         if lineBuffer.isEmpty {
-            Container.panelHost().teardown()   // reset the scroll region so the terminal isn't left stuck
+            teardownScreen()   // reset the scroll region so the terminal isn't left stuck
             var tattr = termios()
             tcgetattr(STDIN_FILENO, &tattr)
             tattr.c_lflag |= tcflag_t(ECHO | ICANON)
@@ -289,10 +428,10 @@ final class TerminalService {
             exit(0)
         } else {
             cursor.moveToStartOfLine()
-            // Clear the entire line (input line)
-            writeToStandardOut(data: Data("\u{1B}[2K".utf8))
             lineBuffer = ""
             partialInput = ""
+            visibleStartColumn = 0
+            refreshDisplay(cursorColumn: cursor.column)   // clear + redraw the (now empty) input line
         }
     }
 }
