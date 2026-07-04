@@ -13,8 +13,9 @@
 //  are only touched on the main queue.
 //
 //  Config (env vars):
-//    MUD_SOUND_DIR   directory holding your audio files (default ~/Documents/MudClient/sounds if present)
-//    MUD_SOUND_FONT  optional soundfont/DLS for .mid tracks (falls back to the system General MIDI set)
+//    MUD_SOUND_DIR      directory holding your audio files (default ~/Documents/MudClient/sounds if present)
+//    MUD_SOUND_FONT     optional soundfont/DLS for .mid tracks (falls back to the system General MIDI set)
+//    MUD_MUSIC_VOLUME   starting master volume as a percentage 0-100 (default 35 — deliberately quiet)
 //
 
 import Foundation
@@ -23,9 +24,13 @@ import DependencyInjection
 
 final class MusicService: @unchecked Sendable {
     private let crossfade: TimeInterval = 1.5
+    private let volumeFade: TimeInterval = 0.4
     private let soundDir: URL?
     private let soundFont: URL?
     private var channels: [String: ChannelPlayer] = [:]   // main-queue only
+    /// Master volume (0…1) applied to every channel. Set once in `init`, then only touched on the main
+    /// queue. Deliberately low by default so ambience sits under the game text rather than over it.
+    private var masterVolume: Float
 
     init() {
         let env = ProcessInfo.processInfo.environment
@@ -38,6 +43,11 @@ final class MusicService: @unchecked Sendable {
             soundDir = FileManager.default.fileExists(atPath: def.path) ? def : nil
         }
         if let f = env["MUD_SOUND_FONT"], !f.isEmpty { soundFont = url(f) } else { soundFont = nil }
+        if let v = env["MUD_MUSIC_VOLUME"], let n = Float(v) {
+            masterVolume = max(0, min(1, n / 100))
+        } else {
+            masterVolume = 0.35
+        }
     }
 
     /// Start (or replace) `track` on `channel`, crossfading over whatever was there. `track` may be a
@@ -50,7 +60,7 @@ final class MusicService: @unchecked Sendable {
             let old = self.channels[channel]
             self.channels[channel] = player
             player.start(volume: 0)
-            player.fade(to: 1, duration: self.crossfade)
+            player.fade(to: self.masterVolume, duration: self.crossfade)
             old?.fadeOutAndStop(duration: self.crossfade)
         }
     }
@@ -60,6 +70,17 @@ final class MusicService: @unchecked Sendable {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.channels.removeValue(forKey: channel)?.fadeOutAndStop(duration: self.crossfade)
+        }
+    }
+
+    /// Set the master volume for all channels from a 0-100 percentage, fading currently-playing
+    /// channels to the new level and applying it to anything started afterward. Clamped to 0…100.
+    func setVolume(percent: Double) {
+        let v = Float(max(0, min(100, percent)) / 100)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.masterVolume = v
+            for player in self.channels.values { player.fade(to: v, duration: self.volumeFade) }
         }
     }
 

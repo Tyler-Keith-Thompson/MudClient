@@ -198,6 +198,31 @@ trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch)
   if music then music.stop(ch) end
 end)
 
+-- `#volume music <0-100>` — master volume for the layered music player (all channels). A bare
+-- `#volume` or `#volume music` with no number just reports the current level. Swift starts at 35%
+-- (deliberately quiet); we mirror that default here for the readout. `if music.volume` guards an
+-- un-relaunched binary that lacks the new builtin.
+state.music_volume = state.music_volume or 35
+if command then command("volume", function(rest) volume_command(rest) end) end
+function volume_command(args)
+  args = (args or ""):match("^%s*(.-)%s*$")
+  local target = (args:match("^%S*") or ""):lower()
+  local rest = args:match("^%S*%s+(.*)$") or ""
+  -- accept both `#volume music 40` and the shorthand `#volume 40`
+  local num = rest:match("^(%d+)") or (target:match("^%d+$") and target or nil)
+  if target ~= "" and target ~= "music" and not target:match("^%d+$") then
+    echo("[volume] usage: #volume music <0-100>"); return
+  end
+  if num then
+    local n = math.max(0, math.min(100, tonumber(num)))
+    state.music_volume = n
+    if music and music.volume then music.volume(n) end
+    echo(string.format("[volume] music set to %d%%", n))
+  else
+    echo(string.format("[volume] music is at %d%% (use #volume music <0-100>)", state.music_volume))
+  end
+end
+
 -- Timed self-effects (spell/skill durations), e.g. "kxwt_spst mana shield, two hours, 20 minutes".
 -- We keep the latest reported one keyed by name so a small "effects" widget can show remaining time.
 state.effects = state.effects or {}

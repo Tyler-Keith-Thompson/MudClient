@@ -247,7 +247,12 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let ch)? = args.first { Container.musicService().stop(channel: ch) }
             return []
         }
-        try? lua.run("music = { play = music_play, stop = music_stop }")
+        // music.volume(pct) — set the master volume for all channels from a 0-100 percentage.
+        lua.register("music_volume") { args in
+            if let pct = args.first.flatMap(Self.doubleArg) { Container.musicService().setVolume(percent: pct) }
+            return []
+        }
+        try? lua.run("music = { play = music_play, stop = music_stop, volume = music_volume }")
     }
 
     /// Dispatch a `#<name> <rest>` command to a script-registered handler. Returns whether one claimed it.
