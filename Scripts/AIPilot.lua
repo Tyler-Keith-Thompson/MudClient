@@ -118,12 +118,16 @@ function pilot_room_change(id, coord)
   if state and state.area then P.rooms[id].area = state.area end   -- tag area (feeds future `navigate`)
   -- Build the move edge from the direction WE COMMANDED (P.last_move_dir) — NOT the game's kxwt
   -- `walkdir`, which is mistimed and was mislabeling edges (the source of the "phantom" exits).
-  -- And only link rooms that the COORDINATES say are actually different positions: ground truth, so
-  -- a stale direction can't invent an adjacency between a room and itself or a non-neighbor.
+  -- Guards, so a room change that WASN'T a step never invents an adjacency:
+  --   * moved      — the COORDINATES actually changed (not a re-entry / same spot);
+  --   * exits[dir]  — we left through an exit the room ACTUALLY ADVERTISES. A recall or a death drops
+  --                  you somewhere you didn't walk to, so `dir` won't be a real exit of the room you
+  --                  left — no phantom edge, and no need to special-case teleports or death at all.
   local dir = P.last_move_dir
+  local from_room = from_id and P.rooms[from_id]
   local moved = from and (coord[1] ~= from[1] or coord[2] ~= from[2]
                           or coord[3] ~= from[3] or coord[4] ~= from[4])
-  if dir and from_id and moved then
+  if dir and from_room and moved and from_room.exits[dir] then
     P.rooms[from_id].moves[dir] = id
     if OPP[dir] then P.rooms[id].moves[OPP[dir]] = from_id end
     if from[4] == coord[4] then
@@ -176,6 +180,76 @@ local function has_frontier(rid)
   if not r then return false end
   for d in pairs(r.exits) do if not r.moves[d] then return true end end
   return false
+end
+
+-- ---- minimap (consumed by the HUD) ----------------------------------------------------------
+-- Lay out the local area around the current room on a unit grid by walking the MOVE GRAPH one step
+-- per commanded direction (robust to the game's coordinate scale — we never use raw coords here).
+-- Only the 8 compass directions place cells; up/down cross z-levels and are left off the 2-D map.
+-- Returns { w, h, cells = { [row] = { [col] = { ch, fg, bold } } } } (1-indexed, sparse), or nil.
+local MM_VEC = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { -1, 0 },
+  northeast = { 1, -1 }, northwest = { -1, -1 }, southeast = { 1, 1 }, southwest = { -1, 1 } }
+local MM_CONN = { north = "│", south = "│", east = "─", west = "─",
+  northeast = "╱", southwest = "╱", northwest = "╲", southeast = "╲" }
+
+function minimap(hw, hh)
+  hw, hh = hw or 3, hh or 2
+  local cur = P.current_room
+  if not cur or not P.rooms[cur] then return nil end
+  -- BFS from the current room, assigning each reached room a grid coord in unit steps.
+  local pos, order, queue, head = { [cur] = { 0, 0 } }, { cur }, { cur }, 1
+  while head <= #queue do
+    local id = queue[head]; head = head + 1
+    local g = pos[id]
+    for d, nb in pairs(P.rooms[id].moves or {}) do
+      local v = MM_VEC[d]
+      if v and pos[nb] == nil and P.rooms[nb] then
+        local nx, ny = g[1] + v[1], g[2] + v[2]
+        if math.abs(nx) <= hw and math.abs(ny) <= hh then
+          pos[nb] = { nx, ny }; order[#order + 1] = nb; queue[#queue + 1] = nb
+        end
+      end
+    end
+  end
+  -- Doubled render grid: nodes at even offsets, connectors between them at odd offsets.
+  local W, H = 4 * hw + 1, 4 * hh + 1
+  local ccol, crow = 2 * hw + 1, 2 * hh + 1
+  local cells = {}
+  local function put(col, row, ch, fg, bold)
+    if col < 1 or col > W or row < 1 or row > H then return end
+    cells[row] = cells[row] or {}
+    cells[row][col] = { ch = ch, fg = fg, bold = bold }
+  end
+  for _, id in ipairs(order) do   -- connectors first, so nodes paint over their endpoints
+    local g = pos[id]
+    local col, row = ccol + 2 * g[1], crow + 2 * g[2]
+    for d, nb in pairs(P.rooms[id].moves or {}) do
+      if pos[nb] and MM_VEC[d] then put(col + MM_VEC[d][1], row + MM_VEC[d][2], MM_CONN[d], "brightblack") end
+    end
+  end
+  -- Unexplored-exit stubs: an exit the room ADVERTISES (in r.exits) that we've never walked and that
+  -- isn't a known dead end -> a bright-green stub pointing that way, into ground we haven't mapped.
+  -- Only fills empty cells, so it never clobbers a real (walked) connector or a node.
+  for _, id in ipairs(order) do
+    local g = pos[id]
+    local col, row = ccol + 2 * g[1], crow + 2 * g[2]
+    local r = P.rooms[id]
+    for d in pairs(r.exits or {}) do
+      local v = MM_VEC[d]
+      if v and not (r.moves and r.moves[d]) and not (r.blocked and r.blocked[d]) then
+        local sc, sr = col + v[1], row + v[2]
+        if not (cells[sr] and cells[sr][sc]) then put(sc, sr, MM_CONN[d], "brightgreen") end
+      end
+    end
+  end
+  for _, id in ipairs(order) do   -- nodes on top: current, frontier (has an untaken exit), or visited
+    local g = pos[id]
+    local col, row = ccol + 2 * g[1], crow + 2 * g[2]
+    if id == cur then put(col, row, "◉", "brightyellow", true)
+    elseif has_frontier(id) then put(col, row, "▣", "brightgreen")
+    else put(col, row, "□", "cyan") end
+  end
+  return { w = W, h = H, cells = cells }
 end
 
 -- BFS over the move graph from the current room to the nearest room with an unexplored exit.

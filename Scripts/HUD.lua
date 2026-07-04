@@ -79,14 +79,13 @@ local function target_cell()
   return { flex = 1.6, text = "⚔ —", fg = "brightblack" }
 end
 
--- Vitals (hp / mana / moves) + the current target, all on ONE line so you read them at a glance.
-local function vitals_row()
-  return { cols = {
+-- The three vitals cells (hp / mana / moves) — the left of the stats line.
+local function vital_cells()
+  return {
     vital("HP", state.hp, state.maxhp, "hp"),
     vital("MP", state.mana, state.maxmana, "mp"),
     vital("MV", state.stam, state.maxstam, "mv"),
-    target_cell(),
-  } }
+  }
 end
 
 -- Active spells (buffs) — what's currently up on you.
@@ -128,15 +127,22 @@ local function room_name_cell()
   return { spans = spans }
 end
 
+-- Out of combat the exits rose sits on the RIGHT of the bottom panel, spanning the three rows next to
+-- the stats. In combat the target takes the stats line's 4th slot and the rose shoots up to the top
+-- panel (see update_top), so it's always the full rose — never a one-liner.
 local function update_bottom()
-  local blank = { text = "" }
-  panel.render({
-    vitals_row(),   -- HP | MP | MV | target, all on one line
-    spells_row(),
-    { cols = { blank,             compass(1) } },   -- room name sits centred beside the compass rose
-    { cols = { room_name_cell(),  compass(2) } },
-    { cols = { blank,             compass(3) } },
-  })
+  local fighting = state.fighting
+  local stats = vital_cells()
+  stats[#stats + 1] = fighting and target_cell() or compass(1)   -- 4th slot: target, or rose row 1
+  local rows = { { cols = stats } }
+  if fighting then
+    rows[#rows + 1] = spells_row()
+    rows[#rows + 1] = room_name_cell()
+  else
+    rows[#rows + 1] = { cols = { spells_row(),      compass(2) } }
+    rows[#rows + 1] = { cols = { room_name_cell(),  compass(3) } }
+  end
+  panel.render(rows)
 end
 
 -- ============================ TOP PANEL (reference) ============================
@@ -212,14 +218,60 @@ local function group_member_row(m)
   } }
 end
 
+-- Minimap (top-right). Pulls the local map grid from AIPilot's `minimap()` and turns each grid line
+-- into a fixed-width cell (a 2-space gutter keeps it off the left content). nil if the map is unknown.
+local function minimap_cells()
+  if not minimap then return nil end          -- AIPilot (which owns the map) not loaded
+  local m = minimap(4, 3)                      -- half-width, half-height in rooms → a 17×13 view
+  if not m then return nil end
+  local out = {}
+  for r = 1, m.h do
+    local line = m.cells[r] or {}
+    local spans = { { text = "  " } }
+    for c = 1, m.w do
+      local cell = line[c]
+      if cell then spans[#spans + 1] = { text = cell.ch, fg = cell.fg, bold = cell.bold }
+      else spans[#spans + 1] = { text = " " } end
+    end
+    out[r] = { spans = spans, width = m.w + 2 }
+  end
+  return out
+end
+
+-- Append a fixed-width cell as the last column of a row (wrapping a single-line row into columns).
+local function append_col(row, cell)
+  if row.cols then
+    local cols = {}
+    for _, c in ipairs(row.cols) do cols[#cols + 1] = c end
+    cols[#cols + 1] = cell
+    return { cols = cols }
+  end
+  return { cols = { row, cell } }
+end
+
 local function update_top()
-  local rows = {}
+  local left = {}
   local g = state.group or {}
   if #g >= 2 then   -- show the roster only when you actually have pets/groupmates
-    rows[#rows + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
-    for _, m in ipairs(g) do rows[#rows + 1] = group_member_row(m) end
+    left[#left + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
+    for _, m in ipairs(g) do left[#left + 1] = group_member_row(m) end
   end
-  for _, r in ipairs(reference_rows()) do rows[#rows + 1] = r end
+  if state.fighting then   -- the stats line is busy with the target, so the exits rose lives up here
+    left[#left + 1] = { cols = { { text = "" }, compass(1) } }
+    left[#left + 1] = { cols = { { spans = { { text = "exits", dim = true } } }, compass(2) } }
+    left[#left + 1] = { cols = { { text = "" }, compass(3) } }
+  end
+  for _, r in ipairs(reference_rows()) do left[#left + 1] = r end
+
+  -- Compose the minimap as a right-hand column, aligned row-for-row with the left content.
+  local mini = minimap_cells()
+  if not mini then panel.top(left); return end
+  local rows, n = {}, math.max(#left, #mini)
+  for i = 1, n do
+    if left[i] and mini[i] then rows[i] = append_col(left[i], mini[i])
+    elseif left[i] then rows[i] = left[i]
+    else rows[i] = { cols = { { text = "" }, mini[i] } } end
+  end
   panel.top(rows)
 end
 
