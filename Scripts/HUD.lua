@@ -222,7 +222,7 @@ end
 -- into a fixed-width cell (a 2-space gutter keeps it off the left content). nil if the map is unknown.
 local function minimap_cells()
   if not minimap then return nil end          -- AIPilot (which owns the map) not loaded
-  local m = minimap(5, 2)                      -- wide & short: up to 21×9, trimmed to content height
+  local m = minimap(3, 3)                      -- 7×7 rooms, rendered ~13×7 (compact & square), trimmed
   if not m then return nil end
   -- Trim blank rows above/below the drawn content so the map top-aligns with the other widgets
   -- (otherwise the current room sits at the grid's centre and the empty padding reads as "below").

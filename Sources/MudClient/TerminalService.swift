@@ -91,9 +91,35 @@ final class TerminalService {
     private var lastTopHeight = -1
     private var lastOutputBottom = -1
 
+    // MARK: - Scrollback state
+    //
+    // A shadow copy of everything that has scrolled through the OUTPUT band, so the mouse wheel can
+    // page back through history WITHOUT dragging the frozen panels (which is what the terminal's own
+    // scrollback would do). Lines are stored logically (split on newline) with their ANSI SGR codes
+    // intact; a scrolled redraw re-wraps them to the current width and repaints only the output rows.
+
+    /// Completed output lines, oldest first, stored without their trailing newline. Bounded so a long
+    /// session's memory stays flat.
+    private var scrollbackLines: [String] = []
+    /// The current incomplete line — text emitted since the last newline. "" when the last output
+    /// ended on a newline. Kept separate so the live tail (and the output cursor's column) reproduce
+    /// exactly when we snap back to live.
+    private var pendingLine = ""
+    /// Cap on retained history lines; the oldest are dropped past this.
+    private let scrollbackLimit = 5000
+    /// How many PHYSICAL (wrapped) rows the view is currently parked above the live tail. 0 = live,
+    /// and while 0 every existing behaviour is untouched.
+    private var scrollOffset = 0
+    /// Rows the wheel moves per notch.
+    private let wheelStep = 3
+
     func handle(input: String) {
-        partialInput.append(input)
-        
+        // Peel off any SGR mouse reports (wheel events) BEFORE line editing — they must never reach
+        // the line editor or the MUD. What remains is real keyboard input.
+        let keyInput = consumeMouseEvents(in: input)
+        guard !keyInput.isEmpty else { return }
+        partialInput.append(keyInput)
+
         switch Result(catching: { try lineParser.parse(partialInput) }) {
         case .success(let command):
             switch command {
@@ -130,6 +156,13 @@ final class TerminalService {
         //   ESC[r    drop any inherited scroll region;
         //   ESC[2J   clear leftover shell-prompt / build clutter so none lingers in a frozen band.
         writeToStandardOut(data: Data("\u{1B}[?6l\u{1B}[r\u{1B}[2J".utf8))
+        // Enable SGR mouse reporting so the wheel drives our in-app scrollback instead of the
+        // terminal's native scrollback (which would drag the frozen panels up/down):
+        //   ESC[?1000h  report button press/release (wheel notches arrive as buttons 64/65);
+        //   ESC[?1006h  SGR extended encoding, so events read as ESC[<b;x;yM / m (no coordinate cap).
+        // Trade-off: with reporting on, the terminal hands clicks to us instead of doing local
+        // text selection; most emulators still allow selection while holding Shift/Option.
+        writeToStandardOut(data: Data("\u{1B}[?1000h\u{1B}[?1006h".utf8))
         setupScreen()
     }
 
@@ -190,6 +223,8 @@ final class TerminalService {
     private func setupScreen() {
         guard let l = layout() else { return }
         lastSignature = signature(l)
+        scrollOffset = 0   // any (re)establishment of the region snaps back to the live tail
+
         var out = ""
         // Clear rows that were frozen furniture in the PREVIOUS geometry but now fall inside the scroll
         // region (a band shrank or moved), so no stale panel/divider text is left behind.
@@ -210,12 +245,34 @@ final class TerminalService {
 
     func print(_ string: Any, terminator: String = "\n") {
         guard let l = layout() else { return }
+        let payload = String(describing: string) + terminator
         // Hide the cursor for the whole repaint so its round-trip — up to the output region to write,
         // then back down to the input line — happens invisibly (that jump was the flicker).
         writeToStandardOut(data: Data("\u{1B}[?25l".utf8))
-        if lastSignature != signature(l) { setupScreen() }     // band geometry changed → resize region
+        if lastSignature != signature(l) { setupScreen() }     // band geometry changed → resize region (snaps to live)
+
+        if scrollOffset > 0 {
+            // The user is reading history: don't scroll the live band out from under them. Record the
+            // new output, keep the same lines in view by bumping the offset by however many physical
+            // rows it added, and repaint the history at the new offset. The live write is deferred —
+            // snapping back to the tail repaints the whole band from the buffer anyway.
+            let before = physicalRows(width: l.width).count
+            recordOutput(payload)
+            let rows = physicalRows(width: l.width)
+            let outputHeight = l.outputBottom - l.regionTop + 1
+            let maxOffset = max(0, rows.count - outputHeight)
+            scrollOffset = min(scrollOffset + (rows.count - before), maxOffset)
+            drawFurniture(l)                                 // panels may have changed; never touches the band
+            paintRegion(l, rows: rows)                       // overwrite the band with history at the offset
+            paintScrollIndicator(l)                          // dim marker so the parked view is obvious
+            drawInputLine(l, cursorColumn: cursor.column)    // return the physical cursor to the input line
+            writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
+            return
+        }
+
+        recordOutput(payload)                               // keep the scrollback shadow current
         var out = "\u{1B}8"                                 // restore output cursor (bottom of region)
-        out += String(describing: string) + terminator      // write output; scrolls within the region
+        out += payload                                       // write output; scrolls within the region
         out += "\u{1B}7"                                     // save the new output cursor
         writeToStandardOut(data: Data(out.utf8))
         drawFurniture(l)                                    // repaint furniture; parks cursor on input
@@ -237,6 +294,10 @@ final class TerminalService {
         guard let l = layout() else { return }
         writeToStandardOut(data: Data("\u{1B}[?25l".utf8))   // hide cursor during the repaint (no flicker)
         if lastSignature != signature(l) { setupScreen() } else { drawFurniture(l) }
+        if scrollOffset > 0 {                                // keep the scrolled marker & cursor placement
+            paintScrollIndicator(l)
+            drawInputLine(l, cursorColumn: cursor.column)
+        }
         writeToStandardOut(data: Data("\u{1B}[?25h".utf8))   // show it, back on the input line
     }
 
@@ -274,13 +335,15 @@ final class TerminalService {
         lastSignature = ""
         lastTopHeight = -1
         lastOutputBottom = -1
+        scrollOffset = 0   // wrapping changes with width → snap to the live tail and rebuild
         setupScreen()
     }
 
     /// Reset the scroll region and drop to the bottom of the screen so we don't leave the terminal in
     /// a weird state on exit.
     func teardownScreen() {
-        var out = "\u{1B}[r"                                // reset scroll region to the full screen
+        var out = "\u{1B}[?1000l\u{1B}[?1006l"              // disable mouse reporting (restore native wheel/selection)
+        out += "\u{1B}[r"                                   // reset scroll region to the full screen
         out += "\u{1B}[?25h"                                // make sure the cursor is visible again
         out += "\u{1B}[\(getTerminalHeight() ?? 24);1H"
         writeToStandardOut(data: Data(out.utf8))
@@ -413,6 +476,224 @@ final class TerminalService {
         out += visibleText
         out += "\u{1B}[\(l.inputRow);\(cursorOffset)H"      // park cursor at the typing column
         writeToStandardOut(data: Data(out.utf8))
+    }
+
+    // MARK: - Scrollback buffer & mouse-wheel scrolling
+
+    /// Fold one written output payload into the scrollback shadow. Splits on newlines: every "\n"
+    /// completes the pending line into `scrollbackLines`; the remainder becomes the new pending line.
+    /// ANSI escape codes are kept verbatim so a scrolled redraw reproduces the original colouring;
+    /// bare carriage returns (rare — the connection pipeline normalises line endings) are dropped.
+    private func recordOutput(_ text: String) {
+        guard !text.isEmpty else { return }
+        var segment = pendingLine
+        for ch in text {
+            switch ch {
+            case "\n":
+                scrollbackLines.append(segment)
+                segment = ""
+            case "\r":
+                break                                       // ignore stray CR; don't disturb the line
+            default:
+                segment.append(ch)
+            }
+        }
+        pendingLine = segment
+        if scrollbackLines.count > scrollbackLimit {
+            scrollbackLines.removeFirst(scrollbackLines.count - scrollbackLimit)
+        }
+    }
+
+    /// Break one logical line into physical rows of at most `width` VISIBLE characters, copying ANSI
+    /// escape sequences verbatim (they never count toward the width). A blank logical line yields one
+    /// blank row so vertical spacing is preserved. NOTE: colour state is not carried across a wrap
+    /// boundary, so the continuation of a coloured line longer than the terminal width renders
+    /// uncoloured — rare in MUD output and purely cosmetic in the scrolled-back view.
+    private func wrapVisible(_ line: String, width: Int) -> [String] {
+        guard width > 0 else { return [line] }
+        let chars = Array(line)
+        var rows: [String] = []
+        var current = ""
+        var visible = 0
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "\u{1B}" {                        // copy an escape sequence without counting it
+                var j = i + 1
+                if j < chars.count && chars[j] == "[" {      // CSI: params then a final byte 0x40–0x7E
+                    j += 1
+                    while j < chars.count {
+                        let final = chars[j].asciiValue.map { 0x40...0x7E ~= $0 } ?? false
+                        j += 1
+                        if final { break }
+                    }
+                } else if j < chars.count {                   // simple two-byte escape
+                    j += 1
+                }
+                current += String(chars[i..<j])
+                i = j
+            } else {
+                if visible == width {                         // hit the edge → start a new physical row
+                    rows.append(current)
+                    current = ""
+                    visible = 0
+                }
+                current.append(chars[i])
+                visible += 1
+                i += 1
+            }
+        }
+        rows.append(current)                                  // always flush (preserves a trailing/blank row)
+        return rows
+    }
+
+    /// The number of VISIBLE characters in a string, skipping ANSI escape sequences.
+    private func visibleLength(_ s: String) -> Int {
+        let chars = Array(s)
+        var count = 0
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "\u{1B}" {
+                var j = i + 1
+                if j < chars.count && chars[j] == "[" {
+                    j += 1
+                    while j < chars.count {
+                        let final = chars[j].asciiValue.map { 0x40...0x7E ~= $0 } ?? false
+                        j += 1
+                        if final { break }
+                    }
+                } else if j < chars.count {
+                    j += 1
+                }
+                i = j
+            } else {
+                count += 1
+                i += 1
+            }
+        }
+        return count
+    }
+
+    /// The full ordered list of physical (wrapped) rows the output band has ever shown, ending with
+    /// the current live tail. The last element is always the row the live output cursor sits on
+    /// (empty when the last write ended on a newline), so index `count-1` is the live bottom row.
+    private func physicalRows(width: Int) -> [String] {
+        var rows: [String] = []
+        for line in scrollbackLines { rows += wrapVisible(line, width: width) }
+        rows += wrapVisible(pendingLine, width: width)
+        return rows
+    }
+
+    /// Peel every SGR mouse report (`ESC[<b;x;yM` / `m`) out of `input`, dispatch it, and return the
+    /// remaining real keyboard bytes. A mouse report split across two reads is stashed and completed
+    /// on the next call. Only the `ESC[<` prefix is diverted, so arrow keys (`ESC[A`…`ESC[D`) still
+    /// flow to the line parser untouched.
+    private func consumeMouseEvents(in input: String) -> String {
+        let chars = Array(mousePartial + input)
+        mousePartial = ""
+        var output = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "\u{1B}", i + 2 < chars.count, chars[i + 1] == "[", chars[i + 2] == "<" {
+                var j = i + 3
+                while j < chars.count && chars[j] != "M" && chars[j] != "m" { j += 1 }
+                if j < chars.count {                          // complete report: "b;x;y" + M/m
+                    handleMouse(String(chars[(i + 3)..<j]), press: chars[j] == "M")
+                    i = j + 1
+                } else {                                      // incomplete tail → finish it next read
+                    mousePartial = String(chars[i...])
+                    break
+                }
+            } else {
+                output.append(chars[i])
+                i += 1
+            }
+        }
+        return output
+    }
+
+    /// A partial mouse report held between reads (`ESC[<…` with no terminator yet).
+    private var mousePartial = ""
+
+    /// Act on one SGR mouse report. We only care about the wheel on press; modifier bits (shift/meta/
+    /// ctrl) are masked off so a modified wheel still scrolls. Clicks/drags/releases are swallowed.
+    private func handleMouse(_ body: String, press: Bool) {
+        guard press, let button = Int(body.split(separator: ";").first ?? "") else { return }
+        switch button & ~0b0001_1100 {                        // strip shift(4)/meta(8)/ctrl(16) bits
+        case 64: adjustScroll(by: wheelStep)                  // wheel up → older history
+        case 65: adjustScroll(by: -wheelStep)                 // wheel down → toward the live tail
+        default: break
+        }
+    }
+
+    /// Move the scroll view by `delta` physical rows (positive = back in history). Clamps to the
+    /// buffer, and repaints only the output band — the panels, dividers and input line never move.
+    private func adjustScroll(by delta: Int) {
+        guard let l = layout() else { return }
+        let rows = physicalRows(width: l.width)
+        let outputHeight = l.outputBottom - l.regionTop + 1
+        let maxOffset = max(0, rows.count - outputHeight)
+        let newOffset = max(0, min(scrollOffset + delta, maxOffset))
+        guard newOffset != scrollOffset else { return }
+        scrollOffset = newOffset
+        if scrollOffset == 0 {
+            resumeLive(l, rows: rows)                          // snapped to the tail → hand back to live output
+        } else {
+            paintScrolled(l, rows: rows)
+        }
+    }
+
+    /// Repaint the frozen furniture, then overwrite the output band with history at the current
+    /// offset and stamp the scrolled marker. Leaves the physical cursor on the input line. The saved
+    /// OUTPUT cursor (DECSC slot) is never touched, so live output resumes cleanly on `resumeLive`.
+    private func paintScrolled(_ l: Layout, rows: [String]) {
+        writeToStandardOut(data: Data("\u{1B}[?25l".utf8))
+        drawFurniture(l)
+        paintRegion(l, rows: rows)
+        paintScrollIndicator(l)
+        drawInputLine(l, cursorColumn: cursor.column)
+        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
+    }
+
+    /// Snap back to the live tail: repaint the band from the buffer's tail, then re-park and DECSC-save
+    /// the OUTPUT cursor at the end of the newest row so the next write scrolls the region normally,
+    /// and repaint furniture (which clears the scrolled marker). Physical cursor ends on the input line.
+    private func resumeLive(_ l: Layout, rows: [String]) {
+        writeToStandardOut(data: Data("\u{1B}[?25l".utf8))
+        paintRegion(l, rows: rows)                            // scrollOffset == 0 → this is the live tail
+        let col = visibleLength(rows.last ?? "") + 1
+        writeToStandardOut(data: Data("\u{1B}[\(l.outputBottom);\(col)H\u{1B}7".utf8)) // re-park + save output cursor
+        drawFurniture(l)                                      // repaints a plain divider, clearing the marker
+        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
+    }
+
+    /// Overwrite the output band with physical rows from `rows`, bottom-aligned so the newest shown
+    /// row sits on the region's bottom line (matching how live output grows upward). Uses absolute
+    /// cursor moves only — it never scrolls the region and never touches the saved output cursor.
+    private func paintRegion(_ l: Layout, rows: [String]) {
+        let outputHeight = l.outputBottom - l.regionTop + 1
+        let bottomIndex = rows.count - 1 - scrollOffset       // physical row shown on the region's bottom line
+        var out = ""
+        for k in 0..<outputHeight {
+            let screenRow = l.outputBottom - k
+            let rowIndex = bottomIndex - k
+            out += "\u{1B}[\(screenRow);1H\u{1B}[2K\u{1B}[0m" // position, clear, reset any inherited SGR
+            if rowIndex >= 0 && rowIndex < rows.count { out += rows[rowIndex] }
+            out += "\u{1B}[0m"
+        }
+        writeToStandardOut(data: Data(out.utf8))
+    }
+
+    /// Replace the scroll-frame's bottom divider with a dim, centred marker while scrolled back, so
+    /// it's unmistakable the view is parked above the live tail. `drawFurniture` repaints a plain
+    /// divider here the moment we return to live.
+    private func paintScrollIndicator(_ l: Layout) {
+        let n = scrollOffset
+        let label = " scrolled back \(n) line\(n == 1 ? "" : "s") — wheel down to resume "
+        let clipped = String(label.prefix(l.width))
+        let pad = max(0, l.width - clipped.count)
+        let left = pad / 2
+        let rule = String(repeating: "─", count: left) + clipped + String(repeating: "─", count: pad - left)
+        writeToStandardOut(data: Data("\u{1B}[\(l.scrollDividerRow);1H\u{1B}[2K\u{1B}[90m\(rule)\u{1B}[0m".utf8))
     }
 
     func writeToStandardOut(data: Data) {

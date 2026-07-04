@@ -189,8 +189,20 @@ end
 -- Returns { w, h, cells = { [row] = { [col] = { ch, fg, bold } } } } (1-indexed, sparse), or nil.
 local MM_VEC = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { -1, 0 },
   northeast = { 1, -1 }, northwest = { -1, -1 }, southeast = { 1, 1 }, southwest = { -1, 1 } }
-local MM_CONN = { north = "│", south = "│", east = "─", west = "─",
-  northeast = "╱", southwest = "╱", northwest = "╲", southeast = "╲" }
+-- Compact grid: horizontal step 2 cells, vertical step 1 (rooms on ADJACENT rows). Terminal cells are
+-- ~2x taller than wide, so 2:1 reads square while keeping the map HALF the height of a doubled grid.
+-- Vertical links are shown by rooms stacking (adjacency implies them); only horizontal & diagonal
+-- links draw a connector cell. MM_LINK = cells for a WALKED exit; MM_STUB = near cell for an UNwalked one.
+local MM_LINK = {
+  east = { { 1, 0, "─" } }, west = { { -1, 0, "─" } },
+  north = {}, south = {},                                    -- vertical: adjacency shows the link
+  northeast = { { 1, -1, "╱" } }, southwest = { { -1, 1, "╱" } },
+  northwest = { { -1, -1, "╲" } }, southeast = { { 1, 1, "╲" } },
+}
+local MM_STUB = {
+  east = { 1, 0, "─" }, west = { -1, 0, "─" }, north = { 0, -1, "╵" }, south = { 0, 1, "╷" },
+  northeast = { 1, -1, "╱" }, southwest = { -1, 1, "╱" }, northwest = { -1, -1, "╲" }, southeast = { 1, 1, "╲" },
+}
 -- terrain code -> node colour (from `help 3.terrain`, codes 0-39). Water=blue, forest/field=green,
 -- sand/desert=yellow, rock/mountain/underground=gray, town/city=white, lava=red, ice=cyan,
 -- swamp/marsh=magenta, shadow/crystal=bright magenta/cyan. Unknown terrain falls back to cyan.
@@ -230,51 +242,56 @@ function minimap(hw, hh)
       end
     end
   end
-  -- Doubled render grid: nodes at even offsets, connectors between them at odd offsets.
-  local W, H = 4 * hw + 1, 4 * hh + 1
-  local ccol, crow = 2 * hw + 1, 2 * hh + 1
+  -- Render grid: horizontal step 2 cells, vertical step 1 — half the height of a doubled grid, and
+  -- still square given ~2:1 terminal cells. Vertical links show by rooms stacking on adjacent rows.
+  local W, H = 4 * hw + 1, 2 * hh + 1
+  local ccol, crow = 2 * hw + 1, hh + 1
   local cells = {}
   local function put(col, row, ch, fg, bold)
     if col < 1 or col > W or row < 1 or row > H then return end
     cells[row] = cells[row] or {}
     cells[row][col] = { ch = ch, fg = fg, bold = bold }
   end
+  local function node_xy(g) return ccol + 2 * g[1], crow + g[2] end
   -- Connectors are drawn from what each room ADVERTISES (r.exits) — NEVER inferred from grid adjacency
   -- — so a stale move-edge (leftover from old runs) can't paint a line where the room has no exit.
-  -- Pass 1: exits we've actually WALKED -> solid gray connector.
+  -- Pass 1: exits we've actually WALKED -> solid gray line.
   for _, id in ipairs(order) do
-    local g = pos[id]; local col, row = ccol + 2 * g[1], crow + 2 * g[2]
-    local r = P.rooms[id]
+    local col, row = node_xy(pos[id]); local r = P.rooms[id]
     for d in pairs(r.exits or {}) do
-      local v = MM_VEC[d]
-      if v and r.moves and r.moves[d] then put(col + v[1], row + v[2], MM_CONN[d], "brightblack") end
+      if MM_LINK[d] and r.moves and r.moves[d] then
+        for _, c in ipairs(MM_LINK[d]) do put(col + c[1], row + c[2], c[3], "brightblack") end
+      end
     end
   end
   -- Pass 2: advertised exits we HAVEN'T walked (and aren't known dead ends) -> bright-green stub into
   -- unmapped ground. Only fills empty cells, so it never clobbers a real (walked) connector or a node.
   for _, id in ipairs(order) do
-    local g = pos[id]; local col, row = ccol + 2 * g[1], crow + 2 * g[2]
-    local r = P.rooms[id]
+    local col, row = node_xy(pos[id]); local r = P.rooms[id]
     for d in pairs(r.exits or {}) do
-      local v = MM_VEC[d]
-      if v and not (r.moves and r.moves[d]) and not (r.blocked and r.blocked[d]) then
-        local sc, sr = col + v[1], row + v[2]
-        if not (cells[sr] and cells[sr][sc]) then put(sc, sr, MM_CONN[d], "brightgreen") end
+      local s = MM_STUB[d]
+      if s and not (r.moves and r.moves[d]) and not (r.blocked and r.blocked[d]) then
+        local sc, sr = col + s[1], row + s[2]
+        if not (cells[sr] and cells[sr][sc]) then put(sc, sr, s[3], "brightgreen") end
       end
     end
   end
-  -- Nodes on top: colour = terrain; glyph = you (◉) / waypoint (◆) / frontier (▣) / explored (□).
+  -- Nodes on top: colour = terrain; glyph = waypoint (◆) / frontier (▣) / explored (□).
   for _, id in ipairs(order) do
-    local g = pos[id]; local col, row = ccol + 2 * g[1], crow + 2 * g[2]
-    local r = P.rooms[id]
-    if id == cur then
-      put(col, row, "◉", "brightyellow", true)                          -- you: always unmistakable
-    elseif r.waypoint then
-      put(col, row, "◆", "brightmagenta", true)                         -- a travel waypoint
-    else
-      put(col, row, has_frontier(id) and "▣" or "□", TERRAIN_COLOR[r.terrain] or "cyan")
+    if id ~= cur then
+      local col, row = node_xy(pos[id])
+      local r = P.rooms[id]
+      if r.waypoint then
+        put(col, row, "◆", "brightmagenta", true)                       -- a travel waypoint
+      else
+        put(col, row, has_frontier(id) and "▣" or "□", TERRAIN_COLOR[r.terrain] or "cyan")
+      end
     end
   end
+  -- YOU last of all, so a grid collision (common in dense, loopy towns where two rooms land on the
+  -- same cell) can never paint over your marker the way it sometimes did.
+  local cc, cr = node_xy(pos[cur])
+  put(cc, cr, "◉", "brightyellow", true)
   return { w = W, h = H, cells = cells }
 end
 
