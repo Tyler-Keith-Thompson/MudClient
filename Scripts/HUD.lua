@@ -222,10 +222,17 @@ end
 -- into a fixed-width cell (a 2-space gutter keeps it off the left content). nil if the map is unknown.
 local function minimap_cells()
   if not minimap then return nil end          -- AIPilot (which owns the map) not loaded
-  local m = minimap(4, 3)                      -- half-width, half-height in rooms → a 17×13 view
+  local m = minimap(5, 2)                      -- wide & short: up to 21×9, trimmed to content height
   if not m then return nil end
-  local out = {}
+  -- Trim blank rows above/below the drawn content so the map top-aligns with the other widgets
+  -- (otherwise the current room sits at the grid's centre and the empty padding reads as "below").
+  local first, last
   for r = 1, m.h do
+    if m.cells[r] and next(m.cells[r]) then first = first or r; last = r end
+  end
+  if not first then return nil end
+  local out = {}
+  for r = first, last do
     local line = m.cells[r] or {}
     local spans = { { text = "  " } }
     for c = 1, m.w do
@@ -233,7 +240,7 @@ local function minimap_cells()
       if cell then spans[#spans + 1] = { text = cell.ch, fg = cell.fg, bold = cell.bold }
       else spans[#spans + 1] = { text = " " } end
     end
-    out[r] = { spans = spans, width = m.w + 2 }
+    out[#out + 1] = { spans = spans, width = m.w + 2 }
   end
   return out
 end

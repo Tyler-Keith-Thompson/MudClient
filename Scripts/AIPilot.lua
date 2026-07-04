@@ -191,6 +191,23 @@ local MM_VEC = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { 
   northeast = { 1, -1 }, northwest = { -1, -1 }, southeast = { 1, 1 }, southwest = { -1, 1 } }
 local MM_CONN = { north = "│", south = "│", east = "─", west = "─",
   northeast = "╱", southwest = "╱", northwest = "╲", southeast = "╲" }
+-- terrain code -> node colour (from `help 3.terrain`, codes 0-39). Water=blue, forest/field=green,
+-- sand/desert=yellow, rock/mountain/underground=gray, town/city=white, lava=red, ice=cyan,
+-- swamp/marsh=magenta, shadow/crystal=bright magenta/cyan. Unknown terrain falls back to cyan.
+local TERRAIN_COLOR = {
+  [1] = "white", [2] = "white", [28] = "brightwhite", [26] = "brightblack",             -- building/town/city/ruins
+  [3] = "green", [8] = "green", [15] = "green",                                          -- field/plateau/hill
+  [4] = "brightgreen", [5] = "green", [6] = "green", [17] = "brightgreen", [34] = "green", -- forests/jungle/taiga
+  [7] = "magenta", [29] = "magenta", [38] = "magenta",                                   -- swamp/marsh/mire
+  [9] = "yellow", [12] = "yellow", [16] = "yellow", [14] = "brightyellow", [30] = "yellow", -- sand/desert/dunes/beach/wasteland
+  [10] = "brightblack", [11] = "brightblack", [33] = "brightblack",                      -- mountain/rock/metal
+  [13] = "brightwhite", [24] = "brightcyan",                                             -- tundra/ice
+  [18] = "blue", [19] = "brightblue", [20] = "blue", [21] = "blue", [32] = "blue",       -- ocean/stream/river/underwater/water
+  [22] = "brightblack", [27] = "brightblack", [35] = "green", [37] = "brightblack",      -- underground/cave/sewer/catacomb
+  [23] = "brightcyan", [31] = "brightwhite",                                             -- air/cloud
+  [25] = "brightred",                                                                    -- lava
+  [36] = "brightmagenta", [39] = "brightcyan",                                           -- shadow/crystal
+}
 
 function minimap(hw, hh)
   hw, hh = hw or 3, hh or 2
@@ -203,7 +220,9 @@ function minimap(hw, hh)
     local g = pos[id]
     for d, nb in pairs(P.rooms[id].moves or {}) do
       local v = MM_VEC[d]
-      if v and pos[nb] == nil and P.rooms[nb] then
+      -- Only follow an edge the room ACTUALLY ADVERTISES as an exit — a stale move-edge from an old
+      -- run (no matching exit) won't place a phantom room, so nodes stay grounded in real exits too.
+      if v and P.rooms[id].exits[d] and pos[nb] == nil and P.rooms[nb] then
         local nx, ny = g[1] + v[1], g[2] + v[2]
         if math.abs(nx) <= hw and math.abs(ny) <= hh then
           pos[nb] = { nx, ny }; order[#order + 1] = nb; queue[#queue + 1] = nb
@@ -220,19 +239,21 @@ function minimap(hw, hh)
     cells[row] = cells[row] or {}
     cells[row][col] = { ch = ch, fg = fg, bold = bold }
   end
-  for _, id in ipairs(order) do   -- connectors first, so nodes paint over their endpoints
-    local g = pos[id]
-    local col, row = ccol + 2 * g[1], crow + 2 * g[2]
-    for d, nb in pairs(P.rooms[id].moves or {}) do
-      if pos[nb] and MM_VEC[d] then put(col + MM_VEC[d][1], row + MM_VEC[d][2], MM_CONN[d], "brightblack") end
+  -- Connectors are drawn from what each room ADVERTISES (r.exits) — NEVER inferred from grid adjacency
+  -- — so a stale move-edge (leftover from old runs) can't paint a line where the room has no exit.
+  -- Pass 1: exits we've actually WALKED -> solid gray connector.
+  for _, id in ipairs(order) do
+    local g = pos[id]; local col, row = ccol + 2 * g[1], crow + 2 * g[2]
+    local r = P.rooms[id]
+    for d in pairs(r.exits or {}) do
+      local v = MM_VEC[d]
+      if v and r.moves and r.moves[d] then put(col + v[1], row + v[2], MM_CONN[d], "brightblack") end
     end
   end
-  -- Unexplored-exit stubs: an exit the room ADVERTISES (in r.exits) that we've never walked and that
-  -- isn't a known dead end -> a bright-green stub pointing that way, into ground we haven't mapped.
-  -- Only fills empty cells, so it never clobbers a real (walked) connector or a node.
+  -- Pass 2: advertised exits we HAVEN'T walked (and aren't known dead ends) -> bright-green stub into
+  -- unmapped ground. Only fills empty cells, so it never clobbers a real (walked) connector or a node.
   for _, id in ipairs(order) do
-    local g = pos[id]
-    local col, row = ccol + 2 * g[1], crow + 2 * g[2]
+    local g = pos[id]; local col, row = ccol + 2 * g[1], crow + 2 * g[2]
     local r = P.rooms[id]
     for d in pairs(r.exits or {}) do
       local v = MM_VEC[d]
@@ -242,12 +263,17 @@ function minimap(hw, hh)
       end
     end
   end
-  for _, id in ipairs(order) do   -- nodes on top: current, frontier (has an untaken exit), or visited
-    local g = pos[id]
-    local col, row = ccol + 2 * g[1], crow + 2 * g[2]
-    if id == cur then put(col, row, "◉", "brightyellow", true)
-    elseif has_frontier(id) then put(col, row, "▣", "brightgreen")
-    else put(col, row, "□", "cyan") end
+  -- Nodes on top: colour = terrain; glyph = you (◉) / waypoint (◆) / frontier (▣) / explored (□).
+  for _, id in ipairs(order) do
+    local g = pos[id]; local col, row = ccol + 2 * g[1], crow + 2 * g[2]
+    local r = P.rooms[id]
+    if id == cur then
+      put(col, row, "◉", "brightyellow", true)                          -- you: always unmistakable
+    elseif r.waypoint then
+      put(col, row, "◆", "brightmagenta", true)                         -- a travel waypoint
+    else
+      put(col, row, has_frontier(id) and "▣" or "□", TERRAIN_COLOR[r.terrain] or "cyan")
+    end
   end
   return { w = W, h = H, cells = cells }
 end
@@ -1393,6 +1419,19 @@ trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], funct
   pilot_room_change(tonumber(vnum), { tonumber(x), tonumber(y), tonumber(z), tonumber(plane) })
 end)
 trigger([[^kxwt_rshort (.+)$]], function(_, n) pilot_room_name(n) end)
+-- Tag the current room with its terrain type (kxwt_terrain arrives just after rvnum, so current_room
+-- is already set). Persisted, so the minimap can colour each room by terrain.
+trigger([[^kxwt_terrain (\d+)]], function(_, t)
+  local id = P.current_room
+  if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(t) then
+    P.rooms[id].terrain = tonumber(t); schedule_save()
+  end
+end)
+-- kxwt_waypoint marks the current room as a travel waypoint; remember it so the minimap can flag it.
+trigger([[^kxwt_waypoint]], function()
+  local id = P.current_room
+  if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+end)
 trigger([[.*]], function(line) pilot_observe(line) end)
 
 load_map()
