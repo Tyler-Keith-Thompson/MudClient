@@ -114,9 +114,10 @@ final class TerminalService {
     private let wheelStep = 3
 
     func handle(input: String) {
-        // Peel off any SGR mouse reports (wheel events) BEFORE line editing — they must never reach
-        // the line editor or the MUD. What remains is real keyboard input.
-        let keyInput = consumeMouseEvents(in: input)
+        // Peel off any SGR mouse reports (wheel events) and terminal REPLIES (cursor-position / device-
+        // attribute reports) BEFORE line editing — they must never reach the line editor or the MUD.
+        // What remains is real keyboard input.
+        let keyInput = stripTerminalReports(consumeMouseEvents(in: input))
         guard !keyInput.isEmpty else { return }
         partialInput.append(keyInput)
 
@@ -144,7 +145,7 @@ final class TerminalService {
         case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
             handleOther(input: input)
         case .failure(let error):
-            print(error)
+            print(sanitizedMessage(String(describing: error)))
         }
     }
     
@@ -434,7 +435,7 @@ final class TerminalService {
         do {
             try Container.inputService().parse(input: echo)
         } catch {
-            print(error)
+            print(sanitizedMessage(String(describing: error)))
         }
     }
     
@@ -584,6 +585,59 @@ final class TerminalService {
         return rows
     }
 
+    /// Drop terminal REPLIES from keyboard input: cursor-position reports (`ESC[<n>;<n>R`) and device-
+    /// attribute reports (`ESC[?…c` / `ESC[…c`). These arrive on stdin when something writes a query
+    /// sequence — e.g. a raw ESC byte embedded in an error/log line makes the terminal answer — and if
+    /// not filtered they get inserted into the input line (the "cursor jumps to the far right and my
+    /// typing is swallowed" bug). Arrow keys (`ESC[A`–`D`), Home/End, etc. end in other bytes and pass
+    /// through; a sequence split across reads (no final byte yet) is left intact for the line parser.
+    private func stripTerminalReports(_ input: String) -> String {
+        guard input.contains("\u{1B}") else { return input }
+        let chars = Array(input)
+        var out = ""
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "\u{1B}", i + 1 < chars.count, chars[i + 1] == "[" {
+                var j = i + 2                                   // scan CSI parameter/intermediate bytes
+                while j < chars.count, let a = chars[j].asciiValue, (0x20...0x3F).contains(a) { j += 1 }
+                if j < chars.count, chars[j] == "R" || chars[j] == "c" {
+                    i = j + 1                                   // a terminal reply — drop the whole thing
+                    continue
+                }
+            }
+            out.append(chars[i]); i += 1
+        }
+        return out
+    }
+
+    /// Strip ESC sequences and other C0 control bytes (keeping newlines/tabs) from a diagnostic message
+    /// before printing it, so an error string that quotes raw MUD/ANSI data can't inject cursor moves or
+    /// provoke a terminal reply that then corrupts the input line. Normal server output is unaffected.
+    private func sanitizedMessage(_ s: String) -> String {
+        let chars = Array(s)
+        var out = ""
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\u{1B}" {
+                var j = i + 1
+                if j < chars.count, chars[j] == "[" {
+                    j += 1
+                    while j < chars.count, let a = chars[j].asciiValue, (0x20...0x3F).contains(a) { j += 1 }
+                    if j < chars.count { j += 1 }              // consume the final byte
+                } else if j < chars.count {
+                    j += 1                                     // simple two-byte escape
+                }
+                i = j
+            } else if let a = c.asciiValue, a < 0x20, c != "\n", c != "\t" {
+                i += 1                                         // drop stray control bytes
+            } else {
+                out.append(c); i += 1
+            }
+        }
+        return out
+    }
+
     /// Peel every SGR mouse report (`ESC[<b;x;yM` / `m`) out of `input`, dispatch it, and return the
     /// remaining real keyboard bytes. A mouse report split across two reads is stashed and completed
     /// on the next call. Only the `ESC[<` prefix is diverted, so arrow keys (`ESC[A`…`ESC[D`) still
@@ -713,8 +767,25 @@ final class TerminalService {
         }
     }
     
+    /// When the last Ctrl+C on an empty line was pressed, so a second one in quick succession confirms
+    /// the quit. Cleared whenever there's input to discard (that Ctrl+C is a "clear", not a "quit").
+    private var lastEmptySigInt: Date?
+
     func handleSigInt() {
-        if lineBuffer.isEmpty {
+        // Ctrl+C with something typed just clears the input — never quits.
+        if !lineBuffer.isEmpty || !partialInput.isEmpty {
+            cursor.moveToStartOfLine()
+            lineBuffer = ""
+            partialInput = ""
+            visibleStartColumn = 0
+            lastEmptySigInt = nil
+            refreshDisplay(cursorColumn: cursor.column)   // clear + redraw the (now empty) input line
+            return
+        }
+        // Empty line: require TWO Ctrl+C in rapid succession to actually exit (a single one is easy to
+        // hit by accident). The first arms it and shows a hint; a second within the window quits.
+        let now = Date()
+        if let last = lastEmptySigInt, now.timeIntervalSince(last) < 1.5 {
             teardownScreen()   // reset the scroll region so the terminal isn't left stuck
             var tattr = termios()
             tcgetattr(STDIN_FILENO, &tattr)
@@ -722,13 +793,9 @@ final class TerminalService {
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
             Swift.print("\nStopping")
             exit(0)
-        } else {
-            cursor.moveToStartOfLine()
-            lineBuffer = ""
-            partialInput = ""
-            visibleStartColumn = 0
-            refreshDisplay(cursorColumn: cursor.column)   // clear + redraw the (now empty) input line
         }
+        lastEmptySigInt = now
+        print("(input empty — press Ctrl+C again to exit)")
     }
 }
 

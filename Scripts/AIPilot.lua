@@ -57,6 +57,11 @@ local P = {
   demo_count = 0,   -- human demonstrations captured this session (see #ai record)
 }
 
+-- The parsed `waypoint` list (P.waypoints) and the learned number<->room maps (P.wp_room/P.room_wp) are
+-- PERSISTED with the map (save_map/load_map), so they survive both a hot `#ai reload` and a full
+-- relaunch — you list your waypoints once and goto keeps working. They're lazy-created where first used
+-- and repopulated by load_map() at the bottom of this file.
+
 local OPP = { north="south", south="north", east="west", west="east", up="down", down="up",
   northeast="southwest", southwest="northeast", northwest="southeast", southeast="northwest" }
 local CANON = { n="north", s="south", e="east", w="west", u="up", d="down", ne="northeast",
@@ -89,7 +94,10 @@ local save_gen = 0
 local function save_map()
   local f = io.open(cfg.map_file, "w")
   if not f then return end
-  f:write("return " .. ser({ rooms = P.rooms, dir_deltas = P.dir_deltas, memories = P.memories }))
+  -- Persist the parsed `waypoint` list + learned number<->room maps alongside the room map, so goto's
+  -- waypoint routing survives reloads and relaunches (list once, keep working).
+  f:write("return " .. ser({ rooms = P.rooms, dir_deltas = P.dir_deltas, memories = P.memories,
+                             waypoints = P.waypoints, wp_room = P.wp_room, room_wp = P.room_wp }))
   f:close()
 end
 local function schedule_save()
@@ -103,6 +111,7 @@ local function load_map()
   local ok, t = pcall(chunk)
   if ok and type(t) == "table" then
     P.rooms = t.rooms or {}; P.dir_deltas = t.dir_deltas or {}; P.memories = t.memories or {}
+    P.waypoints = t.waypoints or {}; P.wp_room = t.wp_room or {}; P.room_wp = t.room_wp or {}
   end
 end
 
@@ -253,6 +262,15 @@ end
 -- is our signal to wait and try again. Success is instead observed as a room change (kxwt_rvnum).
 local function recall_failed(line)
   return line:find("No god responds to your call", 1, true) ~= nil
+end
+
+-- The number from a `waypoint <n>` travel command, tolerating AlterAeon's command abbreviations
+-- ("way 8", "wayp 8", "waypoint 8"), or nil. This is how we learn which room a waypoint number reaches
+-- (on_user_input sets it pending, pilot_room_change records it on arrival). The old matcher required the
+-- full word "waypoint", so typing "way 1" taught it nothing.
+local function waypoint_cmd_num(cmd)
+  local n = cmd:match("^way%a*%s+(%d+)%s*$")
+  return n and tonumber(n) or nil
 end
 
 -- ---- minimap (consumed by the HUD) ----------------------------------------------------------
@@ -486,6 +504,7 @@ local function nearest_waypoint_for(label)
   local best_len, best_id
   for id, r in pairs(P.rooms) do
     if r.waypoint then
+      if has_mark(r, label) then return id end          -- the mark IS on this waypoint (0 steps) — unbeatable
       local path = find_path_from(id, function(x) return x ~= id and has_mark(P.rooms[x], label) end)
       if path and (not best_id or #path < best_len) then best_len, best_id = #path, id end
     end
@@ -493,13 +512,33 @@ local function nearest_waypoint_for(label)
   return best_id
 end
 
+-- The waypoint NUMBER that travels to room `id`, or nil. Prefers matching the room's name against the
+-- LIVE `waypoint` list (P.waypoints) — that's always current and needs no prior travel, so a named
+-- waypoint like "The Indira Shrine" resolves to its number the moment you've run `waypoint` once. Falls
+-- back to what we LEARNED from watching you `waypoint <n>` this session, which covers generic waypoints
+-- ("A large waypoint in a stony field") whose list text doesn't match the room name. NOTE: the learned
+-- map is session-only (not persisted) — a relaunch/reload forgets it, so the name match is what makes
+-- this robust across sessions.
+local function waypoint_num_for_room(id)
+  local r = P.rooms[id]
+  local rname = r and r.name and r.name:lower()
+  if rname and P.waypoints then
+    for num, w in pairs(P.waypoints) do
+      local wn = w.name and w.name:lower()
+      if wn and (wn == rname or wn:find(rname, 1, true) or rname:find(wn, 1, true)) then return num end
+    end
+  end
+  if P.room_wp and P.room_wp[id] then return P.room_wp[id] end
+  return nil
+end
+
 -- Learn that waypoint NUMBER `num` travels to room `id` — recorded by OBSERVING an actual `waypoint <n>`
--- move (see on_user_input + pilot_room_change), never by matching the listing's description text to a
--- room name (which doesn't line up). Session-only: numbers shift with decay/reorder, so we don't persist
--- them. Also confirms the destination is a waypoint room.
+-- move (see on_user_input + pilot_room_change). Writes into the _AIP-backed maps, so it survives a hot
+-- `#ai reload`; a full relaunch forgets it (numbers shift with decay/reorder anyway), and the live-list
+-- name match carries goto across relaunches. Also confirms the destination is a waypoint room.
 local function learn_waypoint(num, id)
   if not num or not id or not P.rooms[id] then return end
-  P.wp_room = P.wp_room or {}          -- number -> room id
+  P.wp_room = P.wp_room or {}          -- number -> room id (aliased to _AIP.wp_room)
   P.room_wp = P.room_wp or {}          -- room id -> number
   -- If this number pointed at a different room before (reorder), drop the stale reverse entry.
   local prev = P.wp_room[num]
@@ -507,6 +546,7 @@ local function learn_waypoint(num, id)
   P.wp_room[num] = id
   P.room_wp[id] = num
   P.rooms[id].waypoint = true
+  schedule_save()
 end
 
 -- An untaken (and not-blocked) exit of room `rid`, or nil. This is the door into NEW ground.
@@ -703,7 +743,7 @@ function pilot_observe(line)
   -- Learn the fast-travel network as `waypoint` listings scroll by, so `goto`'s hand-off and the AI MAP
   -- block can show real numbers. Session-only (numbers change with decay/reorder) — not persisted.
   local wpe = parse_waypoint_line(t)
-  if wpe then P.waypoints = P.waypoints or {}; P.waypoints[wpe.num] = wpe end
+  if wpe then P.waypoints = P.waypoints or {}; P.waypoints[wpe.num] = wpe; schedule_save() end
   -- Never feed gagged protocol lines or blanks to the model. kxwt facts reach it once per turn via
   -- the state block (describe_state), not as raw lines.
   if t == "" or t:match("^kxwt_") then return end
@@ -726,9 +766,9 @@ function on_user_input(cmd)
   -- which room that number reaches (learn_waypoint). A short-lived marker, auto-cleared if no move
   -- follows within a few seconds (a hop that failed / was out of range). Placed before the self-echo
   -- guard so our own hops reinforce the mapping too.
-  local wn = cmd:match("^waypoint%s+(%d+)%s*$")
+  local wn = waypoint_cmd_num(cmd)              -- "waypoint 8" or an abbreviation ("way 8", "wayp 8")
   if wn then
-    P.wp_pending = tonumber(wn)
+    P.wp_pending = wn
     P.wp_gen = (P.wp_gen or 0) + 1
     local g = P.wp_gen
     after(8, function() if P.wp_gen == g then P.wp_pending = nil end end)
@@ -1548,9 +1588,9 @@ function goto_bridge_advance()
     P.goto_bridge = nil; echo("[goto] arrived at '" .. b.label .. "'."); return
   end
 
-  -- 2. On a waypoint room: hop toward the target waypoint (if we've learned its number).
+  -- 2. On a waypoint room: hop toward the target waypoint (learned number, or a name match to the list).
   if P.rooms[here] and P.rooms[here].waypoint then
-    local num = P.room_wp and b.target_wp and P.room_wp[b.target_wp]
+    local num = b.target_wp and waypoint_num_for_room(b.target_wp)
     if here == b.target_wp then
       P.goto_bridge = nil
       echo("[goto] reached the waypoint, but '" .. b.label .. "' isn't walkable from it anymore.")
@@ -1558,8 +1598,9 @@ function goto_bridge_advance()
     end
     if not num then
       P.goto_bridge = nil
-      echo("[goto] I haven't seen which waypoint number reaches that destination yet — hop manually, "
-        .. "then `goto " .. b.label .. "` again:")
+      local rn = b.target_wp and P.rooms[b.target_wp] and P.rooms[b.target_wp].name
+      echo("[goto] I don't know which waypoint number reaches " .. (rn and ("'" .. rn .. "'") or "that room")
+        .. " (its name doesn't match any in your list) — hop manually, then `goto " .. b.label .. "` again:")
       echo(waypoints_hint()); return
     end
     if b.hops >= HOP_MAX then echo("[goto] too many waypoint hops — stopping."); P.goto_bridge = nil; return end
@@ -1963,4 +2004,5 @@ _AIP_TEST = {
   find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
   parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
   learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
+  waypoint_num_for_room = waypoint_num_for_room, waypoint_cmd_num = waypoint_cmd_num,
 }

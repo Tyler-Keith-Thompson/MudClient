@@ -121,6 +121,47 @@ test("goto bridge hands off (no blind hop) when the target number is unknown", f
   P.wp_room, P.room_wp, P.goto_bridge = saved.wr, saved.rw, saved.br
 end)
 
+test("waypoint_cmd_num matches waypoint travel commands AND their abbreviations", function()
+  local f = _AIP_TEST.waypoint_cmd_num
+  expect(f("waypoint 8")):eq(8)
+  expect(f("way 1")):eq(1)             -- the abbreviation that silently taught nothing before
+  expect(f("wayp 12")):eq(12)
+  expect(f("waypoint  3 ")):eq(3)      -- extra spaces tolerated
+  expect(f("waypoint")):falsy()        -- the bare list command, no number
+  expect(f("wave 8")):falsy()          -- not a waypoint command
+  expect(f("west 8")):falsy()
+end)
+
+test("nearest_waypoint_for picks a waypoint room that IS the mark (mark set at a waypoint)", function()
+  local P = _AIP_TEST.P
+  local saved = { rooms = P.rooms, cur = P.current_room }
+  -- "return" is marked AT a waypoint room (WP). Previously nearest_waypoint_for excluded the room
+  -- itself and would route to a neighbor waypoint whose number it didn't know.
+  P.rooms = {
+    WP  = { moves = {}, waypoint = true, marks = { ["return"] = true }, name = "The Indira Shrine" },
+    FAR = { moves = {}, waypoint = true, name = "Somewhere else" },
+  }
+  P.current_room = "FAR"
+  expect(_AIP_TEST.nearest_waypoint_for("return")):eq("WP")   -- the mark's own waypoint, 0 steps
+  P.rooms, P.current_room = saved.rooms, saved.cur
+end)
+
+test("waypoint_num_for_room resolves by live-list name match, then learned", function()
+  local P = _AIP_TEST.P
+  local saved = { rooms = P.rooms, wp = P.waypoints, rw = P.room_wp }
+  P.rooms = { R8 = { name = "The Indira Shrine" }, RG = { name = "The far north rim of the pit" } }
+  P.waypoints = {
+    [8] = { num = 8, name = "The Indira Shrine", reachable = true },
+    [3] = { num = 3, name = "A large waypoint in a stony field", reachable = true },
+  }
+  P.room_wp = { RG = 3 }                                       -- generic waypoint learned by travel
+  -- Named waypoint: resolved from the live list even with NO learned entry (survives a relaunch).
+  expect(_AIP_TEST.waypoint_num_for_room("R8")):eq(8)
+  -- Generic waypoint whose room name isn't in the list text: falls back to the learned number.
+  expect(_AIP_TEST.waypoint_num_for_room("RG")):eq(3)
+  P.rooms, P.waypoints, P.room_wp = saved.rooms, saved.wp, saved.rw
+end)
+
 test("goto recall bridge retries recall then gives up at the cap", function()
   local P = _AIP_TEST.P
   local real_send = send
