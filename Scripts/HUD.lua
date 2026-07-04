@@ -90,14 +90,22 @@ end
 
 -- Active spells (buffs) — what's currently up on you.
 local function spells_row()
+  local spans = {}
+  -- Can't-cast warning first (kxwt_action >= 50 blocks spellcasting — butchering, turning, etc.).
+  if state.action and state.action >= 50 then
+    spans[#spans + 1] = { text = "⊘ can't cast   ", fg = "brightred", bold = true }
+  end
   local names = {}
   for k in pairs(state.spells or {}) do names[#names + 1] = k end
   table.sort(names)
-  if #names == 0 then return { text = "spells: none", fg = "brightblack" } end
-  local spans = { { text = "spells: ", dim = true } }
-  for i, n in ipairs(names) do
-    spans[#spans + 1] = { text = n, fg = "brightgreen" }
-    if i < #names then spans[#spans + 1] = { text = ", ", dim = true } end
+  if #names == 0 then
+    spans[#spans + 1] = { text = "spells: none", fg = "brightblack" }
+  else
+    spans[#spans + 1] = { text = "spells: ", dim = true }
+    for i, n in ipairs(names) do
+      spans[#spans + 1] = { text = n, fg = "brightgreen" }
+      if i < #names then spans[#spans + 1] = { text = ", ", dim = true } end
+    end
   end
   return { spans = spans }
 end
@@ -162,7 +170,30 @@ local function env_spans()
   local b = {}
   if state.daypart then b[#b + 1] = { text = state.daypart, fg = "yellow" } end
   if state.clock then b[#b + 1] = { text = "  " .. state.clock, dim = true } end
+  -- Sky/weather from kxwt_sky (outdoors / sky-visible / overcast).
+  if state.outdoors == false then
+    b[#b + 1] = { text = "  ⌂ indoors", fg = "brightblack" }
+  elseif state.outdoors == true then
+    if state.overcast then
+      b[#b + 1] = { text = "  ☁ overcast", fg = "brightblack" }
+    elseif state.sky_visible == false then
+      b[#b + 1] = { text = "  ⛰ sheltered", fg = "brightblack" }
+    else
+      local night = state.daypart and (state.daypart:find("night") or state.daypart:find("evening")
+                     or state.daypart == "midnight" or state.daypart:find("dusk"))
+      b[#b + 1] = { text = night and "  ☾ clear" or "  ☀ clear", fg = "brightyellow" }
+    end
+  end
   if state.precip and state.precip > 0 then b[#b + 1] = { text = "  ☔", fg = "brightblue" } end
+  -- ♪ now-playing mood, from the kxwt_music channels (soundtrack/track_combat_01 -> combat_01).
+  local playing = {}
+  for _, tr in pairs(state.music or {}) do
+    playing[#playing + 1] = tr:gsub("^.*/", ""):gsub("^track_", "")
+  end
+  if #playing > 0 then
+    table.sort(playing)
+    b[#b + 1] = { text = "  ♪ " .. table.concat(playing, " · "), fg = "brightmagenta" }
+  end
   return b
 end
 
@@ -208,10 +239,24 @@ local function member_bar(label, cur, max, kind)
   ) }
 end
 
+-- Interpret the kxwt group <tag> (composable): X=you, P=player, M=your minion, O=other's minion,
+-- ?=mob; L=leader, T=tanking, N=no-melee, -=NOT in the room with you.
 local function group_member_row(m)
+  local tag = m.flags or ""
+  local absent = tag:find("-", 1, true) ~= nil
+  local name_fg = "brightwhite"                                   -- you / player
+  if tag:find("O", 1, true) then name_fg = "brightblack"          -- someone else's minion
+  elseif tag:find("M", 1, true) then name_fg = "cyan"             -- your minion/pet
+  elseif tag:find("?", 1, true) then name_fg = "yellow" end       -- some other mob
+  local spans = {}
+  if tag:find("L", 1, true) then spans[#spans + 1] = { text = "★", fg = "brightyellow" } end  -- leader
+  if tag:find("T", 1, true) then spans[#spans + 1] = { text = "⛨", fg = "brightcyan" } end    -- tanking
+  if tag:find("N", 1, true) then spans[#spans + 1] = { text = "∅", fg = "brightblack" } end    -- no-melee
+  if #spans > 0 then spans[#spans + 1] = { text = " " } end
+  spans[#spans + 1] = { text = m.name, fg = name_fg, dim = absent }
+  if absent then spans[#spans + 1] = { text = " ·away", fg = "brightblack" } end
   return { cols = {
-    { spans = { { text = (m.flags and (m.flags .. " ") or ""), fg = "brightblack" },
-                { text = m.name, fg = "brightwhite" } }, width = 26 },
+    { spans = spans, width = 26 },
     member_bar("HP", m.hp, m.maxhp, "hp"),
     member_bar("MP", m.mana, m.maxmana, "mp"),
     member_bar("MV", m.stam, m.maxstam, "mv"),
@@ -222,17 +267,13 @@ end
 -- into a fixed-width cell (a 2-space gutter keeps it off the left content). nil if the map is unknown.
 local function minimap_cells()
   if not minimap then return nil end          -- AIPilot (which owns the map) not loaded
-  local m = minimap(3, 3)                      -- 7×7 rooms, rendered ~13×7 (compact & square), trimmed
+  local m = minimap(3, 2)                      -- 7×5 rooms, rendered ~25×9 (explicit connectors)
   if not m then return nil end
-  -- Trim blank rows above/below the drawn content so the map top-aligns with the other widgets
-  -- (otherwise the current room sits at the grid's centre and the empty padding reads as "below").
-  local first, last
-  for r = 1, m.h do
-    if m.cells[r] and next(m.cells[r]) then first = first or r; last = r end
-  end
-  if not first then return nil end
+  -- Return the FULL window (no trimming): the grid is built with you at its centre, so keeping every
+  -- row keeps you centred — with empty space to the north when there's nothing mapped that way, rather
+  -- than ramming you against the top edge.
   local out = {}
-  for r = first, last do
+  for r = 1, m.h do
     local line = m.cells[r] or {}
     local spans = { { text = "  " } }
     for c = 1, m.w do
@@ -240,7 +281,7 @@ local function minimap_cells()
       if cell then spans[#spans + 1] = { text = cell.ch, fg = cell.fg, bold = cell.bold }
       else spans[#spans + 1] = { text = " " } end
     end
-    out[#out + 1] = { spans = spans, width = m.w + 2 }
+    out[r] = { spans = spans, width = m.w + 2 }
   end
   return out
 end
@@ -270,14 +311,18 @@ local function update_top()
   end
   for _, r in ipairs(reference_rows()) do left[#left + 1] = r end
 
-  -- Compose the minimap as a right-hand column, aligned row-for-row with the left content.
+  -- Compose the minimap as a right-hand column, aligned row-for-row with the left content. EVERY left
+  -- row gets a minimap cell of the SAME fixed width — a blank one where the map has no content — so the
+  -- left columns (the group bars) keep identical widths whether or not the map reaches that row.
   local mini = minimap_cells()
   if not mini then panel.top(left); return end
+  local mw = (mini[1] and mini[1].width) or 0
+  local blank = { text = "", width = mw }
   local rows, n = {}, math.max(#left, #mini)
   for i = 1, n do
-    if left[i] and mini[i] then rows[i] = append_col(left[i], mini[i])
-    elseif left[i] then rows[i] = left[i]
-    else rows[i] = { cols = { { text = "" }, mini[i] } } end
+    local m = mini[i] or blank
+    if left[i] then rows[i] = append_col(left[i], m)
+    else rows[i] = { cols = { { text = "" }, m } } end
   end
   panel.top(rows)
 end

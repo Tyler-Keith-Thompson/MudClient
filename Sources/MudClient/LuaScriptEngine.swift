@@ -233,6 +233,21 @@ final class LuaScriptEngine: @unchecked Sendable {
             panel = { render = panel_render, height = panel_height,
                       top = panel_top, top_height = panel_top_height }
             """)
+
+        // Generic layered audio player — scripts just say `music.play("channel", "track")` /
+        // `music.stop("channel")`. Swift knows nothing about the MUD; it plays a named file from the
+        // configured sound dir (see MusicService), so any protocol parsing stays in Lua.
+        lua.register("music_play") { args in
+            if case .string(let ch)? = args.first, args.count > 1, case .string(let track) = args[1] {
+                Container.musicService().play(channel: ch, track: track)
+            }
+            return []
+        }
+        lua.register("music_stop") { args in
+            if case .string(let ch)? = args.first { Container.musicService().stop(channel: ch) }
+            return []
+        }
+        try? lua.run("music = { play = music_play, stop = music_stop }")
     }
 
     /// Dispatch a `#<name> <rest>` command to a script-registered handler. Returns whether one claimed it.

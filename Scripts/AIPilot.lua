@@ -183,26 +183,32 @@ local function has_frontier(rid)
 end
 
 -- ---- minimap (consumed by the HUD) ----------------------------------------------------------
--- Lay out the local area around the current room on a unit grid by walking the MOVE GRAPH one step
--- per commanded direction (robust to the game's coordinate scale — we never use raw coords here).
--- Only the 8 compass directions place cells; up/down cross z-levels and are left off the 2-D map.
--- Returns { w, h, cells = { [row] = { [col] = { ch, fg, bold } } } } (1-indexed, sparse), or nil.
+-- Lay out the local area GEOMETRICALLY, from each room's kxwt coordinates, so loops close to their
+-- true shape (no non-planar overlaps) and real coordinate gaps render as space. Only the current FLOOR
+-- (same plane + z) is drawn; up/down lead to other floors. A coordless current room falls back to a
+-- unit-step graph walk. Returns { w, h, cells = { [row] = { [col] = { ch, fg, bold } } } }, or nil.
 local MM_VEC = { north = { 0, -1 }, south = { 0, 1 }, east = { 1, 0 }, west = { -1, 0 },
   northeast = { 1, -1 }, northwest = { -1, -1 }, southeast = { 1, 1 }, southwest = { -1, 1 } }
--- Compact grid: horizontal step 2 cells, vertical step 1 (rooms on ADJACENT rows). Terminal cells are
--- ~2x taller than wide, so 2:1 reads square while keeping the map HALF the height of a doubled grid.
--- Vertical links are shown by rooms stacking (adjacency implies them); only horizontal & diagonal
--- links draw a connector cell. MM_LINK = cells for a WALKED exit; MM_STUB = near cell for an UNwalked one.
+-- Render step: horizontal 4 cells, vertical 2 (a doubled grid). The between cells give EVERY link its
+-- own drawn connector — including the vertical "│", so a north/south connection is unambiguous rather
+-- than implied by stacking. 4:2 also corrects for terminal cells being ~2x taller than wide, so it
+-- reads square. MM_LINK = the full cell run for a WALKED exit; MM_STUB = the single near cell for an
+-- UNwalked one.
 local MM_LINK = {
-  east = { { 1, 0, "─" } }, west = { { -1, 0, "─" } },
-  north = {}, south = {},                                    -- vertical: adjacency shows the link
-  northeast = { { 1, -1, "╱" } }, southwest = { { -1, 1, "╱" } },
-  northwest = { { -1, -1, "╲" } }, southeast = { { 1, 1, "╲" } },
+  east = { { 1, 0, "─" }, { 2, 0, "─" }, { 3, 0, "─" } },
+  west = { { -1, 0, "─" }, { -2, 0, "─" }, { -3, 0, "─" } },
+  north = { { 0, -1, "│" } }, south = { { 0, 1, "│" } },
+  northeast = { { 2, -1, "╱" } }, southwest = { { -2, 1, "╱" } },
+  northwest = { { -2, -1, "╲" } }, southeast = { { 2, 1, "╲" } },
 }
 local MM_STUB = {
-  east = { 1, 0, "─" }, west = { -1, 0, "─" }, north = { 0, -1, "╵" }, south = { 0, 1, "╷" },
-  northeast = { 1, -1, "╱" }, southwest = { -1, 1, "╱" }, northwest = { -1, -1, "╲" }, southeast = { 1, 1, "╲" },
+  east = { 1, 0, "─" }, west = { -1, 0, "─" }, north = { 0, -1, "│" }, south = { 0, 1, "│" },
+  northeast = { 2, -1, "╱" }, southwest = { -2, 1, "╱" }, northwest = { -2, -1, "╲" }, southeast = { 2, 1, "╲" },
 }
+-- grid-offset "gx,gy" -> compass direction, to draw a WALKED connector by the GEOMETRY between two
+-- placed rooms (the coordinates, not the possibly-mislabelled stored edge direction).
+local GEO = { ["0,-1"] = "north", ["0,1"] = "south", ["1,0"] = "east", ["-1,0"] = "west",
+  ["1,-1"] = "northeast", ["-1,-1"] = "northwest", ["1,1"] = "southeast", ["-1,1"] = "southwest" }
 -- terrain code -> node colour (from `help 3.terrain`, codes 0-39). Water=blue, forest/field=green,
 -- sand/desert=yellow, rock/mountain/underground=gray, town/city=white, lava=red, ice=cyan,
 -- swamp/marsh=magenta, shadow/crystal=bright magenta/cyan. Unknown terrain falls back to cyan.
@@ -225,47 +231,103 @@ function minimap(hw, hh)
   hw, hh = hw or 3, hh or 2
   local cur = P.current_room
   if not cur or not P.rooms[cur] then return nil end
-  -- BFS from the current room, assigning each reached room a grid coord in unit steps.
-  local pos, order, queue, head = { [cur] = { 0, 0 } }, { cur }, { cur }, 1
-  while head <= #queue do
-    local id = queue[head]; head = head + 1
-    local g = pos[id]
-    for d, nb in pairs(P.rooms[id].moves or {}) do
-      local v = MM_VEC[d]
-      -- Only follow an edge the room ACTUALLY ADVERTISES as an exit — a stale move-edge from an old
-      -- run (no matching exit) won't place a phantom room, so nodes stay grounded in real exits too.
-      if v and P.rooms[id].exits[d] and pos[nb] == nil and P.rooms[nb] then
-        local nx, ny = g[1] + v[1], g[2] + v[2]
-        if math.abs(nx) <= hw and math.abs(ny) <= hh then
-          pos[nb] = { nx, ny }; order[#order + 1] = nb; queue[#queue + 1] = nb
+
+  -- ---- placement: geometric (by kxwt coords), or a unit-step graph walk if we have no coords -------
+  local pos, order, occ = {}, { cur }, { ["0,0"] = true }
+  pos[cur] = { 0, 0 }
+  local function claim(id, gx, gy)                         -- one room per cell; the first to land keeps it
+    if math.abs(gx) > hw or math.abs(gy) > hh then return false end
+    local key = gx .. "," .. gy
+    if occ[key] then return false end
+    occ[key] = true; pos[id] = { gx, gy }; order[#order + 1] = id; return true
+  end
+
+  local rc = P.rooms[cur].coord
+  if rc and rc[1] then
+    -- GEOMETRIC. Gather the connected component on THIS floor (same plane + z) by walking every
+    -- move-edge (we place by COORDINATES, so we don't need — and no longer gate on — advertised exits;
+    -- a room goes to its true spot whether or not its exits have been recorded yet).
+    local cx, cy, cz, cpl = rc[1], rc[2], rc[3], rc[4]
+    local raw, seen, queue, head = {}, { [cur] = true }, { cur }, 1
+    while head <= #queue do
+      local id = queue[head]; head = head + 1
+      for _, nb in pairs(P.rooms[id].moves or {}) do
+        if not seen[nb] then
+          seen[nb] = true
+          local c = P.rooms[nb] and P.rooms[nb].coord
+          if c and c[1] and c[4] == cpl and c[3] == cz then
+            raw[nb] = { c[1] - cx, c[2] - cy }; queue[#queue + 1] = nb
+          end
+        end
+      end
+    end
+    -- Local unit = the smallest nonzero coordinate step, so a 1-unit and an 8-unit area both collapse
+    -- to one grid cell per adjacent room (real gaps stay as multi-cell space).
+    local unit
+    for _, o in pairs(raw) do
+      local ax, ay = math.abs(o[1]), math.abs(o[2])
+      if ax > 0 and (not unit or ax < unit) then unit = ax end
+      if ay > 0 and (not unit or ay < unit) then unit = ay end
+    end
+    unit = unit or 1
+    local ids = {}
+    for id in pairs(raw) do ids[#ids + 1] = id end
+    table.sort(ids)                                        -- deterministic conflict resolution
+    for _, id in ipairs(ids) do
+      local o = raw[id]
+      -- north is +y in kxwt coords but UP on screen, so negate y for the row.
+      claim(id, math.floor(o[1] / unit + 0.5), math.floor(-o[2] / unit + 0.5))
+    end
+  else
+    -- FALLBACK: coordless current room -> topological unit-step walk over the move-graph.
+    local queue, head = { cur }, 1
+    while head <= #queue do
+      local id = queue[head]; head = head + 1
+      local g = pos[id]
+      for d, nb in pairs(P.rooms[id].moves or {}) do
+        local v = MM_VEC[d]
+        if v and not pos[nb] and P.rooms[nb] then
+          if claim(nb, g[1] + v[1], g[2] + v[2]) then queue[#queue + 1] = nb end
         end
       end
     end
   end
-  -- Render grid: horizontal step 2 cells, vertical step 1 — half the height of a doubled grid, and
-  -- still square given ~2:1 terminal cells. Vertical links show by rooms stacking on adjacent rows.
-  local W, H = 4 * hw + 1, 2 * hh + 1
-  local ccol, crow = 2 * hw + 1, hh + 1
+
+  -- ---- render: doubled grid (4 cols / 2 rows per unit), square on ~2:1 terminal cells --------------
+  local W, H = 8 * hw + 1, 4 * hh + 1
+  local ccol, crow = 4 * hw + 1, 2 * hh + 1
   local cells = {}
   local function put(col, row, ch, fg, bold)
     if col < 1 or col > W or row < 1 or row > H then return end
     cells[row] = cells[row] or {}
     cells[row][col] = { ch = ch, fg = fg, bold = bold }
   end
-  local function node_xy(g) return ccol + 2 * g[1], crow + g[2] end
-  -- Connectors are drawn from what each room ADVERTISES (r.exits) — NEVER inferred from grid adjacency
-  -- — so a stale move-edge (leftover from old runs) can't paint a line where the room has no exit.
-  -- Pass 1: exits we've actually WALKED -> solid gray line.
+  local function node_xy(g) return ccol + 4 * g[1], crow + 2 * g[2] end
+  local function sign(n) return n > 0 and 1 or (n < 0 and -1 or 0) end
+
+  -- WALKED connectors, drawn by the geometry between two placed rooms (every move-edge you've walked;
+  -- no exit-gating). Adjacent cells get the one-step connector; a real coordinate GAP (rooms >1 cell
+  -- apart) is drawn as a straight line spanning the space, else left as a visible gap.
   for _, id in ipairs(order) do
-    local col, row = node_xy(pos[id]); local r = P.rooms[id]
-    for d in pairs(r.exits or {}) do
-      if MM_LINK[d] and r.moves and r.moves[d] then
-        for _, c in ipairs(MM_LINK[d]) do put(col + c[1], row + c[2], c[3], "brightblack") end
+    local a = pos[id]; local col, row = node_xy(a); local r = P.rooms[id]
+    for _, nb in pairs(r.moves or {}) do
+      local b = pos[nb]
+      if b and not (b[1] == a[1] and b[2] == a[2]) then
+        local gdx, gdy = b[1] - a[1], b[2] - a[2]
+        if math.max(math.abs(gdx), math.abs(gdy)) == 1 then
+          local link = MM_LINK[GEO[gdx .. "," .. gdy]]
+          if link then for _, c in ipairs(link) do put(col + c[1], row + c[2], c[3], "brightblack") end end
+        elseif gdy == 0 then                               -- horizontal gap
+          local sx = sign(gdx)
+          for c = col + sx, col + 4 * gdx - sx, sx do put(c, row, "─", "brightblack") end
+        elseif gdx == 0 then                               -- vertical gap
+          local sy = sign(gdy)
+          for rr = row + sy, row + 2 * gdy - sy, sy do put(col, rr, "│", "brightblack") end
+        end
       end
     end
   end
-  -- Pass 2: advertised exits we HAVEN'T walked (and aren't known dead ends) -> bright-green stub into
-  -- unmapped ground. Only fills empty cells, so it never clobbers a real (walked) connector or a node.
+  -- Unexplored-exit stubs: advertised exits we haven't walked -> a green stub that compass direction.
   for _, id in ipairs(order) do
     local col, row = node_xy(pos[id]); local r = P.rooms[id]
     for d in pairs(r.exits or {}) do
@@ -276,20 +338,15 @@ function minimap(hw, hh)
       end
     end
   end
-  -- Nodes on top: colour = terrain; glyph = waypoint (◆) / frontier (▣) / explored (□).
+  -- Nodes on top: colour = terrain; glyph = waypoint (◆) / frontier (▣) / explored (□); YOU (◉) last,
+  -- so a coordinate collision (the game does have some overlapping rooms) never hides your marker.
   for _, id in ipairs(order) do
     if id ~= cur then
-      local col, row = node_xy(pos[id])
-      local r = P.rooms[id]
-      if r.waypoint then
-        put(col, row, "◆", "brightmagenta", true)                       -- a travel waypoint
-      else
-        put(col, row, has_frontier(id) and "▣" or "□", TERRAIN_COLOR[r.terrain] or "cyan")
-      end
+      local col, row = node_xy(pos[id]); local r = P.rooms[id]
+      if r.waypoint then put(col, row, "◆", "brightmagenta", true)
+      else put(col, row, has_frontier(id) and "▣" or "□", TERRAIN_COLOR[r.terrain] or "cyan") end
     end
   end
-  -- YOU last of all, so a grid collision (common in dense, loopy towns where two rooms land on the
-  -- same cell) can never paint over your marker the way it sometimes did.
   local cc, cr = node_xy(pos[cur])
   put(cc, cr, "◉", "brightyellow", true)
   return { w = W, h = H, cells = cells }
@@ -1167,6 +1224,47 @@ alias([[^explore$]], function()
   P.nav = { path = path, idx = 1, dest = "unexplored ground", gen = 0 }
   nav_step()
 end)
+
+-- `#reset room <dir>` — forget the room in <dir> from where you're standing (a manual heal for a bad
+-- write to the map). Purges that room AND every edge pointing at it, so the direction shows as an
+-- unexplored exit again; just walk there to remap it clean. `#reset here` forgets the current room.
+if command then command("reset", function(rest) reset_command(rest) end) end
+function reset_command(args)
+  args = trim(args or ""):lower()
+  local sub = args:match("^%S*")
+  local cur = P.current_room
+  if not cur or not P.rooms[cur] then echo("[reset] I don't know which room you're in yet."); return end
+
+  local target
+  if sub == "here" then
+    target = cur
+  elseif sub == "room" then
+    local dir = CANON[args:match("^%S+%s+(%S+)") or ""]
+    if not dir then echo("[reset] usage: #reset room <dir>   (n/s/e/w/ne/nw/se/sw/u/d)"); return end
+    target = P.rooms[cur].moves and P.rooms[cur].moves[dir]
+    if not target then echo("[reset] no known room to the " .. dir .. " from here — nothing to forget."); return end
+  else
+    echo("[reset] usage: #reset room <dir>  |  #reset here"); return
+  end
+
+  local name = (P.rooms[target] and P.rooms[target].name) or ("room " .. tostring(target))
+  P.rooms[target] = nil
+  local edges = 0
+  for _, r in pairs(P.rooms) do                        -- sever every edge that pointed at it
+    if r.moves then
+      for d, dest in pairs(r.moves) do
+        if dest == target then r.moves[d] = nil; edges = edges + 1 end
+      end
+    end
+  end
+  if target == cur then                                 -- forgot the room you're standing in:
+    P.rooms[cur] = { exits = {}, moves = {} }            -- keep you anchored with a blank record that
+    if state and state.room_name then P.rooms[cur].name = state.room_name end  -- refills as you look/move
+  end
+  schedule_save()
+  echo(string.format("[reset] forgot '%s' and %d edge%s to it — walk there again to remap it.",
+    name, edges, edges == 1 and "" or "s"))
+end
 
 -- ---- cost tracking -------------------------------------------------------------------------
 -- Per-million-token USD rates: {input, output, cache_read, cache_write}.

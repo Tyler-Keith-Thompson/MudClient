@@ -418,6 +418,7 @@ final class TerminalService {
     }
     
     private func handleEnter() {
+        snapToLive()   // if you were reading history, sending a command jumps you back to the live tail
         lineBuffer.append(contentsOf: partialInput.dropLast())
         cursor.moveToStartOfLine()
         let echo = lineBuffer
@@ -640,6 +641,14 @@ final class TerminalService {
         } else {
             paintScrolled(l, rows: rows)
         }
+    }
+
+    /// Jump straight back to the live tail — used when you ACT (send a command) while scrolled back,
+    /// so your command and its reply land at the bottom instead of off-screen. No-op if already live.
+    private func snapToLive() {
+        guard scrollOffset > 0, let l = layout() else { return }
+        scrollOffset = 0
+        resumeLive(l, rows: physicalRows(width: l.width))
     }
 
     /// Repaint the frozen furniture, then overwrite the output band with history at the current

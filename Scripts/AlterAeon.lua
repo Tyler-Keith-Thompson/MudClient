@@ -19,6 +19,9 @@ state = state or {
   group = {},                          -- roster of you + pets/groupmates (kxwt_group_start..end)
   exits = {},                          -- set of available exit directions, parsed from "[Exits: ...]"
   effects = {},                        -- timed self-effects (kxwt_spst): name -> remaining-time text
+  action = 0,                          -- kxwt_action code; >= 50 prevents spellcasting
+  outdoors = nil, sky_visible = nil, overcast = nil,   -- kxwt_sky flags
+  music = {},                          -- channel -> current track name (kxwt_music), for the HUD ♪
 }
 
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
@@ -154,11 +157,46 @@ trigger([[^kxwt_group_end$]], function()
 end)
 
 -- Environment: sky/time/weather. kxwt_time is "<mud-minutes> <daypart> <clock> <am/pm>";
--- kxwt_precipitation is a 0-100ish intensity; kxwt_sky "<light> <moon?> <...>" (kept raw-ish).
+-- kxwt_precipitation is a 0-100ish intensity; kxwt_sky is "<outdoors> <sky-visible> <overcast>" (1/0).
 trigger([[^kxwt_time (\d+) (\S+) (\S+) (\S+)$]], function(_, _mins, part, clock, ampm)
   state.daypart = part; state.clock = clock .. " " .. ampm
 end)
 trigger([[^kxwt_precipitation (\d+)]], function(_, p) state.precip = tonumber(p) end)
+trigger([[^kxwt_sky (\d+) (\d+) (\d+)]], function(_, o, v, c)
+  state.outdoors = tonumber(o) == 1; state.sky_visible = tonumber(v) == 1; state.overcast = tonumber(c) == 1
+end)
+
+-- Current action code (butchering, turning, etc.). Per 'help kxwt', values >= 50 PREVENT spellcasting,
+-- so the HUD can warn casters. Moving cancels most actions, so clear it on a room change as a safety.
+trigger([[^kxwt_action (\d+)]], function(_, a) state.action = tonumber(a) end)
+trigger([[^kxwt_rvnum ]], function() state.action = 0 end)
+
+-- Transient alerts: level-ups / quest completions (kxwt_event) and deaths of a player (pdeath), your
+-- own minion (ydeath), or a group member's minion (gdeath). kxwt_ lines are gagged, so we echo a short
+-- coloured banner into the output instead. (mob deaths, kxwt_mdeath, drive corpse automation below.)
+trigger([[^kxwt_event (\S+) ?(.*)$]], function(_, kw, data)
+  echo("\27[1;33m★ " .. kw .. (data ~= "" and (": " .. data) or "") .. "\27[0m")
+end)
+trigger([[^kxwt_pdeath (.+)$]], function(_, n) echo("\27[1;31m☠ " .. n .. " has DIED!\27[0m") end)
+trigger([[^kxwt_ydeath (.+)$]], function(_, n) echo("\27[31m☠ your " .. n .. " has died.\27[0m") end)
+trigger([[^kxwt_gdeath (.+)$]], function(_, n) echo("\27[31m☠ " .. n .. " (a group minion) has died.\27[0m") end)
+
+-- Music channels (kxwt_music). We only receive track NAMES per channel (e.g. the "music" and
+-- "terrain" channels), not audio. We know where the AlterAeon dclient soundpack lives, so we build the
+-- full path and hand it to the generic Swift player (which stays game-agnostic — it just plays a file).
+-- The track names already carry their subdir (soundtrack/…, weather/…), so SOUNDPACK is the ogg_v1 root.
+-- We also remember each channel's track so the HUD can show a "♪" mood indicator. `if music then`
+-- guards an un-relaunched binary that lacks the new builtin.
+local SOUNDPACK = (os.getenv("HOME") or "") .. "/Library/AlterAeon/soundpack/ogg_v1/"
+state.music = state.music or {}
+trigger([[^kxwt_music channel_play (\S+) (\S+)]], function(_, ch, tr)
+  state.music[ch] = tr
+  if music then music.play(ch, SOUNDPACK .. tr .. ".ogg") end
+end)
+trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch)
+  state.music[ch] = nil
+  if music then music.stop(ch) end
+end)
 
 -- Timed self-effects (spell/skill durations), e.g. "kxwt_spst mana shield, two hours, 20 minutes".
 -- We keep the latest reported one keyed by name so a small "effects" widget can show remaining time.
