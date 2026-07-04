@@ -79,6 +79,11 @@ def content_region(page):
     start = page.find('id="text_vframe"')
     if start == -1:
         return page
+    # Advance past the rest of that opening <div ...> tag so its attributes don't
+    # survive as literal text once tags are stripped.
+    gt = page.find(">", start)
+    if gt != -1:
+        start = gt + 1
     end = page.find('menu_border_frame', start)
     return page[start:end if end != -1 else None]
 

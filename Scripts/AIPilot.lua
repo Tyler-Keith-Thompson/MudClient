@@ -1148,6 +1148,26 @@ function start_navigation(dest)
   nav_step()
 end
 
+-- `explore` (human alias) — auto-walk to the NEAREST unexplored ground, reusing the stream-driven nav
+-- walker: it steps on each room change, stops the moment you enter combat, and aborts if a step stalls
+-- (blocked/closed door). `explore stop` cancels. This is the hands-on version of the AI's
+-- navigate("unexplored"), minus the pilot's cooldown/turn machinery.
+alias([[^explore stop$]], function()
+  if P.nav then P.nav = nil; echo("[explore] stopped.") else echo("[explore] not navigating.") end
+end)
+alias([[^explore$]], function()
+  if in_combat() then echo("[explore] not while you're fighting."); return end
+  local path = path_to_unexplored()
+  if not path or #path == 0 then
+    echo("[explore] no reachable unexplored exits — the map you've walked from here is fully explored.")
+    return
+  end
+  echo(string.format("[explore] heading to the nearest unexplored ground (%d step%s) — 'explore stop' to cancel.",
+    #path, #path == 1 and "" or "s"))
+  P.nav = { path = path, idx = 1, dest = "unexplored ground", gen = 0 }
+  nav_step()
+end)
+
 -- ---- cost tracking -------------------------------------------------------------------------
 -- Per-million-token USD rates: {input, output, cache_read, cache_write}.
 local RATES = {
