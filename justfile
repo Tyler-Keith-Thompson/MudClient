@@ -39,6 +39,10 @@ test:
     @echo ""
     @echo "All tests passed."
 
+[doc('Run only the Lua script tests (fast; also included in `just test`)')]
+test-lua:
+    {{BAZEL}} test //tools/luatest:lua_scripts_test --config={{BAZEL_CONFIG}} --test_output=errors
+
 [doc('Generate Xcode project (pass --no-open to skip launching Xcode)')]
 generate *args="":
     @bash scripts/generate-xcodeproj.sh {{args}}

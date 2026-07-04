@@ -1,0 +1,25 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+
+# Runs the Lua script test suite (Scripts/tests/*.lua) the same way the in-app `#test` command does:
+# a tiny interpreter built from the vendored Lua (//Sources/CLua) loads the real game scripts with the
+# host builtins stubbed (driver.lua) and executes every spec, exiting non-zero on any failure.
+#
+# Bazel has no native Lua rules, so we drive Lua through C — reusing the same CLua cc_library the app
+# already vendors, so there's no new dependency and the test Lua is byte-for-byte the runtime Lua.
+#
+# `bazel test //...` (and therefore `just test`) picks this up automatically. The test's working
+# directory is the runfiles root, so driver.lua's repo-relative `Scripts/...` paths resolve against the
+# files listed in `data` below.
+cc_test(
+    name = "lua_scripts_test",
+    size = "small",
+    srcs = ["main.c"],
+    args = ["tools/luatest/driver.lua"],
+    copts = ["-DLUA_USE_MACOSX"],
+    data = [
+        "driver.lua",
+        "//Scripts:lua_srcs",
+    ],
+    deps = ["//Sources/CLua:CLua"],
+    visibility = ["//visibility:public"],
+)

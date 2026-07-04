@@ -150,9 +150,18 @@ function pilot_room_change(id, coord)
     while #P.room_trail > 8 do table.remove(P.room_trail, 1) end
   end
   P.current_room = id
+  -- Learn which room a waypoint NUMBER travels to, from an observed `waypoint <n>` that just landed
+  -- here (set in on_user_input). This is ground truth — no fragile description matching. `moved` guards
+  -- against a failed hop attributing a later step to the number.
+  if P.wp_pending and moved then learn_waypoint(P.wp_pending, id); P.wp_pending = nil end
   table.insert(P.transcript, "--- [MOVED to a NEW room. Everything above is a PREVIOUS room — creatures and items there are gone; act only on what's below.] ---")
   P.input_seq = P.input_seq + 1
   trim_transcript(); schedule_save()
+  -- A `goto` bridge landed us somewhere new: re-decide from here (deferred a beat so exits / the
+  -- kxwt_waypoint flag for this room settle first).
+  if P.goto_bridge and id ~= from_id then
+    after(0.4, function() if P.goto_bridge then goto_bridge_advance() end end)
+  end
   if P.nav then nav_step() end   -- a route is in progress: take the next step
 end
 
@@ -180,6 +189,70 @@ local function has_frontier(rid)
   if not r then return false end
   for d in pairs(r.exits) do if not r.moves[d] then return true end end
   return false
+end
+
+-- ---- landmarks (rooms YOU tag, e.g. "trainer") ---------------------------------------------
+-- Marks live on the room as a set of lowercase labels (r.marks[label]=true), persisted with the map
+-- like any other room field. A label matches a query if it EQUALS it or CONTAINS it, so `goto train`
+-- (and navigate("train")) both reach a "trainer" mark. Purely player-driven — the game never sets these.
+local function has_mark(r, label)
+  if not r or not r.marks then return false end
+  for m in pairs(r.marks) do if m == label or m:find(label, 1, true) then return true end end
+  return false
+end
+
+-- One "- label: room — area; room — area" line per tagged label, current room flagged inline. Shared by
+-- the MAP block sent to the model and the `#mark` listing. "" when nothing is marked.
+local function marks_list()
+  local by_label, order = {}, {}
+  for id, r in pairs(P.rooms) do
+    if r.marks then
+      for m in pairs(r.marks) do
+        if not by_label[m] then by_label[m] = {}; order[#order + 1] = m end
+        local loc = (r.name or ("room " .. tostring(id))) .. (r.area and (" — " .. r.area) or "")
+        if id == P.current_room then loc = loc .. " (you are here)" end
+        by_label[m][#by_label[m] + 1] = loc
+      end
+    end
+  end
+  if #order == 0 then return "" end
+  table.sort(order)
+  local lines = {}
+  for _, m in ipairs(order) do lines[#lines + 1] = "- " .. m .. ": " .. table.concat(by_label[m], "; ") end
+  return table.concat(lines, "\n")
+end
+
+-- ---- waypoints / recall (AlterAeon fast-travel) --------------------------------------------
+-- The `waypoint` command prints a numbered list; rows come in three shapes (verified against real
+-- game output):
+--   "1 - A heavily warded waypoint"                       -> in range, travel now
+--   "6 (bridge  4) - The Temple of Zin"                   -> out of range: waypoint to 4, then to 6
+--   "15 (no bridge) - The Dragon Tooth Waypoint"          -> out of range, no bridge available
+-- Parse one line into { num, name, bridge=<n|nil>, reachable=<bool> }, or nil if it isn't a row.
+local function parse_waypoint_line(line)
+  local num, br, name = line:match("^%s*(%d+)%s*%(bridge%s+(%d+)%)%s*%-%s*(.+)$")
+  if num then return { num = tonumber(num), name = trim(name), bridge = tonumber(br), reachable = false } end
+  num, name = line:match("^%s*(%d+)%s*%(no bridge%)%s*%-%s*(.+)$")
+  if num then return { num = tonumber(num), name = trim(name), bridge = nil, reachable = false } end
+  num, name = line:match("^%s*(%d+)%s*%-%s*(.+)$")
+  if num then return { num = tonumber(num), name = trim(name), bridge = nil, reachable = true } end
+  return nil
+end
+
+-- Parse a whole `waypoint` listing into an ordered array of entries (see parse_waypoint_line).
+local function parse_waypoint_list(text)
+  local out = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    local e = parse_waypoint_line(line)
+    if e then out[#out + 1] = e end
+  end
+  return out
+end
+
+-- Recall (`recall` / `/`) is unreliable — non-god followers frequently get this exact line back, which
+-- is our signal to wait and try again. Success is instead observed as a room change (kxwt_rvnum).
+local function recall_failed(line)
+  return line:find("No god responds to your call", 1, true) ~= nil
 end
 
 -- ---- minimap (consumed by the HUD) ----------------------------------------------------------
@@ -327,23 +400,29 @@ function minimap(hw, hh)
       end
     end
   end
-  -- Unexplored-exit stubs: advertised exits we haven't walked -> a green stub that compass direction.
+  -- Exit stubs: a short tick for EVERY advertised, non-dead-end exit that doesn't already have a drawn
+  -- connector — i.e. whose neighbour isn't on this window, whether it's unexplored, off-window (a big
+  -- coordinate jump placed it past the edge), or not-yet-stored. So a room's exits are always visible
+  -- even when the room they lead to isn't. Green = unexplored (a frontier); dim = explored but off-map.
   for _, id in ipairs(order) do
     local col, row = node_xy(pos[id]); local r = P.rooms[id]
     for d in pairs(r.exits or {}) do
       local s = MM_STUB[d]
-      if s and not (r.moves and r.moves[d]) and not (r.blocked and r.blocked[d]) then
+      if s and not (r.blocked and r.blocked[d]) then
         local sc, sr = col + s[1], row + s[2]
-        if not (cells[sr] and cells[sr][sc]) then put(sc, sr, s[3], "brightgreen") end
+        if not (cells[sr] and cells[sr][sc]) then
+          put(sc, sr, s[3], (r.moves and r.moves[d]) and "brightblack" or "brightgreen")
+        end
       end
     end
   end
-  -- Nodes on top: colour = terrain; glyph = waypoint (◆) / frontier (▣) / explored (□); YOU (◉) last,
-  -- so a coordinate collision (the game does have some overlapping rooms) never hides your marker.
+  -- Nodes on top: colour = terrain; glyph = your mark (★) / waypoint (W) / frontier (▣) / explored (□);
+  -- YOU (◉) last, so a coordinate collision (the game has some overlapping rooms) never hides your marker.
   for _, id in ipairs(order) do
     if id ~= cur then
       local col, row = node_xy(pos[id]); local r = P.rooms[id]
-      if r.waypoint then put(col, row, "◆", "brightmagenta", true)
+      if r.marks and next(r.marks) then put(col, row, "★", "brightgreen", true)
+      elseif r.waypoint then put(col, row, "ᴡ", "brightmagenta", true)
       else put(col, row, has_frontier(id) and "▣" or "□", TERRAIN_COLOR[r.terrain] or "cyan") end
     end
   end
@@ -372,12 +451,10 @@ local function nearest_unexplored()
   return nil
 end
 
--- BFS over the move graph to the nearest room satisfying matches(id). Returns the route as a list of
--- directions, or nil if unreachable. BFS gives the shortest path and is inherently loop-free (the
--- `seen` set) — so a route can NEVER 2-cycle the way the old forced auto-router did.
--- Returns (route, destination_id), or nil. BFS = shortest, loop-free.
-local function find_path(matches)
-  local start = P.current_room
+-- BFS over the move graph from `start` to the nearest room satisfying matches(id). Returns the route as
+-- a list of directions and the destination id, or nil if unreachable. BFS gives the shortest path and is
+-- inherently loop-free (the `seen` set) — so a route can NEVER 2-cycle the way the old forced router did.
+local function find_path_from(start, matches)
   if not start or not P.rooms[start] then return nil end
   local seen = { [start] = true }
   local queue, head = { { id = start, path = {} } }, 1
@@ -395,6 +472,41 @@ local function find_path(matches)
     end
   end
   return nil
+end
+-- Path from the CURRENT room (the common case).
+local function find_path(matches) return find_path_from(P.current_room, matches) end
+
+-- Built-in `goto` targets that mean "a waypoint room" rather than a player mark.
+local WP_ALIASES = { waypoint = true, waypoints = true, wp = true }
+
+-- The known waypoint room from which `label` is walkable in the FEWEST steps, or nil. This is the room
+-- `goto` will waypoint-hop to before walking the final leg. We only need the room id — the walk from it
+-- is recomputed on arrival.
+local function nearest_waypoint_for(label)
+  local best_len, best_id
+  for id, r in pairs(P.rooms) do
+    if r.waypoint then
+      local path = find_path_from(id, function(x) return x ~= id and has_mark(P.rooms[x], label) end)
+      if path and (not best_id or #path < best_len) then best_len, best_id = #path, id end
+    end
+  end
+  return best_id
+end
+
+-- Learn that waypoint NUMBER `num` travels to room `id` — recorded by OBSERVING an actual `waypoint <n>`
+-- move (see on_user_input + pilot_room_change), never by matching the listing's description text to a
+-- room name (which doesn't line up). Session-only: numbers shift with decay/reorder, so we don't persist
+-- them. Also confirms the destination is a waypoint room.
+local function learn_waypoint(num, id)
+  if not num or not id or not P.rooms[id] then return end
+  P.wp_room = P.wp_room or {}          -- number -> room id
+  P.room_wp = P.room_wp or {}          -- room id -> number
+  -- If this number pointed at a different room before (reorder), drop the stale reverse entry.
+  local prev = P.wp_room[num]
+  if prev and prev ~= id then P.room_wp[prev] = nil end
+  P.wp_room[num] = id
+  P.room_wp[id] = num
+  P.rooms[id].waypoint = true
 end
 
 -- An untaken (and not-blocked) exit of room `rid`, or nil. This is the door into NEW ground.
@@ -432,6 +544,7 @@ local function resolve_nav(dest)
   return function(id)
     local r = P.rooms[id]
     if not r or id == P.current_room then return false end
+    if has_mark(r, d) then return true end                      -- a room YOU tagged (e.g. "trainer")
     if r.area and r.area:lower():find(d, 1, true) then return true end
     if r.name and r.name:lower():find(d, 1, true) then return true end
     return false
@@ -507,6 +620,28 @@ local function exploration_summary()
       end
     end
   end
+  -- Landmarks the player has tagged (see `mark`), so the model can head to one on purpose — e.g. a
+  -- trainer to level up. navigate("<label>") routes to the nearest matching mark.
+  local ml = marks_list()
+  if ml ~= "" then
+    lines[#lines + 1] = "Marked places (navigate('<label>') routes to the nearest):\n" .. ml
+  end
+  -- Fast-travel: waypoints seen this session. From a waypoint room, `command("waypoint <n>")` jumps to
+  -- another; recall (unreliable) returns you to your recall site. Surfaced so the model can cross the
+  -- world instead of walking when a destination is far.
+  local wpn = {}
+  for n in pairs(P.waypoints or {}) do wpn[#wpn + 1] = n end
+  if #wpn > 0 then
+    table.sort(wpn)
+    local wl = {}
+    for _, n in ipairs(wpn) do
+      local w = P.waypoints[n]
+      wl[#wl + 1] = "  " .. n .. " - " .. w.name .. (w.reachable and "" or " (out of range"
+        .. (w.bridge and (", bridge via " .. w.bridge) or "") .. ")")
+    end
+    lines[#lines + 1] = "Waypoints you can travel between (command 'waypoint <n>' from a waypoint room):\n"
+      .. table.concat(wl, "\n")
+  end
   return table.concat(lines, "\n")
 end
 
@@ -562,6 +697,13 @@ function pilot_observe(line)
   line = line:gsub("\27%[[%d;]*%a", "")   -- strip ANSI color/escape codes
   local t = trim(line)
   if t:lower():find("cannot go that way", 1, true) then block_last_move() end
+  -- Recall bridge: a fizzled recall means try again shortly (a successful one arrives as a room change,
+  -- handled in pilot_room_change). Small delay so we don't hammer the game.
+  if P.goto_bridge and recall_failed(t) then after(2, goto_recall_attempt) end
+  -- Learn the fast-travel network as `waypoint` listings scroll by, so `goto`'s hand-off and the AI MAP
+  -- block can show real numbers. Session-only (numbers change with decay/reorder) — not persisted.
+  local wpe = parse_waypoint_line(t)
+  if wpe then P.waypoints = P.waypoints or {}; P.waypoints[wpe.num] = wpe end
   -- Never feed gagged protocol lines or blanks to the model. kxwt facts reach it once per turn via
   -- the state block (describe_state), not as raw lines.
   if t == "" or t:match("^kxwt_") then return end
@@ -580,6 +722,17 @@ end
 function on_user_input(cmd)
   cmd = trim(cmd)
   if cmd == "" or cmd:sub(1, 1) == "#" then return end
+  -- Watch for a `waypoint <n>` move (from YOU or our own bridge hop) so the next room change teaches us
+  -- which room that number reaches (learn_waypoint). A short-lived marker, auto-cleared if no move
+  -- follows within a few seconds (a hop that failed / was out of range). Placed before the self-echo
+  -- guard so our own hops reinforce the mapping too.
+  local wn = cmd:match("^waypoint%s+(%d+)%s*$")
+  if wn then
+    P.wp_pending = tonumber(wn)
+    P.wp_gen = (P.wp_gen or 0) + 1
+    local g = P.wp_gen
+    after(8, function() if P.wp_gen == g then P.wp_pending = nil end end)
+  end
   -- Our own AI command echoing back: already logged as [you]; consume the echo and ignore.
   if (P.self_sent[cmd] or 0) > 0 then P.self_sent[cmd] = P.self_sent[cmd] - 1; return end
   if CANON[cmd:lower()] then P.last_move_dir = CANON[cmd:lower()] end   -- so human moves label edges right too
@@ -618,7 +771,7 @@ Goal: ]] .. P.goal .. [[
 HOW TO ACT:
 - ONE action per turn, then wait to see the result before deciding again. Do NOT chain actions. Explore ONE room per turn.
 - Prefer the SPECIFIC tools (move, attack, cast, get, drop, wear, put, recover, stand, look, inventory, flee) — they build the exact command for you; you only supply names/keywords. Use `command` ONLY for things no specific tool covers (e.g. spells, skills, train, buy, list, help). Use `wait` to do nothing (e.g. while recovering). Use `remember` to save a durable fact.
-- To cross ground you've ALREADY explored, or to head somewhere new, call `navigate` (destination = an area/room name you've visited, or "unexplored") — it auto-walks the whole route. Use it instead of stepping move-by-move through familiar rooms, and ESPECIALLY if you notice you're revisiting the same rooms: `navigate("unexplored")` takes you straight to new ground.
+- To cross ground you've ALREADY explored, or to head somewhere new, call `navigate` (destination = an area/room name you've visited, a MARKED PLACE label, or "unexplored") — it auto-walks the whole route. Use it instead of stepping move-by-move through familiar rooms, and ESPECIALLY if you notice you're revisiting the same rooms: `navigate("unexplored")` takes you straight to new ground. If the MAP lists MARKED PLACES (rooms the player tagged, e.g. a trainer), `navigate("<label>")` — like `navigate("trainer")` — routes to the nearest one; use this when the goal calls for it (e.g. you have training points to spend).
 - ACT, don't talk. Your reply must BE a tool call (or a single `CMD: <command>` line) — NOT a sentence describing what you'll do. "Cast shower of sparks on the siren" is wrong; calling the cast tool with spell="shower of sparks", target="siren" is right. No prose, no explanation — just the call.
 - Never invent output you didn't see. If you don't yet know an exact name, call look or inventory this turn and act next turn — never guess.
 
@@ -1225,6 +1378,228 @@ alias([[^explore$]], function()
   nav_step()
 end)
 
+-- `#mark <label>` tags the CURRENT room with a landmark label (e.g. `#mark trainer`) so you can
+-- `goto <label>` back to it later and the pilot can navigate('<label>') to it. `#mark` with no args
+-- lists every tagged room; `#mark del <label>` (or `#mark -<label>`) removes one. Marks persist with
+-- the map and show as ★ on the minimap. Multiple labels per room are fine.
+if command then command("mark", function(rest) mark_command(rest) end) end
+function mark_command(args)
+  args = trim(args or "")
+  if args == "" then
+    local s = marks_list()
+    if s == "" then echo("[mark] nothing marked yet. Stand in a room and `#mark <label>` (e.g. `#mark trainer`).")
+    else echo("[mark] marked rooms:\n" .. s) end
+    return
+  end
+  local id = P.current_room
+  if not id or not P.rooms[id] then
+    echo("[mark] no current room yet — move once so the map knows where you are."); return
+  end
+  local r = P.rooms[id]
+  local del = args:match("^del%s+(.+)$") or args:match("^rm%s+(.+)$") or args:match("^%-%s*(.+)$")
+  if del then
+    del = trim(del):lower()
+    if r.marks and r.marks[del] then
+      r.marks[del] = nil
+      if not next(r.marks) then r.marks = nil end
+      schedule_save()
+      echo("[mark] removed '" .. del .. "' from " .. (r.name or "this room") .. ".")
+    else
+      echo("[mark] this room isn't marked '" .. del .. "'.")
+    end
+    return
+  end
+  local label = args:lower()
+  r.marks = r.marks or {}
+  if r.marks[label] then echo("[mark] already marked '" .. label .. "'."); return end
+  r.marks[label] = true
+  schedule_save()
+  echo("[mark] tagged " .. (r.name or "this room") .. (r.area and (" (" .. r.area .. ")") or "")
+    .. " as '" .. label .. "'. `goto " .. label .. "` to return.")
+end
+
+-- `goto <label>` (human alias) — travel to the NEAREST room you've tagged with `mark <label>` (e.g.
+-- `goto trainer`), reusing the stream-driven nav walker. Matches a mark by substring, so `goto train`
+-- reaches a "trainer". `goto stop` cancels.
+--
+-- If the mark is walkable, it just walks. If not, it BRIDGES automatically (see goto_bridge_advance):
+-- recall onto the waypoint network, waypoint-hop to the waypoint nearest the mark, then walk the final
+-- leg. The hop uses the number LEARNED from watching you actually `waypoint <n>` — never a fragile
+-- description match — so it only auto-hops to a waypoint whose number it has seen you use.
+function human_goto(label)
+  label = trim(label or ""):lower()
+  if label == "" then echo("[goto] usage: goto <mark>  (see `#mark`; `goto stop` cancels)"); return end
+  if label == "stop" then
+    P.goto_bridge = nil
+    if P.nav then P.nav = nil; echo("[goto] stopped.") else echo("[goto] not navigating.") end
+    return
+  end
+  if in_combat() then echo("[goto] not while you're fighting."); return end
+
+  -- Built-in target: `goto waypoint` (or `wp`) heads to the nearest known waypoint room. If none is
+  -- walkable, recall lands you on your recall-site waypoint (which IS a waypoint) — so that's the bridge.
+  if WP_ALIASES[label] then
+    if P.rooms[P.current_room] and P.rooms[P.current_room].waypoint then
+      P.goto_bridge = nil; echo("[goto] you're already at a waypoint."); return
+    end
+    local wpath = find_path(function(id) return id ~= P.current_room and P.rooms[id] and P.rooms[id].waypoint end)
+    if wpath and #wpath > 0 then
+      P.goto_bridge = nil
+      echo(string.format("[goto] routing to the nearest waypoint (%d step%s) — 'goto stop' to cancel.",
+        #wpath, #wpath == 1 and "" or "s"))
+      P.nav = { path = wpath, idx = 1, dest = "a waypoint", gen = 0 }
+      nav_step()
+      return
+    end
+    P.goto_bridge = { label = "waypoint", want_waypoint = true, tries = 0, hops = 0 }
+    echo("[goto] no waypoint walkable from here — recalling to your recall-site waypoint ('goto stop' to cancel).")
+    goto_recall_attempt()
+    return
+  end
+
+  if has_mark(P.rooms[P.current_room], label) then
+    P.goto_bridge = nil; echo("[goto] you're already at a '" .. label .. "'."); return
+  end
+  local path = find_path(function(id) return id ~= P.current_room and has_mark(P.rooms[id], label) end)
+  if path and #path > 0 then
+    P.goto_bridge = nil
+    echo(string.format("[goto] routing to '%s' (%d step%s) — 'goto stop' to cancel.",
+      label, #path, #path == 1 and "" or "s"))
+    P.nav = { path = path, idx = 1, dest = "'" .. label .. "'", gen = 0 }
+    nav_step()
+    return
+  end
+  -- Not walkable. Distinguish "not tagged anywhere" from "tagged, but not reachable overland".
+  local exists = false
+  for _, r in pairs(P.rooms) do if has_mark(r, label) then exists = true; break end end
+  if not exists then
+    echo("[goto] nothing is marked '" .. label .. "'. Stand in the room and `#mark " .. label .. "` first.")
+    return
+  end
+  local wp = nearest_waypoint_for(label)
+  if not wp then
+    echo("[goto] '" .. label .. "' is marked, but not reachable on foot from any waypoint you've walked. "
+      .. "Explore a route, or set a waypoint near it.")
+    return
+  end
+  P.goto_bridge = { label = label, target_wp = wp, tries = 0, hops = 0 }
+  echo("[goto] '" .. label .. "' isn't walkable from here — bridging via recall/waypoint ('goto stop' to cancel).")
+  goto_bridge_advance()
+end
+alias([[^goto (.+)$]], function(_, label) human_goto(label) end)
+
+-- `#waypoints` — show the fast-travel waypoints parsed from `waypoint` listings this session.
+if command then command("waypoints", function() echo(waypoints_hint()) end) end
+
+local RECALL_MAX_TRIES, HOP_MAX = 6, 5
+
+-- One recall attempt. Recall is unreliable, so pilot_observe retries this on the fizzle line; a room
+-- change is instead picked up as a landing (goto_bridge_advance). Bounded by RECALL_MAX_TRIES.
+function goto_recall_attempt()
+  local b = P.goto_bridge
+  if not b then return end
+  if b.tries >= RECALL_MAX_TRIES then
+    echo("[goto] recall kept failing (" .. b.tries .. " tries) — try again later or move manually.")
+    P.goto_bridge = nil
+    return
+  end
+  b.tries = b.tries + 1
+  echo("[goto] recalling… (attempt " .. b.tries .. "/" .. RECALL_MAX_TRIES .. ")")
+  send("recall")
+end
+
+-- The bridge state machine, re-run on every landing (room change) while a `goto` bridge is active. It's
+-- deliberately stateless beyond P.goto_bridge: each call just re-decides from where we ARE now.
+--   1. mark walkable from here?      -> walk the final leg, done.
+--   2. standing on a waypoint room?  -> waypoint-hop toward the target (if we know its number), else hand off.
+--   3. otherwise                     -> recall to get onto the network.
+function goto_bridge_advance()
+  local b = P.goto_bridge
+  if not b then return end
+  if in_combat() then echo("[goto] combat — stopping the bridge."); P.goto_bridge = nil; return end
+  local here = P.current_room
+
+  -- `goto waypoint`: any waypoint room satisfies it. If we've landed on one, we're done; else walk to
+  -- the nearest, or recall again.
+  if b.want_waypoint then
+    if P.rooms[here] and P.rooms[here].waypoint then P.goto_bridge = nil; echo("[goto] arrived at a waypoint."); return end
+    local wpath = find_path_from(here, function(id) return id ~= here and P.rooms[id] and P.rooms[id].waypoint end)
+    if wpath and #wpath > 0 then
+      P.goto_bridge = nil
+      echo(string.format("[goto] final leg to the nearest waypoint (%d step%s).", #wpath, #wpath == 1 and "" or "s"))
+      P.nav = { path = wpath, idx = 1, dest = "a waypoint", gen = 0 }
+      nav_step()
+      return
+    end
+    goto_recall_attempt()
+    return
+  end
+
+  -- 1. Can we walk to the mark from here now?
+  local path = find_path_from(here, function(id) return id ~= here and has_mark(P.rooms[id], b.label) end)
+  if path and #path > 0 then
+    P.goto_bridge = nil
+    echo(string.format("[goto] final leg to '%s' (%d step%s).", b.label, #path, #path == 1 and "" or "s"))
+    P.nav = { path = path, idx = 1, dest = "'" .. b.label .. "'", gen = 0 }
+    nav_step()
+    return
+  end
+  if has_mark(P.rooms[here], b.label) then
+    P.goto_bridge = nil; echo("[goto] arrived at '" .. b.label .. "'."); return
+  end
+
+  -- 2. On a waypoint room: hop toward the target waypoint (if we've learned its number).
+  if P.rooms[here] and P.rooms[here].waypoint then
+    local num = P.room_wp and b.target_wp and P.room_wp[b.target_wp]
+    if here == b.target_wp then
+      P.goto_bridge = nil
+      echo("[goto] reached the waypoint, but '" .. b.label .. "' isn't walkable from it anymore.")
+      echo(waypoints_hint()); return
+    end
+    if not num then
+      P.goto_bridge = nil
+      echo("[goto] I haven't seen which waypoint number reaches that destination yet — hop manually, "
+        .. "then `goto " .. b.label .. "` again:")
+      echo(waypoints_hint()); return
+    end
+    if b.hops >= HOP_MAX then echo("[goto] too many waypoint hops — stopping."); P.goto_bridge = nil; return end
+    b.hops = b.hops + 1
+    b.gen = (b.gen or 0) + 1
+    local g = b.gen
+    echo("[goto] hopping to waypoint " .. num .. " …")
+    send("waypoint " .. num)
+    -- Watchdog: if the hop doesn't land (out of range / needs a bridge waypoint), hand off.
+    after(6, function()
+      if P.goto_bridge == b and b.gen == g then
+        echo("[goto] that waypoint hop didn't land (may be out of range or need a bridge) — hop manually:")
+        echo(waypoints_hint()); P.goto_bridge = nil
+      end
+    end)
+    return
+  end
+
+  -- 3. Not on a waypoint and can't walk there: recall onto the network.
+  goto_recall_attempt()
+end
+
+-- A human-readable list of the waypoints we've parsed from a `waypoint` listing this session, so you can
+-- pick the number nearest your destination. Empty prompt when we haven't seen the list yet.
+function waypoints_hint()
+  local nums = {}
+  for n in pairs(P.waypoints or {}) do nums[#nums + 1] = n end
+  if #nums == 0 then
+    return "[goto] (type `waypoint` to see your waypoints, hop nearer with `waypoint <n>`, then `goto` again.)"
+  end
+  table.sort(nums)
+  local lines = { "[goto] known waypoints (`waypoint <n>` to hop, then `goto` again):" }
+  for _, n in ipairs(nums) do
+    local w = P.waypoints[n]
+    local tag = w.reachable and "" or (w.bridge and (" (bridge via " .. w.bridge .. ")") or " (out of range)")
+    lines[#lines + 1] = "  " .. n .. " - " .. w.name .. tag
+  end
+  return table.concat(lines, "\n")
+end
+
 -- `#reset room <dir>` — forget the room in <dir> from where you're standing (a manual heal for a bad
 -- write to the map). Purges that room AND every edge pointing at it, so the direction shows as an
 -- unexplored exit again; just walk there to remap it clean. `#reset here` forgets the current room.
@@ -1580,3 +1955,12 @@ if P.enabled then
 else
   echo("[ai] pilot loaded. #ai on to start.")
 end
+
+-- Pure helpers exposed for the test harness (see Scripts/tests/aipilot_spec.lua). `P` is closed over,
+-- so map/nav specs can build a throwaway room table and drive real pathing. Not used by the client.
+_AIP_TEST = {
+  has_mark = has_mark, marks_list = marks_list, find_path = find_path,
+  find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
+  parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
+  learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
+}

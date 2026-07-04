@@ -42,13 +42,21 @@ local function vital_rgb(kind, p)
   }
 end
 
+-- Fractional block glyphs (1/8 .. 8/8 of a cell). Sub-cell resolution means the bar tracks the true
+-- ratio to within 1/8 of a cell instead of a whole cell, so it isn't "slightly off" from the % and
+-- grows smoothly as HP changes rather than jumping a full cell at a time.
+local BLOCKS = { "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█" }
 local function gauge(cur, max, width, kind)
   local w = width or 8
   local p = pct(cur, max)
-  local filled = math.floor(p * w + 0.5)
+  local eighths = math.floor(p * w * 8 + 0.5)                    -- total eighths-of-a-cell to fill
+  local full = math.floor(eighths / 8)                           -- whole filled cells
+  local rem = eighths % 8                                        -- leftover eighths → one partial cell
+  local filled = string.rep("█", full) .. (rem > 0 and BLOCKS[rem] or "")
+  local pad = w - full - (rem > 0 and 1 or 0)                    -- keep total visible width == w
   return {
-    { text = string.rep("█", filled), fg = vital_rgb(kind, p), bold = (p <= 0.25) },
-    { text = string.rep("░", w - filled), fg = "brightblack" },
+    { text = filled, fg = vital_rgb(kind, p), bold = (p <= 0.25) },
+    { text = string.rep("░", math.max(0, pad)), fg = "brightblack" },
   }
 end
 
@@ -197,14 +205,33 @@ local function env_spans()
   return b
 end
 
+-- Given the live exp POOL and the per-class costs scraped from the `level` table, return the cheapest
+-- class to level next and how much more experience it needs (need <= 0 means you can level it now), or
+-- nil when we have no class data yet. The game itself advises levelling your cheapest class.
+local function next_level(exp, classes)
+  local best
+  for name, c in pairs(classes or {}) do
+    if c.cost and (not best or c.cost < best.cost) then best = { name = name, level = c.level, cost = c.cost } end
+  end
+  if not best then return nil end
+  return { name = best.name, level = best.level, need = best.cost - (exp or 0) }
+end
+
 local function exp_spans()
   if not state.exp then return {} end
-  local togo = state.expcap and (state.expcap - state.exp) or nil
   local b = { { text = "exp ", dim = true }, { text = tostring(state.exp), fg = "brightmagenta" } }
-  if togo then
-    b[#b + 1] = { text = string.format(" (%d to cap)", math.max(0, togo)),
-                  fg = (togo <= 0 and "brightgreen") or "magenta" }
+  -- Experience to level the cheapest class (the actually-useful number). Uses live exp + cached costs.
+  local nl = next_level(state.exp, state.classes)
+  if nl then
+    if nl.need <= 0 then
+      b[#b + 1] = { text = string.format("  ▲ level %s now", nl.name), fg = "brightgreen", bold = true }
+    else
+      b[#b + 1] = { text = string.format("  ▲ %s %s in %d", nl.name, nl.level and (nl.level + 1) or "", nl.need),
+                    fg = "magenta" }
+    end
   end
+  -- The per-kill cap, labelled honestly (it's a ceiling on one kill's exp, not progress to a level).
+  if state.expcap then b[#b + 1] = { text = string.format("  cap/kill %d", state.expcap), dim = true } end
   return b
 end
 
@@ -333,3 +360,7 @@ function on_update()
   update_top()
   update_bottom()
 end
+
+-- Pure, side-effect-free helpers exposed for the test harness (see Scripts/tests/hud_spec.lua). Not
+-- used by the live client — kept in one place so the split-out of this file stays honest about seams.
+_HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next_level }

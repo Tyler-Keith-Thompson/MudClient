@@ -9,7 +9,7 @@
 -- backslash classes like \d through untouched.
 
 state = state or {
-  name = nil, gold = nil, exp = nil, expcap = nil,
+  name = nil, gold = nil, exp = nil, expcap = nil, classes = {},
   hp = nil, maxhp = nil, mana = nil, maxmana = nil, stam = nil, maxstam = nil,
   position = nil, room_id = nil, room_name = nil, room_coord = nil, area = nil, terrain = nil,
   fighting = false, fight_name = nil, fight_pct = nil,
@@ -25,15 +25,21 @@ state = state or {
 }
 
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
+-- "Ready" = recovered enough to keep exploring: every vital at least 90%. Drives the `recover` alias's
+-- auto-stand and the AI's " (ready)" readiness label, so both share one definition.
+local READY_PCT = 0.90
 local function ready()
-  return pct(state.hp, state.maxhp) > 0.85 and pct(state.mana, state.maxmana) > 0.85
-     and pct(state.stam, state.maxstam) > 0.85
+  return pct(state.hp, state.maxhp) >= READY_PCT and pct(state.mana, state.maxmana) >= READY_PCT
+     and pct(state.stam, state.maxstam) >= READY_PCT
 end
 
 local function choose_recovery_position()
   local hp, mp, sp = pct(state.hp, state.maxhp), pct(state.mana, state.maxmana), pct(state.stam, state.maxstam)
   if hp > 0.85 and mp < 1 and sp > 0.75 then send("rest") else send("sleep") end
 end
+
+-- Exposed for the test harness (Scripts/tests/recover_spec.lua).
+_AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -71,8 +77,55 @@ end
 -- Character / progress
 trigger([[^kxwt_myname (.+)$]],   function(_, n) state.name = n end)
 trigger([[^kxwt_gold (-?\d+)]],   function(_, g) state.gold = tonumber(g) end)
+-- kxwt_exp is your unspent EXPERIENCE POOL; kxwt_expcap is the most you can earn from a SINGLE KILL
+-- (a static-ish ceiling), NOT experience-to-level. The exp needed to level isn't a kxwt field — it only
+-- appears in the `level`/`score` table, so we scrape that below.
 trigger([[^kxwt_exp (-?\d+)]],    function(_, e) state.exp = tonumber(e) end)
 trigger([[^kxwt_expcap (-?\d+)]], function(_, e) state.expcap = tonumber(e) end)
+
+-- Per-class level costs, scraped from the `level`/`score` table. Rows look like:
+--   "Mage          8                27000   (100%)   <- You can level!"
+-- i.e. <Class> <current level> [micro] <exp cost to next level> (<percent>%). The header resets the
+-- set so a fresh table clears stale classes. The HUD combines this (cached) with the LIVE exp pool to
+-- show how much experience remains to level your cheapest class. Costs go stale after you level until
+-- you run `level`/`score` again — which you do at a trainer anyway, so it refreshes when it matters.
+state.classes = state.classes or {}
+
+-- Persist the scraped class costs so the HUD's "exp to level" survives a relaunch without you re-running
+-- `level`. They go stale after you actually level (until you run `level` again, which re-scrapes), but a
+-- starting point beats nothing. Small dedicated file — kept out of AIPilot's map save.
+local CLASSES_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/classes.lua"
+local function save_classes()
+  local f = io.open(CLASSES_FILE, "w")
+  if not f then return end
+  local parts = {}
+  for name, c in pairs(state.classes) do
+    parts[#parts + 1] = string.format("[%q]={level=%d,cost=%d}", name, c.level or 0, c.cost or 0)
+  end
+  f:write("return {" .. table.concat(parts, ",") .. "}")
+  f:close()
+end
+local classes_gen = 0
+local function schedule_classes_save()          -- debounce: coalesce a whole table's rows into one write
+  classes_gen = classes_gen + 1
+  local g = classes_gen
+  after(2, function() if g == classes_gen then save_classes() end end)
+end
+-- Load once at startup (not on a live `#ai reload`, where state already holds the fresh table).
+if not next(state.classes) then
+  local chunk = loadfile(CLASSES_FILE)
+  if chunk then local ok, t = pcall(chunk); if ok and type(t) == "table" then state.classes = t end end
+end
+
+trigger([[^Class +Level +.*Exp Cost]], function() state.classes = {} end)
+-- Row: "<Class>  <level>  [micro]  <exp cost>  ( <pct>%)". The percent is space-padded for alignment
+-- (e.g. "( 92%)"), so allow spaces after the "(" — matching only "(100%)" dropped every class you can't
+-- yet level, which was the whole point of the widget.
+trigger([[^(Mage|Cleric|Thief|Warrior|Necromancer|Druid) +(\d+) +.*?(\d+) +\( *\d+%\)]],
+  function(_, cls, lvl, cost)
+    state.classes[cls] = { level = tonumber(lvl), cost = tonumber(cost) }
+    schedule_classes_save()
+  end)
 
 -- Prompt: current/max for hp, mana, stamina. May complete a recovery.
 trigger([[^kxwt_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]], function(_, chp, mhp, cm, mm, cs, ms)
@@ -294,20 +347,24 @@ end
 function in_combat() return state.fighting == true end
 
 -- ===== Corpse automation (kxwt_mdeath-driven) — fully stream/trigger-driven, NO timers =====
--- ON by default (`#kxwt corpse off` to stop). When you're OUT OF COMBAT, walk the corpses in the room
--- BY INDEX (1.corpse, 2.corpse, ...). For each: get all -> harvest teeth -> harvest spellcomps, then
---   * EMPTY corpse -> bsac -> sac. `sac` removes it, so the next corpse shifts into THIS index and we
---     re-process the same index.
---   * DIRTY corpse (still holds items) -> leave it intact and step to the NEXT index.
--- So a dirty corpse never blocks an empty one behind it, and we never sacrifice loot. We stop when
--- there's no corpse at the current index. Every step advances off a real STREAM line — never a timer,
+-- ON by default (`#kxwt corpse off` to stop). Runs only after an actual KILL (not a flee — see below).
+-- When you're OUT OF COMBAT, walk the corpses in the room BY INDEX (1.corpse, 2.corpse, ...). For each:
+-- get all -> harvest teeth -> harvest spellcomps, then
+--   * LOOTED/EMPTY corpse -> bsac -> sac. `sac` removes it, so the next corpse shifts into THIS index
+--     and we re-process the same index.
+--   * DIRTY corpse (inventory full, so items were LEFT behind) -> leave it intact, step to the NEXT index.
+-- So a dirty corpse never blocks one behind it, and we never sacrifice loot we couldn't carry. We stop
+-- when there's no corpse at the current index. Every step advances off a real STREAM line — never a timer,
 -- so nothing fires late. We always ATTEMPT each harvest and let the game reject it instantly when
 -- teeth are full / you lack the skill (that reply both advances us and guarantees the loot response
 -- has already arrived, so the empty/dirty decision is never made early).
-local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil }
+local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil, killed = false }
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
 
-function corpse_done() corpse.active = false; corpse.step = nil; corpse.idx = 1 end
+-- `killed` = a mob actually DIED this fight (kxwt_mdeath), so combat ending means we have corpses to
+-- work. Cleared here (and on a room change), so ending combat by FLEEING — which changes rooms and
+-- leaves no corpse of ours — never kicks off looting.
+function corpse_done() corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false end
 
 function corpse_start()
   if not corpse.on or corpse.active or in_combat() then return end
@@ -355,9 +412,12 @@ function corpse_sac()
   corpse_process()                          -- ...so re-process the SAME index
 end
 
--- Kill / combat-end -> (re)start walking the room's corpses. Both are stream events (no polling).
-trigger([[^kxwt_mdeath (.+)$]], function() corpse_start() end)
-trigger([[^kxwt_fighting -1$]], function() corpse_start() end)
+-- A mob DIED -> remember it and try to start (usually a no-op: you're still fighting, so corpse_start
+-- bails; the real start is when combat ENDS below). kxwt_fighting -1 fires when combat ends for ANY
+-- reason, so only walk corpses if a kill actually happened this fight — fleeing ends combat with no
+-- corpse of ours (and moves us), and must NOT trigger looting.
+trigger([[^kxwt_mdeath (.+)$]], function() corpse.killed = true; corpse_start() end)
+trigger([[^kxwt_fighting -1$]], function() if corpse.killed then corpse_start() end end)
 
 -- Room change abandons this room's corpses (they don't follow you) -> stop, so we never target a
 -- corpse in the wrong room (e.g. after fleeing).
@@ -366,13 +426,18 @@ trigger([[^kxwt_rvnum (-?\d+)]], function(_, vnum)
   corpse.room = vnum
 end)
 
--- No corpse at the current index -> the room's corpses are done.
+-- No corpse at the current index -> the room's corpses are done. The `'<n>.corpse'` miss is how the
+-- index-walk detects "no more corpses", so gag it: it's internal plumbing, not something you did.
+gag([[^You don't see anything named '\d+\.corpse']])
 trigger([[^You don't see anything named]], function() if corpse.active then corpse_done() end end)
 trigger([[^You don't see that here]], function() if corpse.active then corpse_done() end end)
 
--- Loot outcome -> this corpse still has items, so don't sacrifice it (leave it, step to the next).
+-- Loot outcome -> we couldn't take everything (inventory full), so items REMAIN in this corpse: leave
+-- it intact (don't sacrifice loot) and step to the next index. NOTE: we deliberately do NOT treat the
+-- "(on ground) the corpse of X contains:" loot HEADER as dirty — that line prints on every corpse that
+-- has items, even when we then take them all, and mis-flagging it made fully-looted corpses get skipped
+-- (and probe a phantom next index) instead of sacrificed.
 trigger([[^You can't carry that many items]], function() if corpse.active then corpse.dirty = true end end)
-trigger([[^\(on ground\) the corpse of]], function() if corpse.active then corpse.dirty = true end end)
 
 -- Harvest terminal lines (^-anchored so another player can't fire them). Success-complete OR the
 -- instant "full"/"no skill" rejection — either way the harvest step is finished, so advance.
@@ -380,6 +445,7 @@ trigger([[^You don't see any usable]], function() corpse_harvest_done() end)    
 trigger([[^You can't safely carry any more teeth]], function() corpse_harvest_done() end) -- teeth full
 trigger([[^Your collected teeth grow restless]], function() corpse_harvest_done() end)    -- teeth full
 trigger([[^You don't know enough about the undead]], function() corpse_harvest_done() end) -- no spellcomp skill
+trigger([[^Looks like the corpse of .+ is too damaged for you to use]], function() corpse_harvest_done() end) -- corpse too mangled to harvest -> skip, keep going
 
 -- Blood sacrifice result (success OR the undead/"not intact" refusal) -> the final sacrifice.
 trigger([[^You sacrifice blood from]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
@@ -416,12 +482,59 @@ RECOVER: 'rest' or 'sleep' to heal hp/mana/stamina; 'stand' or 'wake' when recov
 PROGRESS: at a trainer, 'level', 'train', and 'practice' improve you; 'slist' shows newly available spells/skills.]]
 end
 
--- Aliases: `state` dumps the snapshot; `recover` toggles the recovery routine.
+-- Aliases: `state` dumps the snapshot; `recover` rests/sleeps until ready, then auto-stands.
 alias([[^state$]], function() echo(describe_state()) end)
+-- `recover` — sit/sleep to heal and STAND automatically once every vital is back to 90%+ (the auto-stand
+-- lives in the kxwt_prompt trigger, which watches ready()). Typing `recover` again cancels; if you're
+-- already recovered it just says so. choose_recovery_position picks rest vs sleep for the situation.
 alias([[^recover$]], function()
   if state.recover then
-    echo("Ending recovery"); state.recover = false
-  elseif not ready() then
-    echo("Starting recovery"); state.recover = true; choose_recovery_position()
+    echo("Ending recovery."); state.recover = false
+  elseif ready() then
+    echo("Already recovered — all vitals at 90%+.")
+  else
+    echo("Recovering — resting/sleeping; I'll stand you up once every vital hits 90%.")
+    state.recover = true
+    choose_recovery_position()
   end
 end)
+
+-- `#test` — run the Lua test suite against the CURRENTLY-LOADED scripts, in this same Lua state, so you
+-- can verify a change right after `#ai reload`. Re-reads the harness + every Scripts/tests/*.lua so it
+-- always reflects the latest edits. Pure Lua; no external interpreter or build step. `if command then`
+-- guards an un-relaunched binary that predates the `command` builtin.
+if command then command("test", function() run_test_suite() end) end
+-- Returns (pass, fail) so a CLI runner can set its exit code; the in-app `#test` just ignores them.
+function run_test_suite()
+  local pass, fail = 0, 0
+  local ok, err = pcall(function()
+    dofile("Scripts/testing.lua")   -- (re)defines test/expect/run_tests/reset_tests/capture_update/count
+    reset_tests()
+    -- Discover spec files by globbing the tests dir (CWD is the repo root, as with `#load`). Falls back
+    -- to a manifest if io.popen is unavailable, so new spec files just need adding to TEST_SPECS below.
+    local files = {}
+    local p = io.popen and io.popen("ls Scripts/tests/*.lua 2>/dev/null")
+    if p then for f in p:lines() do files[#files + 1] = f end; p:close() end
+    if #files == 0 then
+      TEST_SPECS = TEST_SPECS or { "Scripts/tests/hud_spec.lua", "Scripts/tests/aipilot_spec.lua" }
+      for _, f in ipairs(TEST_SPECS) do
+        local fh = io.open(f, "r")
+        if fh then fh:close(); files[#files + 1] = f end
+      end
+    end
+    table.sort(files)
+    if #files == 0 then echo("[test] no spec files found under Scripts/tests/"); return end
+    echo(string.format("[test] running %d spec file(s)…", #files))
+    for _, f in ipairs(files) do
+      local okf, e = pcall(dofile, f)
+      if not okf then
+        fail = fail + 1
+        echo("[test] \27[31mfailed to load " .. f .. ": " .. tostring(e) .. "\27[0m")
+      end
+    end
+    local p, fl = run_tests()
+    pass, fail = pass + p, fail + fl
+  end)
+  if not ok then echo("[test] \27[31mharness error: " .. tostring(err) .. "\27[0m"); return 0, 1 end
+  return pass, fail
+end
