@@ -1516,14 +1516,84 @@ function mark_death()
     .. (r.area and (" — " .. r.area) or "") .. ". `goto death` to return for your corpse.\27[0m")
 end
 
+-- Tunable costs (in walk-step equivalents) for the walk-vs-bridge decision below. Walking is the slow,
+-- expensive thing; the waypoint network is cheap — so these are small on purpose and the pilot ends up
+-- recall-happy. Kept as locals so a single edit re-tunes both the planner and the live bridge.
+--   HOP_COST           — a waypoint hop ≈ this many walk-steps (command latency + landing settle).
+--   RECALL_COST        — entering the network by recall (cheap and reliable enough; a couple retries at
+--                        worst). Deliberately LOW so recall beats a long walk-to-waypoint entry.
+--   BRIDGE_MIN_SAVINGS — hysteresis: only bridge when it saves at least this many steps over walking, so
+--                        we don't bridge to shave off a step or two (and don't thrash at the boundary).
+local HOP_COST, RECALL_COST, BRIDGE_MIN_SAVINGS = 3, 5, 5
+
+-- Cost (steps) + action to get from `here` onto the waypoint network. Standing on a waypoint is free.
+-- Otherwise we PREFER recall (it's cheap) and only walk to a waypoint room when one is strictly closer
+-- than a recall — the choice flips exactly at RECALL_COST. Returns (cost, walk_path) where a nil
+-- walk_path means "enter by recall".
+local function network_entry(here)
+  if P.rooms[here] and P.rooms[here].waypoint then return 0, nil end
+  local wpath = find_path_from(here, function(id) return id ~= here and P.rooms[id] and P.rooms[id].waypoint end)
+  if wpath and #wpath > 0 and #wpath < RECALL_COST then return #wpath, wpath end
+  return RECALL_COST, nil
+end
+
+-- Estimated cost of bridging from `here` to `label` via waypoint room `target_wp`, or nil when that
+-- bridge can't actually complete — no target, its hop NUMBER is unknown (we'd stall mid-bridge asking for
+-- a number), or the final leg wp→mark isn't walkable. Never estimate a bridge we couldn't finish.
+-- Returns a table { cost, entry_cost, entry_path, final_leg }.
+local function bridge_estimate(here, label, target_wp)
+  if not target_wp or not waypoint_num_for_room(target_wp) then return nil end
+  local final_leg
+  if has_mark(P.rooms[target_wp], label) then
+    final_leg = 0
+  else
+    local fpath = find_path_from(target_wp, function(id) return id ~= target_wp and has_mark(P.rooms[id], label) end)
+    if not fpath then return nil end
+    final_leg = #fpath
+  end
+  local entry_cost, entry_path = network_entry(here)
+  return { cost = entry_cost + HOP_COST + final_leg, entry_cost = entry_cost,
+           entry_path = entry_path, final_leg = final_leg }
+end
+
+-- PURE decision helper for `goto <mark>`: compare walking the whole way against bridging via the waypoint
+-- network, and return which is cheaper. No side effects (no send/echo) so it's spec-testable. Returns:
+--   { mode = "walk",   path = <dirs>, walk_cost = n }
+--   { mode = "bridge", target_wp = id, walk_cost = n|math.huge, bridge_cost = n,
+--                      entry_cost = n, entry_path = <dirs>|nil, final_leg = n }
+--   { mode = "none",   reason = "unmarked" | "unreachable" }
+-- Rule: bridge iff a completable bridge exists AND bridge_cost + BRIDGE_MIN_SAVINGS < walk_cost; else
+-- walk if a walk path exists; else bridge if one's possible at all (today's unwalkable fallback); else
+-- report why nothing works.
+local function plan_goto_route(label)
+  local here = P.current_room
+  local walk_path = find_path_from(here, function(id) return id ~= here and has_mark(P.rooms[id], label) end)
+  local walk_cost = (walk_path and #walk_path > 0) and #walk_path or math.huge
+
+  local target_wp = nearest_waypoint_for(label)
+  local be = bridge_estimate(here, label, target_wp)
+  local function bridge_result()
+    return { mode = "bridge", target_wp = target_wp, walk_cost = walk_cost, bridge_cost = be.cost,
+             entry_cost = be.entry_cost, entry_path = be.entry_path, final_leg = be.final_leg }
+  end
+
+  if be and be.cost + BRIDGE_MIN_SAVINGS < walk_cost then return bridge_result() end
+  if walk_path and #walk_path > 0 then return { mode = "walk", path = walk_path, walk_cost = walk_cost } end
+  if be then return bridge_result() end   -- not walkable at all — bridge is the only way (today's fallback)
+
+  local exists = false
+  for _, r in pairs(P.rooms) do if has_mark(r, label) then exists = true; break end end
+  return { mode = "none", reason = exists and "unreachable" or "unmarked" }
+end
+
 -- `goto <label>` (human alias) — travel to the NEAREST room you've tagged with `mark <label>` (e.g.
 -- `goto trainer`), reusing the stream-driven nav walker. Matches a mark by substring, so `goto train`
 -- reaches a "trainer". `goto stop` cancels.
 --
--- If the mark is walkable, it just walks. If not, it BRIDGES automatically (see goto_bridge_advance):
--- recall onto the waypoint network, waypoint-hop to the waypoint nearest the mark, then walk the final
--- leg. The hop uses the number LEARNED from watching you actually `waypoint <n>` — never a fragile
--- description match — so it only auto-hops to a waypoint whose number it has seen you use.
+-- It doesn't just walk when a walk path exists — it costs walking against bridging (recall/waypoint-hop
+-- + a short final leg) and takes the CHEAPER one (see plan_goto_route / goto_bridge_advance). A long
+-- overland trek to a mark near a known waypoint bridges instead. The hop uses the number LEARNED from
+-- watching you actually `waypoint <n>` — never a fragile description match.
 function human_goto(label)
   label = trim(label or ""):lower()
   if label == "" then echo("[goto] usage: goto <mark>  (see `#mark`; `goto stop` cancels)"); return end
@@ -1591,31 +1661,49 @@ function human_goto(label)
   if has_mark(P.rooms[P.current_room], label) then
     P.goto_bridge = nil; echo("[goto] you're already at a '" .. label .. "'."); return
   end
-  local path = find_path(function(id) return id ~= P.current_room and has_mark(P.rooms[id], label) end)
-  if path and #path > 0 then
+
+  local plan = plan_goto_route(label)
+  if plan.mode == "walk" then
     P.goto_bridge = nil
+    local path = plan.path
     echo(string.format("[goto] routing to '%s' (%d step%s) — 'goto stop' to cancel.",
       label, #path, #path == 1 and "" or "s"))
     P.nav = { path = path, idx = 1, dest = "'" .. label .. "'", gen = 0 }
     nav_step()
     return
   end
-  -- Not walkable. Distinguish "not tagged anywhere" from "tagged, but not reachable overland".
-  local exists = false
-  for _, r in pairs(P.rooms) do if has_mark(r, label) then exists = true; break end end
-  if not exists then
+  if plan.mode == "bridge" then
+    P.goto_bridge = { label = label, target_wp = plan.target_wp, tries = 0, hops = 0 }
+    if plan.walk_cost < math.huge then
+      -- Walking is possible but pricier — bridge by CHOICE (this is the new cheaper-route behavior).
+      echo(string.format("[goto] '%s' is %d step%s on foot — bridging via waypoint (~%d) instead ('goto stop' to cancel).",
+        label, plan.walk_cost, plan.walk_cost == 1 and "" or "s", plan.bridge_cost))
+    else
+      -- Not walkable at all — the original fallback.
+      echo("[goto] '" .. label .. "' isn't walkable from here — bridging via recall/waypoint ('goto stop' to cancel).")
+    end
+    goto_bridge_advance()
+    return
+  end
+  -- plan.mode == "none": distinguish "not tagged anywhere" from "tagged, but not reachable overland".
+  if plan.reason == "unmarked" then
     echo("[goto] nothing is marked '" .. label .. "'. Stand in the room and `#mark " .. label .. "` first.")
     return
   end
+  -- "unreachable" also covers a mark that IS walkable from a known waypoint whose NUMBER we haven't
+  -- learned (bridge_estimate refuses bridges that would stall mid-hop). Say so accurately instead of
+  -- claiming no waypoint reaches it.
   local wp = nearest_waypoint_for(label)
-  if not wp then
+  if wp then
+    local rn = P.rooms[wp] and P.rooms[wp].name
+    echo("[goto] '" .. label .. "' is walkable from " .. (rn and ("'" .. rn .. "'") or "a waypoint")
+      .. ", but I don't know that waypoint's number yet — run `waypoint`, or hop there once with"
+      .. " `waypoint <n>`, so I can learn it.")
+    echo(waypoints_hint())
+  else
     echo("[goto] '" .. label .. "' is marked, but not reachable on foot from any waypoint you've walked. "
       .. "Explore a route, or set a waypoint near it.")
-    return
   end
-  P.goto_bridge = { label = label, target_wp = wp, tries = 0, hops = 0 }
-  echo("[goto] '" .. label .. "' isn't walkable from here — bridging via recall/waypoint ('goto stop' to cancel).")
-  goto_bridge_advance()
 end
 alias([[^goto (.+)$]], function(_, label) human_goto(label) end)
 
@@ -1648,6 +1736,9 @@ function goto_bridge_advance()
   local b = P.goto_bridge
   if not b then return end
   if in_combat() then echo("[goto] combat — stopping the bridge."); P.goto_bridge = nil; return end
+  -- A bridge-entry walk is in progress (see step 3): let the nav walker reach the waypoint before we
+  -- re-decide. The walker keeps the bridge alive; on arrival P.nav clears and this re-runs to hop.
+  if P.nav then return end
   local here = P.current_room
 
   -- `goto waypoint`: any waypoint room satisfies it. If we've landed on one, we're done; else walk to
@@ -1666,14 +1757,20 @@ function goto_bridge_advance()
     return
   end
 
-  -- 1. Can we walk to the mark from here now?
+  -- 1. Walk the final leg from here — but only when walking is now within BRIDGE_MIN_SAVINGS of what it
+  --    would still cost to keep bridging (or no further hop is possible/known). If bridging on is clearly
+  --    cheaper, DON'T greedily grab a long walk here — fall through and keep hopping.
   local path = find_path_from(here, function(id) return id ~= here and has_mark(P.rooms[id], b.label) end)
   if path and #path > 0 then
-    P.goto_bridge = nil
-    echo(string.format("[goto] final leg to '%s' (%d step%s).", b.label, #path, #path == 1 and "" or "s"))
-    P.nav = { path = path, idx = 1, dest = "'" .. b.label .. "'", gen = 0 }
-    nav_step()
-    return
+    local be = bridge_estimate(here, b.label, b.target_wp)
+    if not be or #path <= be.cost + BRIDGE_MIN_SAVINGS then
+      P.goto_bridge = nil
+      echo(string.format("[goto] final leg to '%s' (%d step%s).", b.label, #path, #path == 1 and "" or "s"))
+      P.nav = { path = path, idx = 1, dest = "'" .. b.label .. "'", gen = 0 }
+      nav_step()
+      return
+    end
+    -- else: keep hopping (bridge is meaningfully cheaper) — fall through to steps 2/3.
   end
   if has_mark(P.rooms[here], b.label) then
     P.goto_bridge = nil; echo("[goto] arrived at '" .. b.label .. "'."); return
@@ -1710,7 +1807,18 @@ function goto_bridge_advance()
     return
   end
 
-  -- 3. Not on a waypoint and can't walk there: recall onto the network.
+  -- 3. Not on a waypoint and can't walk to the mark: get onto the network. Recall is cheap and usually
+  --    the right move; only walk to a waypoint room if one is strictly closer than a recall (RECALL_COST).
+  --    The walk keeps the bridge alive (the P.nav guard at the top stops re-entry churn); on arrival at
+  --    the waypoint this re-runs and step 2 hops.
+  local _, entry_path = network_entry(here)
+  if entry_path then
+    echo(string.format("[goto] walking to a waypoint %d step%s away to get onto the network.",
+      #entry_path, #entry_path == 1 and "" or "s"))
+    P.nav = { path = entry_path, idx = 1, dest = "a waypoint", gen = 0 }
+    nav_step()
+    return
+  end
   goto_recall_attempt()
 end
 
@@ -2109,4 +2217,6 @@ _AIP_TEST = {
   path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,
   best_explore_dir = best_explore_dir, block_last_move = block_last_move,
   arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
+  plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
+  HOP_COST = HOP_COST, RECALL_COST = RECALL_COST, BRIDGE_MIN_SAVINGS = BRIDGE_MIN_SAVINGS,
 }
