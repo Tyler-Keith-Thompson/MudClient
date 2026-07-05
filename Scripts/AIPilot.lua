@@ -494,6 +494,35 @@ end
 -- Path from the CURRENT room (the common case).
 local function find_path(matches) return find_path_from(P.current_room, matches) end
 
+-- The reachable room whose kxwt COORDINATES sit closest to `coord`. This is the graceful fallback for
+-- `goto death`: the room you died in is often inside an area you entered through a portal / special exit
+-- the move-graph can't retrace, so there's no walkable route straight to it — get as close as the
+-- explored map allows instead of giving up. Same plane strongly preferred (a huge cross-plane penalty),
+-- then squared 3D distance. Returns a reachable room id (never the current room), or nil.
+local function nearest_reachable_to_coord(coord)
+  if not coord then return nil end
+  local start = P.current_room
+  if not start or not P.rooms[start] then return nil end
+  local seen = { [start] = true }
+  local queue, head = { start }, 1
+  local best, best_d
+  while head <= #queue do
+    local id = queue[head]; head = head + 1
+    local r = P.rooms[id]
+    if id ~= start and r and r.coord then
+      local c = r.coord
+      local dp = (c[4] ~= coord[4]) and 1e9 or 0                 -- different plane: almost never prefer it
+      local dx, dy, dz = c[1] - coord[1], c[2] - coord[2], c[3] - coord[3]
+      local d = dp + dx * dx + dy * dy + dz * dz
+      if not best_d or d < best_d then best_d, best = d, id end
+    end
+    for dir, nb in pairs(r and r.moves or {}) do
+      if not seen[nb] and not (r.blocked and r.blocked[dir]) then seen[nb] = true; queue[#queue + 1] = nb end
+    end
+  end
+  return best
+end
+
 -- Built-in `goto` targets that mean "a waypoint room" rather than a player mark.
 local WP_ALIASES = { waypoint = true, waypoints = true, wp = true }
 
@@ -1458,6 +1487,32 @@ function mark_command(args)
     .. " as '" .. label .. "'. `goto " .. label .. "` to return.")
 end
 
+-- Auto-mark where you DIED so you can `goto death` back for your corpse. Dying teleports you to recall,
+-- so we capture the room NOW — the "You have been KILLED" line is processed before the recall
+-- room-change overwrites P.current_room. Only the latest death is kept (old "death" marks are cleared
+-- first), and it's stored as an ordinary landmark labelled "death", so it persists with the map, shows
+-- ★ on the minimap, and rides the existing goto/navigate machinery. `goto death` adds a nearest-point
+-- fallback for the common case where the death room's area isn't walkable back to (see human_goto).
+function mark_death()
+  local id = P.current_room
+  local r = id and P.rooms[id]
+  if not r or not r.coord then
+    -- Can't place this room — keep any PREVIOUS death mark rather than wiping it for nothing.
+    echo("\27[1;31m☠ you DIED — but the map hasn't placed this room, so I can't mark it (any earlier "
+      .. "death mark is kept).\27[0m")
+    return
+  end
+  -- Drop any previous death mark first, so `goto death` always heads to your MOST RECENT corpse.
+  for _, rr in pairs(P.rooms) do
+    if rr.marks and rr.marks.death then rr.marks.death = nil; if not next(rr.marks) then rr.marks = nil end end
+  end
+  r.marks = r.marks or {}
+  r.marks.death = true
+  schedule_save()
+  echo("\27[1;31m☠ you DIED at " .. (r.name or ("room " .. tostring(id)))
+    .. (r.area and (" — " .. r.area) or "") .. ". `goto death` to return for your corpse.\27[0m")
+end
+
 -- `goto <label>` (human alias) — travel to the NEAREST room you've tagged with `mark <label>` (e.g.
 -- `goto trainer`), reusing the stream-driven nav walker. Matches a mark by substring, so `goto train`
 -- reaches a "trainer". `goto stop` cancels.
@@ -1475,6 +1530,39 @@ function human_goto(label)
     return
   end
   if in_combat() then echo("[goto] not while you're fighting."); return end
+
+  -- Built-in target: `goto death` (or `goto corpse`) returns you to where you last died. The room is
+  -- auto-tagged "death" on the "You have been KILLED" line (see mark_death). If it's walkable, walk it;
+  -- if the map can't retrace a route (you entered its area through a portal/special exit), route to the
+  -- nearest reachable room by coordinates instead — as close to your corpse as the explored map allows.
+  if label == "death" or label == "corpse" then
+    P.goto_bridge = nil
+    local dead_id
+    for id, r in pairs(P.rooms) do if r.marks and r.marks.death then dead_id = id; break end end
+    if not dead_id then
+      echo("[goto] no death recorded yet — nothing to return to."); return
+    end
+    if dead_id == P.current_room then echo("[goto] you're already where you died."); return end
+    local path = find_path(function(id) return id == dead_id end)
+    if path and #path > 0 then
+      echo(string.format("[goto] returning to where you died (%d step%s) — 'goto stop' to cancel.",
+        #path, #path == 1 and "" or "s"))
+      P.nav = { path = path, idx = 1, dest = "your corpse", gen = 0 }
+      nav_step(); return
+    end
+    -- Not walkable straight there — get as close as the explored map allows.
+    local near = nearest_reachable_to_coord(P.rooms[dead_id].coord)
+    local npath = near and find_path(function(id) return id == near end)
+    if npath and #npath > 0 then
+      echo(string.format("[goto] can't retrace the exact room you died in — routing to the nearest "
+        .. "reachable point (%d step%s) — 'goto stop' to cancel.", #npath, #npath == 1 and "" or "s"))
+      P.nav = { path = npath, idx = 1, dest = "near your corpse", gen = 0 }
+      nav_step(); return
+    end
+    echo("[goto] can't reach where you died from here on foot. `goto waypoint` to get onto the "
+      .. "fast-travel network first, then try again.")
+    return
+  end
 
   -- Built-in target: `goto waypoint` (or `wp`) heads to the nearest known waypoint room. If none is
   -- walkable, recall lands you on your recall-site waypoint (which IS a waypoint) — so that's the bridge.
@@ -1983,6 +2071,8 @@ trigger([[^kxwt_waypoint]], function()
   local id = P.current_room
   if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
 end)
+-- Your own death (only ever printed for YOU) teleports you to recall — mark the corpse room first.
+trigger([[^You have been KILLED]], function() mark_death() end)
 trigger([[.*]], function(line) pilot_observe(line) end)
 
 load_map()
@@ -2001,6 +2091,7 @@ end
 -- so map/nav specs can build a throwaway room table and drive real pathing. Not used by the client.
 _AIP_TEST = {
   has_mark = has_mark, marks_list = marks_list, find_path = find_path,
+  nearest_reachable_to_coord = nearest_reachable_to_coord, mark_death = mark_death,
   find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
   parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
   learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,

@@ -245,8 +245,13 @@ final class LLMClient: @unchecked Sendable {
         let (data, _) = try await URLSession.shared.data(from: try Self.url(base, "/models"))
         guard
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let arr = json["data"] as? [[String: Any]],
-            let id = arr.first?["id"] as? String
+            let arr = json["data"] as? [[String: Any]]
+        else { throw Error.noModel }
+        let ids = arr.compactMap { $0["id"] as? String }
+        // Skip EMBEDDING models when auto-discovering a CHAT model: LM Studio often lists an embedding
+        // model (e.g. the RAG index's text-embedding-nomic-…) first, and sending it a chat completion
+        // 400s. Prefer the first non-embedding id; fall back to the first id only if that's all there is.
+        guard let id = ids.first(where: { !$0.lowercased().contains("embed") }) ?? ids.first
         else { throw Error.noModel }
         lock.lock(); resolvedModel = id; lock.unlock()
         return id

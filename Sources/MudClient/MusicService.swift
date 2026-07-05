@@ -9,8 +9,9 @@
 //  the scripts, not here.
 //
 //  Multiple channels sound at once (each is one looping player); `play` crossfades over whatever the
-//  channel held, `stop` fades it out. If a track has no matching file it simply no-ops. Player objects
-//  are only touched on the main queue.
+//  channel held, `stop` fades it out. If a track has no matching file it simply no-ops. A player is
+//  CONSTRUCTED off the main queue (decoding/soundfont-loading is expensive and would hitch the UI), but
+//  once built it — and the `channels` map — are only touched on the main queue.
 //
 //  Config (env vars):
 //    MUD_SOUND_DIR      directory holding your audio files (default ~/Documents/MudClient/sounds if present)
@@ -27,9 +28,16 @@ final class MusicService: @unchecked Sendable {
     private let volumeFade: TimeInterval = 0.4
     private let soundDir: URL?
     private let soundFont: URL?
-    private var channels: [String: ChannelPlayer] = [:]   // main-queue only
-    /// Master volume (0…1) applied to every channel. Set once in `init`, then only touched on the main
-    /// queue. Deliberately low by default so ambience sits under the game text rather than over it.
+    private var channels: [String: ChannelPlayer] = [:]   // audioQueue only
+    /// The single serial queue ALL audio work runs on — decoding, `prepareToPlay`, and every player
+    /// control call (`play`/`stop`/fades). None of it may touch the main queue: stdin keystrokes are
+    /// serviced there, and both the decode (tens–hundreds of ms) AND `AVAudioPlayer.play()`/`stop()`
+    /// (which synchronize with CoreAudio's IO thread) block their caller long enough to hitch typing
+    /// when combat layers sound in and crossfades it out. Serial so `channels` needs no extra locking
+    /// and rapid play/stop on a channel still apply in the order they were issued.
+    private let audioQueue = DispatchQueue(label: "MusicService.audio", qos: .userInitiated)
+    /// Master volume (0…1) applied to every channel. Set in `init`, then only touched on `audioQueue`.
+    /// Deliberately low by default so ambience sits under the game text rather than over it.
     private var masterVolume: Float
 
     init() {
@@ -55,7 +63,8 @@ final class MusicService: @unchecked Sendable {
     /// No-op if nothing matches.
     func play(channel: String, track: String) {
         guard let file = resolve(track) else { return }
-        DispatchQueue.main.async { [weak self] in
+        // Everything — decode, prepare, and the play/crossfade — happens on audioQueue, never main.
+        audioQueue.async { [weak self] in
             guard let self, let player = self.makePlayer(file) else { return }
             let old = self.channels[channel]
             self.channels[channel] = player
@@ -67,7 +76,7 @@ final class MusicService: @unchecked Sendable {
 
     /// Fade out and stop `channel`.
     func stop(channel: String) {
-        DispatchQueue.main.async { [weak self] in
+        audioQueue.async { [weak self] in
             guard let self else { return }
             self.channels.removeValue(forKey: channel)?.fadeOutAndStop(duration: self.crossfade)
         }
@@ -77,7 +86,7 @@ final class MusicService: @unchecked Sendable {
     /// channels to the new level and applying it to anything started afterward. Clamped to 0…100.
     func setVolume(percent: Double) {
         let v = Float(max(0, min(100, percent)) / 100)
-        DispatchQueue.main.async { [weak self] in
+        audioQueue.async { [weak self] in
             guard let self else { return }
             self.masterVolume = v
             for player in self.channels.values { player.fade(to: v, duration: self.volumeFade) }
@@ -106,13 +115,14 @@ final class MusicService: @unchecked Sendable {
 
     private func makePlayer(_ url: URL) -> ChannelPlayer? {
         switch url.pathExtension.lowercased() {
-        case "mid", "midi": return MidiChannelPlayer(url: url, soundFont: soundFont)
-        default:            return AudioChannelPlayer(url: url)
+        case "mid", "midi": return MidiChannelPlayer(url: url, soundFont: soundFont, queue: audioQueue)
+        default:            return AudioChannelPlayer(url: url, queue: audioQueue)
         }
     }
 }
 
-/// A single channel's looping player. All calls happen on the main queue.
+/// A single channel's looping player. Constructed and driven entirely on `MusicService.audioQueue`
+/// (passed in at init) — no call ever touches the main queue.
 private protocol ChannelPlayer: AnyObject {
     func start(volume: Float)
     func fade(to volume: Float, duration: TimeInterval)
@@ -122,7 +132,9 @@ private protocol ChannelPlayer: AnyObject {
 /// Looping audio (mp3/m4a/wav/aiff/caf…) via AVAudioPlayer — supports true volume crossfades.
 private final class AudioChannelPlayer: ChannelPlayer {
     private let player: AVAudioPlayer?
-    init(url: URL) {
+    private let queue: DispatchQueue
+    init(url: URL, queue: DispatchQueue) {
+        self.queue = queue
         player = try? AVAudioPlayer(contentsOf: url)
         player?.numberOfLoops = -1
         player?.prepareToPlay()
@@ -132,7 +144,7 @@ private final class AudioChannelPlayer: ChannelPlayer {
     func fadeOutAndStop(duration: TimeInterval) {
         player?.setVolume(0, fadeDuration: duration)
         let p = player
-        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { p?.stop() }
+        queue.asyncAfter(deadline: .now() + duration) { p?.stop() }
     }
 }
 
@@ -141,7 +153,9 @@ private final class AudioChannelPlayer: ChannelPlayer {
 private final class MidiChannelPlayer: ChannelPlayer {
     private var player: AVMIDIPlayer?
     private var stopped = false
-    init(url: URL, soundFont: URL?) {
+    private let queue: DispatchQueue
+    init(url: URL, soundFont: URL?, queue: DispatchQueue) {
+        self.queue = queue
         player = try? AVMIDIPlayer(contentsOf: url, soundBankURL: soundFont)
         player?.prepareToPlay()
     }
@@ -149,7 +163,7 @@ private final class MidiChannelPlayer: ChannelPlayer {
     private func loop() {
         guard !stopped, let p = player else { return }
         p.currentPosition = 0
-        p.play { [weak self] in DispatchQueue.main.async { self?.loop() } }   // restart on finish = loop
+        p.play { [weak self, queue] in queue.async { self?.loop() } }   // restart on finish = loop
     }
     func fade(to volume: Float, duration: TimeInterval) {}   // no volume on AVMIDIPlayer
     func fadeOutAndStop(duration: TimeInterval) { stopped = true; player?.stop() }

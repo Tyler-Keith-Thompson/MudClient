@@ -66,3 +66,53 @@ test("find_path won't route through a known dead-end exit", function()
   expect(path):falsy()          -- the only route is through a blocked exit
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
+
+-- ---- death mark + goto-death nearest-point fallback ----------------------------------------------
+local nearest_reachable_to_coord = _AIP_TEST.nearest_reachable_to_coord
+local mark_death = _AIP_TEST.mark_death
+
+test("nearest_reachable_to_coord picks the closest MOVE-REACHABLE room, preferring same plane", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  -- A -n-> B -n-> C -e-> D. X sits closest to the target but has NO inbound edge (unreachable, like a
+  -- den you can only `enter hole` into). D is the exact xy but on another plane, so the plane penalty
+  -- must keep C (same plane) as the pick.
+  P.rooms = {
+    A = { coord = { 0, 0, 0, 0 },  moves = { north = "B" } },              -- start
+    B = { coord = { 0, 10, 0, 0 }, moves = { north = "C", south = "A" } },
+    C = { coord = { 0, 20, 0, 0 }, moves = { south = "B", east = "D" } },  -- reachable, closest same-plane
+    D = { coord = { 0, 22, 0, 5 }, moves = { west = "C" } },               -- exact xy but plane 5
+    X = { coord = { 0, 21, 0, 0 }, moves = {} },                           -- closest, but UNREACHABLE
+  }
+  P.current_room = "A"
+  local best = nearest_reachable_to_coord({ 0, 22, 0, 0 })
+  expect(best):eq("C")                       -- not X (unreachable), not D (wrong plane)
+  expect(nearest_reachable_to_coord(nil)):falsy()
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("mark_death tags the current room 'death', replacing any earlier one but keeping other labels", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = {
+    here = { coord = { 1, 2, 3, 0 }, name = "the den" },
+    old  = { coord = { 4, 5, 6, 0 }, marks = { death = true, trainer = true } },  -- a prior death + a keeper
+  }
+  P.current_room = "here"
+  mark_death()
+  expect(has_mark(P.rooms.here, "death")):truthy()               -- new corpse marked
+  expect(P.rooms.old.marks and P.rooms.old.marks.death):falsy()  -- old death cleared
+  expect(has_mark(P.rooms.old, "trainer")):truthy()              -- unrelated label preserved
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("mark_death keeps a previous mark when the death room isn't on the map (no coord)", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = {
+    unmapped = {},                                              -- current room, no coord
+    old      = { coord = { 4, 5, 6, 0 }, marks = { death = true } },
+  }
+  P.current_room = "unmapped"
+  mark_death()
+  expect(P.rooms.unmapped.marks and P.rooms.unmapped.marks.death):falsy()  -- nothing to mark
+  expect(has_mark(P.rooms.old, "death")):truthy()                          -- earlier mark NOT wiped
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)

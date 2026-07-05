@@ -33,6 +33,11 @@ local cfg = {
   -- Same trailing prefill the pilot uses: a CLOSED, empty <think> block suppresses Qwen3.x's habit of
   -- spending the whole budget "thinking" and returning nothing. Harmless to hosted Claude.
   think_prefill = "<think>\n\n</think>\n\n",
+  -- Pin the local model EXPLICITLY. The local client otherwise auto-discovers by taking the first id
+  -- from LM Studio's /v1/models — which is the RAG EMBEDDING model (text-embedding-nomic-…). Sending a
+  -- chat completion there 400s ("Invalid model identifier"), so trivia would guess every time. Hardcode
+  -- a real chat model; override with TRIVIA_MODEL (or LMSTUDIO_MODEL) if yours is named differently.
+  model = os.getenv("TRIVIA_MODEL") or os.getenv("LMSTUDIO_MODEL") or "qwen3.6-35b-a3b-mlx",
 }
 cfg.dir = cfg.home .. "/Documents/MudClient"
 cfg.cache_file = cfg.dir .. "/trivia_answers.lua"
@@ -371,6 +376,10 @@ _TRIVIA_TEST = {
   norm_area = norm_area,
   choice_for_level = choice_for_level,
 }
+
+-- Pin the local client to a real chat model (see cfg.model) so ai_local_request doesn't fall through to
+-- LM Studio's embedding model. Guarded for an un-relaunched binary that lacks the builtin.
+if ai_set_local_model then ai_set_local_model(cfg.model) end
 
 load_cache()
 echo(status_line())
