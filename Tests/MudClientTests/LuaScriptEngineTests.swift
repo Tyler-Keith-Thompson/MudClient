@@ -103,8 +103,10 @@ import AppKit
 
 @Test func loadDirectoryRunsTopLevelLuaInOrderExcludingSubdirsAndUnderscored() throws {
     // End-to-end over the REAL host primitives (__list_dir/__path_kind/__run_file) + the pure-Lua
-    // loader: a directory loads its top-level *.lua in alphabetical order (no manifest here), skipping
-    // subdirectories, non-.lua files, and `_`-prefixed files.
+    // loader: a directory loads its top-level *.lua in case-insensitive alphabetical order (there is
+    // no manifest anymore — order emerges from require + declared deps), skipping subdirectories,
+    // non-.lua files, and `_`-prefixed files. Each file is run via require() with the loaded dir added
+    // as a search root; the directory loader busts the cache per file so a second load re-runs them.
     let fm = FileManager.default
     let dir = fm.temporaryDirectory.appendingPathComponent("loadtest-\(UUID().uuidString)")
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -127,6 +129,83 @@ import AppKit
     try engine.load(source: "load(\(luaStringLiteral(dir.path)))")
     engine.evalREPL("echo(_order)")
     #expect(echoed == ["ab"])   // a.lua then b.lua; _priv.lua, notes.txt, sub/ all skipped
+
+    // A second directory load re-runs each file (require cache is busted per file), proving load()'s
+    // interactive "run it again now" intent survives the move to require.
+    echoed.removeAll()
+    try engine.load(source: "load(\(luaStringLiteral(dir.path)))")
+    engine.evalREPL("echo(_order)")
+    #expect(echoed == ["abab"])
+}
+
+// MARK: - Specificity-ordered rule firing
+
+@Test func specificityScoreRanksAnchoredLiteralsAboveWildcards() throws {
+    // The score is a pure function of the pattern source (documented in LuaScriptEngine.specificity).
+    // Anchors and literals raise it; `.*`/`.+` sink it below zero.
+    #expect(LuaScriptEngine.specificity(of: ".*") < 0)
+    #expect(LuaScriptEngine.specificity(of: ".+") < 0)
+    #expect(LuaScriptEngine.specificity(of: "^abc") > LuaScriptEngine.specificity(of: "abc"))      // start anchor
+    #expect(LuaScriptEngine.specificity(of: "abc$") > LuaScriptEngine.specificity(of: "abc"))      // end anchor
+    #expect(LuaScriptEngine.specificity(of: #"^kxwt_hp"#) > LuaScriptEngine.specificity(of: ".*")) // parser ≫ observer
+    // A longer literal prefix is more specific than a shorter one on the same anchor.
+    #expect(LuaScriptEngine.specificity(of: #"^kxwt_rvnum foo"#) > LuaScriptEngine.specificity(of: #"^kxwt_"#))
+}
+
+@Test func specificTriggerFiresBeforeCatchAllObserverRegardlessOfRegistrationOrder() throws {
+    // The exact regression the old manifest / require-edge protected: a catch-all `.*` observer that
+    // reads shared state must fire AFTER the specific parser that writes it — even though the observer
+    // is REGISTERED FIRST here. Specificity ordering (not registration order) delivers it.
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"_v = nil"#)
+    try engine.load(source: #"trigger(".*", function() echo("observed:" .. tostring(_v)) end)"#) // FIRST: observer
+    try engine.load(source: #"trigger([[^val (\d+)]], function(line, n) _v = n end)"#)           // SECOND: parser
+    _ = engine.processLine("val 42")
+    #expect(echoed == ["observed:42"])   // observer saw the parsed value, not nil
+}
+
+@Test func aliasMostSpecificMatchWins() throws {
+    // "first registered wins" is replaced by "most specific match wins": a narrow alias registered
+    // AFTER a broad one still takes the input.
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"_hit = nil"#)
+    try engine.load(source: #"alias(".", function() _hit = "broad" end)"#)      // matches any input
+    try engine.load(source: #"alias("^gg$", function() _hit = "narrow" end)"#)  // narrow, registered later
+    #expect(engine.processAlias("gg"))
+    engine.evalREPL("echo(_hit)")
+    #expect(echoed == ["narrow"])
+}
+
+@Test func explicitPriorityBeatsSpecificity() throws {
+    // opts.priority overrides the specificity heuristic: a broad `.*` with high priority fires before
+    // a highly-specific default-priority trigger on the same line.
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"_first = nil"#)
+    try engine.load(source: #"trigger("^hello world exact", function() if not _first then _first = "specific" end end)"#)
+    try engine.load(source: #"trigger(".*", function() if not _first then _first = "priority" end end, { priority = 100 })"#)
+    _ = engine.processLine("hello world exact")
+    engine.evalREPL("echo(_first)")
+    #expect(echoed == ["priority"])
+}
+
+@Test func equalRankTiebreakIsRegistrationOrder() throws {
+    // Two identical patterns (equal priority + specificity) fire in registration (id) order — a stable,
+    // deterministic tiebreak.
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"_seq = """#)
+    try engine.load(source: #"trigger("^x", function() _seq = _seq .. "1" end)"#)
+    try engine.load(source: #"trigger("^x", function() _seq = _seq .. "2" end)"#)
+    _ = engine.processLine("x")
+    engine.evalREPL("echo(_seq)")
+    #expect(echoed == ["12"])
 }
 
 /// Minimal Lua double-quoted literal for a filesystem path (escapes backslashes/quotes).

@@ -433,10 +433,10 @@ if io then __docs.table_alias[io] = "io" end
 
 -- triggers / aliases / gags / rule lifecycle
 doc("trigger", { sig = "trigger(pattern, handler[, opts]) -> id", group = "triggers",
-  text = "Register a line trigger. handler(line, cap1, …, raw) may return a string (replace the line), false/\"\" (gag), or nil (unchanged). opts = { oneshot=true, class=\"name\" }.",
-  example = "trigger(\"^You are hungry\", function() send(\"eat bread\") end)" })
+  text = "Register a line trigger. handler(line, cap1, …, raw) may return a string (replace the line), false/\"\" (gag), or nil (unchanged). opts = { oneshot=true, class=\"name\", priority=0 }. ALL matching triggers fire, ordered by priority (desc) then pattern SPECIFICITY (desc) then registration order — so specific parsers/rewriters run before broad `.*` observers, which then read the state they wrote. Specificity favours a `^`/`$` anchor and literal characters and penalises `.*`/`.+`; set opts.priority to override.",
+  example = "trigger(\"^You are hungry\", function() send(\"eat bread\") end)  -- opts = { priority = 10 } to force early" })
 doc("alias", { sig = "alias(pattern, handler[, opts]) -> id", group = "triggers",
-  text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger().",
+  text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger() (oneshot/class/priority). The MOST SPECIFIC matching alias wins (priority desc, then specificity desc, then registration order) — a narrow pattern beats a broad one regardless of load order.",
   example = "alias(\"^gg$\", function() send(\"get all from corpse\") end)" })
 doc("gag", { sig = "gag(pattern) -> id", group = "triggers",
   text = "Drop every server line matching the pattern. Removable/toggleable by id like any rule.",
@@ -559,6 +559,11 @@ doc("ai_usage_reset", { sig = "ai_usage_reset()", group = "ai", text = "Reset th
 -- Because top-level script code runs on load, this is also how the app boots (the host runs
 -- `load("Scripts")` at startup) and hot-reloads (`reload()` == clear rules + `load("Scripts")`).
 --
+-- Under the hood every script runs through `require` (a custom package.searcher, below): a module
+-- runs ONCE per session, so load order emerges from declared `require(...)` dependencies at the top of
+-- scripts rather than a sidecar manifest. There is no manifest.lua. `load(path)` busts the module's
+-- cache first so an interactive re-load re-runs it; `reload()` busts the whole script set.
+--
 -- NAME COLLISION: this shadows the Lua stdlib `load` (compile a chunk from a string/function). The
 -- rule is simple and loud: a STRING argument is always a PATH; a non-string (a function, the classic
 -- `load(fn)` chunk-reader form) delegates to the stdlib, still reachable as `loadchunk`. Code that
@@ -566,8 +571,8 @@ doc("ai_usage_reset", { sig = "ai_usage_reset()", group = "ai", text = "Reset th
 loadchunk = loadchunk or load                 -- preserve the stdlib chunk-compiler before we shadow it
 
 -- Directory-loading policy (kept as pure, testable helpers; see Scripts/tests/load_spec.lua):
--- files the directory loader never runs — host-owned / harness-only, plus manifest metadata.
-local LOAD_EXCLUDE = { ["bootstrap.lua"] = true, ["testing.lua"] = true, ["manifest.lua"] = true }
+-- files the directory loader never runs — host-owned (bootstrap) / harness-only (testing).
+local LOAD_EXCLUDE = { ["bootstrap.lua"] = true, ["testing.lua"] = true }
 
 -- From a directory's file list, keep the game scripts to load: only `*.lua`, never an excluded file,
 -- never a `_`-prefixed file (private/scratch). Order of the input is preserved.
@@ -579,73 +584,135 @@ local function load_filter(names)
   return out
 end
 
--- Deterministic load order. A `manifest` (array of base names, extension optional) pins the leading
--- order — scripts it lists load first, in that order — because top-level ordering matters (AlterAeon
--- defines the shared `state`/kxwt triggers the others build on, and registration order is firing
--- order). Anything the manifest omits follows in case-insensitive alphabetical order; with no manifest
--- the whole set is alphabetical. Sorts and returns `names` in place.
-local function load_order(names, manifest)
-  local rank = {}
-  if manifest then
-    for i, base in ipairs(manifest) do rank[base] = i; rank[base .. ".lua"] = i end
-  end
-  local BIG = math.huge
-  table.sort(names, function(a, b)
-    local ra, rb = rank[a] or BIG, rank[b] or BIG
-    if ra ~= rb then return ra < rb end
-    return a:lower() < b:lower()
-  end)
+-- Deterministic directory order: case-insensitive alphabetical. There is NO manifest anymore — load
+-- order no longer needs pinning. Cross-script LOAD-TIME dependencies (if any) are declared IN the
+-- scripts with `require(...)` at the top, and require's run-once cache pulls a dependency in before
+-- its dependents regardless of alphabetical position. Same-LINE trigger firing order (the other thing
+-- the old manifest existed for) is now decided by pattern specificity in the Swift engine, not by
+-- registration/load order — so a catch-all `.*` observer always fires AFTER the specific parsers on
+-- the same line no matter which script loaded first. Sorts and returns `names` in place.
+local function load_order(names)
+  table.sort(names, function(a, b) return a:lower() < b:lower() end)
   return names
 end
 
--- Read an optional ordering manifest (`<dir>/manifest.lua` returning an array of base names). IO, so
--- it isn't unit-tested; the ordering logic it feeds (load_order) is.
-local function read_manifest(dir)
-  local path = dir .. "/manifest.lua"
-  if __path_kind(path) ~= "file" then return nil end
-  local ok, chunk = pcall(loadfile, path)
-  if ok and chunk then
-    local ok2, list = pcall(chunk)
-    if ok2 and type(list) == "table" then return list end
+--------------------------------------------------------------------------------
+-- require() wiring — a custom package.searcher for the script world
+--------------------------------------------------------------------------------
+-- Scripts load each other (when they have real load-time deps) and the directory loader loads the set
+-- via `require(name)`, so a module runs exactly once per session no matter how many paths reach it.
+-- This searcher resolves a module name to a Scripts/*.lua file using the SAME host primitives and
+-- CWD-relative semantics as load() (via __path_kind), so resolution matches load() exactly — including
+-- the test harness, where the driver stubs __path_kind/__run_file against a fake filesystem.
+
+-- Directories searched for a bare module name (require("AlterAeon") -> Scripts/AlterAeon.lua). The
+-- directory loader temporarily prepends the directory it is loading (see load()), so a sibling
+-- require during a directory load resolves within that same directory.
+local SEARCH_ROOTS = { "Scripts", "." }
+
+-- Modules THIS searcher has loaded (name -> resolved path). reload() drops only these from
+-- package.loaded, never stdlib entries. A global so it survives bootstrap re-entry in the harness.
+__script_loaded = __script_loaded or {}
+
+-- Resolve a module/require name to an existing .lua file path, or nil. A name ending in `.lua` (or an
+-- explicit path) is tried verbatim; otherwise `<name>.lua` under each search root, CWD-relative.
+local function resolve_script(name)
+  local cands = {}
+  if name:match("%.lua$") then
+    cands[#cands + 1] = name
+  else
+    cands[#cands + 1] = name .. ".lua"                          -- CWD-relative / explicit path
+    for _, root in ipairs(SEARCH_ROOTS) do
+      cands[#cands + 1] = root .. "/" .. name .. ".lua"
+    end
+  end
+  for _, p in ipairs(cands) do
+    if __path_kind(p) == "file" then return p end
   end
   return nil
 end
 
-function load(arg)
-  if type(arg) ~= "string" then return loadchunk(arg) end   -- non-string → stdlib chunk-reader
-  local path, kind = arg, __path_kind(arg)
-  if kind == "missing" and not path:match("%.lua$") then      -- assume the .lua extension
-    local withext = path .. ".lua"
-    if __path_kind(withext) == "file" then path, kind = withext, "file" end
-  end
-  if kind == "dir" then
-    local names = load_order(load_filter(__list_dir(path)), read_manifest(path))
-    for _, n in ipairs(names) do __run_file(path .. "/" .. n) end
-  elseif kind == "file" then
+-- The searcher: return a loader that runs the file in the LIVE global state (scripts communicate via
+-- globals, so require's return value is just `true` — the point is run-once + ordering, not modules).
+local function script_searcher(name)
+  local path = resolve_script(name)
+  if not path then return "\n\tno script '" .. name .. "'" end
+  return function()
+    __script_loaded[name] = path
     __run_file(path)
-  else
-    error("load: no such script or directory: " .. tostring(arg), 2)
+    return true
   end
 end
 
--- reload() — hot-reload: drop all rules/timers, then re-run the Scripts/ directory. (No longer a host
--- builtin; it's this Lua wrapper over __clear_rules + load.) `#reload` / `#ai reload` route here.
+-- Install once, ahead of the stdlib path searcher, so our CWD-relative resolution wins for script
+-- names (matching load()'s semantics). Guarded so a harness re-dofile doesn't stack duplicates.
+if not __script_searcher_installed then
+  table.insert(package.searchers, 2, script_searcher)
+  __script_searcher_installed = true
+end
+
+-- The basename module name for a path ("Scripts/HUD.lua" -> "HUD"), so a file loaded by explicit path
+-- and the same file loaded by the directory loader share ONE package.loaded identity (load it twice in
+-- a session and it re-registers once, not twice).
+local function module_of(path)
+  return (path:gsub("%.lua$", ""):gsub(".*/", ""))
+end
+
+-- Bust a module's cache entry so the next require re-runs it. `load(path)`'s interactive intent is
+-- "run it (again) now", so it always busts before requiring; the directory loader does the same per
+-- file so a re-load of Scripts/ re-runs everything.
+local function bust(mod)
+  package.loaded[mod] = nil
+  __script_loaded[mod] = nil
+end
+
+function load(arg)
+  if type(arg) ~= "string" then return loadchunk(arg) end   -- non-string → stdlib chunk-reader
+  local kind = __path_kind(arg)
+  if kind == "dir" then
+    table.insert(SEARCH_ROOTS, 1, arg)                       -- resolve siblings within this dir
+    local ok, err = pcall(function()
+      for _, n in ipairs(load_order(load_filter(__list_dir(arg)))) do
+        local mod = module_of(n)
+        bust(mod)                                            -- fresh directory load re-runs each file
+        require(mod)
+      end
+    end)
+    table.remove(SEARCH_ROOTS, 1)
+    if not ok then error(err, 2) end
+  else
+    -- A single file OR a bare module name. Route through require (run-once), but bust first so the
+    -- interactive `load("HUD")` / `load("Scripts/HUD")` always re-runs. Normalise to the basename so
+    -- it shares identity with the directory loader's entry.
+    local mod = module_of(arg)
+    bust(mod)
+    local ok = pcall(require, mod)
+    if not ok then error("load: no such script or directory: " .. tostring(arg), 2) end
+  end
+end
+
+-- reload() — hot-reload: drop OUR modules from the require cache (never stdlib), clear all
+-- rules/timers, then re-run the Scripts/ directory. `#reload` / `#ai reload` route here.
 function reload()
+  for name in pairs(__script_loaded) do package.loaded[name] = nil end
+  __script_loaded = {}
   __clear_rules()
   load("Scripts")
 end
 
--- Test seam for the pure loader logic (extension/exclusion/ordering); see Scripts/tests/load_spec.lua.
-_LOAD_TEST = { filter = load_filter, order = load_order }
+-- Test seam for the pure loader logic (extension/exclusion/ordering + name resolution); see
+-- Scripts/tests/load_spec.lua.
+_LOAD_TEST = { filter = load_filter, order = load_order, resolve = resolve_script,
+               module_of = module_of }
 
 -- scripts / documentation
 doc("load", { sig = "load(path)", group = "scripts",
-  text = "Load a Lua script or directory, resolved relative to the launch CWD. A file loads that file (the `.lua` extension is assumed if absent); a directory loads its top-level *.lua scripts. Shadows stdlib load — a non-string arg delegates to `loadchunk`. `#load {Name}` rewrites to `load(\"Scripts/Name\")`.",
+  text = "Load a Lua script or directory, resolved relative to the launch CWD. A directory loads its top-level *.lua scripts (case-insensitive alphabetical) via require(); a single file (the `.lua` extension is assumed if absent) also routes through require but busts its cache first, so an interactive re-load re-runs it. Cross-script load-time deps are declared in-file with require(); the run-once cache means order emerges from dependencies, not a manifest. Shadows stdlib load — a non-string arg delegates to `loadchunk`. `#load {Name}` rewrites to `load(\"Scripts/Name\")`.",
   example = "load(\"Scripts\")   load(\"AlterAeon\")" })
 doc("loadchunk", { sig = "loadchunk(chunk[, ...])", group = "scripts",
   text = "Lua's stdlib `load` (compile a chunk from a string or reader function), preserved here because `load` is shadowed by the script loader." })
 doc("reload", { sig = "reload()", group = "scripts",
-  text = "Hot-reload: clear all triggers/aliases/timers, then re-run `load(\"Scripts\")`. `#reload` and `#ai reload` route here." })
+  text = "Hot-reload: drop the script modules from require's cache (never stdlib), clear all triggers/aliases/timers, then re-run `load(\"Scripts\")`. `#reload` and `#ai reload` route here." })
 doc("command", { sig = "command(name, handler)", group = "scripts",
   text = "Legacy bridge: define a global function <name> (sanitized) that forwards one string argument to handler. Prefer defining and doc()ing a real function." })
 doc("help", { sig = "help([target])", group = "help",

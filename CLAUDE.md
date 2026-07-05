@@ -77,11 +77,23 @@ Adding a spec is just dropping a `Scripts/tests/foo_spec.lua` — the Bazel file
 `load(path)` (Lua, in `bootstrap.lua`, shadows stdlib `load` — that stays at `loadchunk`) resolves
 relative to the launch CWD: a file loads that file (`.lua` assumed if absent, so `load("AlterAeon")` ≡
 `load("AlterAeon.lua")`); a directory loads its top-level `*.lua`, non-recursively, excluding
-`bootstrap.lua`/`testing.lua`/`manifest.lua`/`_`-prefixed files/subdirs, ordered by `Scripts/manifest.lua`
-(then alphabetical). `reload()` = clear all rules/timers + `load("Scripts")`. Scripts are self-bootstrapping:
-top-level code runs on load, so **`AlterAeon.lua` opens the connection itself** (a guarded top-level
-`connect("alteraeon.com", 3002)` — the host no longer hardcodes it). The host just runs `load("Scripts")`
-at launch. `#load {Name}` / `#load Name` still work (rewrite to `load("Scripts/Name")`).
+`bootstrap.lua`/`testing.lua`/`_`-prefixed files/subdirs, in **case-insensitive alphabetical** order.
+**There is no manifest** — every script runs through `require` (a custom `package.searcher` in
+`bootstrap.lua` that resolves names to `Scripts/*.lua` via the host `__path_kind`/`__run_file`
+primitives), so a module runs once per session and **load order emerges from `require(...)` deps
+declared at the top of a script**, not a sidecar list. In practice there are ~no cross-script
+load-time deps: each script that reads the shared `state` table creates it defensively (`state = state
+or {}`; `AlterAeon.lua` owns the schema and fills missing keys, order-independently). The other thing
+the manifest used to guarantee — **same-line trigger firing order** — is now decided by **pattern
+specificity in the Swift engine** (priority desc → specificity desc → registration order): specific
+kxwt parsers fire before broad `.*` observers regardless of load order, so the observers read the
+state the parsers wrote. `opts.priority` on `trigger()`/`alias()` overrides; aliases resolve
+most-specific-match-wins. `load(path)`/`reload()` bust the require cache so an interactive re-load
+re-runs (`reload()` = drop script modules from `package.loaded` + clear all rules/timers +
+`load("Scripts")`). Scripts are self-bootstrapping: top-level code runs on load, so **`AlterAeon.lua`
+opens the connection itself** (a guarded top-level `connect("alteraeon.com", 3002)` — the host no
+longer hardcodes it). The host just runs `load("Scripts")` at launch. `#load {Name}` / `#load Name`
+still work (rewrite to `load("Scripts/Name")`).
 
 ## Build / run
 

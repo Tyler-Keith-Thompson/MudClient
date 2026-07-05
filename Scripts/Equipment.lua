@@ -26,6 +26,10 @@
 --
 -- Controls: eq.scan(['quick']) · eq.compare([slot|item]) · eq.shop() · eq.id(item) · eq.stats() · eq.forget()  (help(eq)).
 
+-- Defensive: reads of the shared `state` (char sheet / loadout) always see a table, so there's no
+-- load-order dependency on AlterAeon (which owns/fills the schema, merging into this if we ran first).
+state = state or {}
+
 local cfg = {
   home = os.getenv("HOME") or "",
   -- Comparisons/shop reviews need room to reason and enumerate; give the model a generous budget.

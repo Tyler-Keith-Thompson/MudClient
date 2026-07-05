@@ -13,22 +13,29 @@
 -- re-runs this file in the LIVE state — never drops or redials an already-open session.
 if not is_connected() then connect("alteraeon.com", 3002) end
 
-state = state or {
-  name = nil, gold = nil, exp = nil, expcap = nil, classes = {},
-  hp = nil, maxhp = nil, mana = nil, maxmana = nil, stam = nil, maxstam = nil,
-  position = nil, room_id = nil, room_name = nil, room_coord = nil, area = nil, terrain = nil,
-  fighting = false, fight_name = nil, fight_pct = nil,
-  opponents = {},                      -- inferred multi-opponent tracker (name -> {pct,exact,t})
-  walkdir = nil, spells = {}, recover = false,
-  inventory = {}, inv_known = false,   -- kxwt does NOT report inventory; we parse it from `inventory` output
-  equipment = {}, eq_known = false,    -- nor what's worn/wielded; parsed from `equipment` output
-  group = {},                          -- roster of you + pets/groupmates (kxwt_group_start..end)
-  exits = {},                          -- set of available exit directions, parsed from "[Exits: ...]"
-  effects = {},                        -- timed self-effects (kxwt_spst): name -> remaining-time text
-  action = 0,                          -- kxwt_action code; >= 50 prevents spellcasting
-  outdoors = nil, sky_visible = nil, overcast = nil,   -- kxwt_sky flags
-  music = {},                          -- channel -> current track name (kxwt_music), for the HUD ♪
-}
+-- The shared world-state table. AlterAeon OWNS the schema, but fills it DEFENSIVELY (merge missing
+-- keys into whatever `state` already is) so load order doesn't matter: another script may create a
+-- bare `state = state or {}` before this file runs (scripts now load in alphabetical, not manifest,
+-- order), and this still installs every default without clobbering values already parsed in.
+state = state or {}
+do
+  local defaults = {
+    classes = {},
+    fighting = false,
+    opponents = {},                      -- inferred multi-opponent tracker (name -> {pct,exact,t})
+    spells = {}, recover = false,
+    inventory = {}, inv_known = false,   -- kxwt does NOT report inventory; we parse it from `inventory` output
+    equipment = {}, eq_known = false,    -- nor what's worn/wielded; parsed from `equipment` output
+    group = {},                          -- roster of you + pets/groupmates (kxwt_group_start..end)
+    exits = {},                          -- set of available exit directions, parsed from "[Exits: ...]"
+    effects = {},                        -- timed self-effects (kxwt_spst): name -> remaining-time text
+    action = 0,                          -- kxwt_action code; >= 50 prevents spellcasting
+    music = {},                          -- channel -> current track name (kxwt_music), for the HUD ♪
+  }
+  for k, v in pairs(defaults) do if state[k] == nil then state[k] = v end end
+  -- (name/gold/exp/expcap/hp/maxhp/mana/maxmana/stam/maxstam/position/room_*/area/terrain/
+  --  fight_name/fight_pct/walkdir/outdoors/sky_visible/overcast start nil and are filled by triggers.)
+end
 
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
 -- "Ready" = recovered enough to keep exploring: every vital at least 90%. Drives the `recover` alias's

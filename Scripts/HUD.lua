@@ -14,6 +14,11 @@
 -- A SPAN understands: text, fg, bg (named 16-colour, "#rrggbb", or {r,g,b}), bold, dim, reverse,
 -- underline. All widget/layout logic lives here — edit + pilot.reload() to iterate live.
 
+-- Defensive: read the shared state through a table that always exists, so HUD has no load-order
+-- dependency on AlterAeon. AlterAeon owns and fills the schema (merging into this if we ran first);
+-- if it hasn't yet, on_update's `not state.hp` guard keeps the panels blank until the first prompt.
+state = state or {}
+
 local function cat(...)
   local out = {}
   for _, list in ipairs({ ... }) do

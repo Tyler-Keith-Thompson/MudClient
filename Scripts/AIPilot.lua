@@ -5,6 +5,12 @@
 -- (persisted with Lua serialization), and owns the prompt, turn loop, and the pilot.* controls — all
 -- hot-reloadable.
 
+-- Defensive: the shared world-state table always exists here, so the pilot has no load-order
+-- dependency on AlterAeon (scripts now load alphabetically, so this file may run first). AlterAeon
+-- owns/fills the schema, merging into whatever table exists. Same-line ordering (specific kxwt parsers
+-- before our `.*` observer) is guaranteed by the engine's specificity firing, not by load order.
+state = state or {}
+
 local cfg = {
   quiet = 0.75, min_interval = 2, human_grace = 4, max_cmds = 3, loop_threshold = 8,
   max_tokens = 256, combat_max_tokens = 128, max_stale_skips = 2, transcript_lines = 40,

@@ -27,15 +27,97 @@ final class LuaScriptEngine: @unchecked Sendable {
         let handler: LuaFunctionRef?
         let oneshot: Bool
         let ruleClass: String?
+        /// Explicit ordering override (`opts.priority`, default 0). Higher fires/matches first.
+        let priority: Int
+        /// Pattern specificity, computed once at registration from the pattern source
+        /// (see `Self.specificity(of:)`). Higher = more specific. Breaks ties after priority.
+        let specificity: Int
         var enabled: Bool = true
         init(id: Int, regex: Regex<AnyRegexOutput>, handler: LuaFunctionRef?,
-             oneshot: Bool = false, ruleClass: String? = nil) {
+             oneshot: Bool = false, ruleClass: String? = nil,
+             priority: Int = 0, specificity: Int = 0) {
             self.id = id
             self.regex = regex
             self.handler = handler
             self.oneshot = oneshot
             self.ruleClass = ruleClass
+            self.priority = priority
+            self.specificity = specificity
         }
+    }
+
+    /// Firing/matching order for two rules: explicit `priority` desc, then `specificity` desc,
+    /// then `id` asc (registration order — a stable, deterministic tiebreak). Returns true when
+    /// `a` should be consulted before `b`. Keeping the rule arrays sorted by this at insertion
+    /// time means the hot `processLine`/`processAlias` loops just iterate in order.
+    private static func ranksBefore(_ a: Rule, _ b: Rule) -> Bool {
+        if a.priority != b.priority { return a.priority > b.priority }
+        if a.specificity != b.specificity { return a.specificity > b.specificity }
+        return a.id < b.id
+    }
+
+    /// Insert `rule` into `rules` keeping it sorted by `ranksBefore`. Because ids are monotonic and
+    /// are the final tiebreak, a new rule lands AFTER any equal-ranked rule already present, so
+    /// registration order is preserved within a priority/specificity tier.
+    private func insertSorted(_ rule: Rule, into rules: inout [Rule]) {
+        var i = rules.count
+        while i > 0 && Self.ranksBefore(rule, rules[i - 1]) { i -= 1 }
+        rules.insert(rule, at: i)
+    }
+
+    /// A cheap, deterministic specificity score for a trigger/alias pattern, computed ONCE from the
+    /// regex source. The intent: specific parsers/rewriters outrank broad catch-all observers, so a
+    /// line's specific handlers run before the `.*` observers that read the state they wrote.
+    ///
+    /// Formula (documented so scripts can reason about ordering):
+    ///   * `+100`  a leading `^` start-anchor (a pattern pinned to the line start is very specific)
+    ///   * `+20`   a trailing `$` end-anchor
+    ///   * `+1`    per literal character matched (letters/digits/punctuation/space outside a class)
+    ///   * `+2`    per escaped literal (`\.`, `\/`, …) — an explicit literal, worth a touch more
+    ///   * `+1`    per bounded piece: a char class `[...]` or a class escape (`\d`, `\w`, `\s`)
+    ///   * `-50`   per UNBOUNDED wildcard (`.*` or `.+`) — the hallmark of a catch-all observer
+    ///   * `-1`    a bare `.` wildcard (matches one of anything)
+    /// Groups/alternation/quantifier punctuation are structural and score 0.
+    static func specificity(of pattern: String) -> Int {
+        var score = 0
+        let chars = Array(pattern)
+        var i = 0
+        var inClass = false
+        while i < chars.count {
+            let c = chars[i]
+            if inClass {
+                if c == "]" { inClass = false }
+                i += 1
+                continue
+            }
+            switch c {
+            case "^" where i == 0:
+                score += 100
+            case "$" where i == chars.count - 1:
+                score += 20
+            case "[":
+                score += 1          // a bounded character class counts a little
+                inClass = true
+            case "\\":
+                let next = i + 1 < chars.count ? chars[i + 1] : " "
+                if "dDwWsS".contains(next) { score += 1 }   // class escape: bounded
+                else { score += 2 }                          // escaped literal
+                i += 1                                        // consume the escaped char
+            case ".":
+                if i + 1 < chars.count && (chars[i + 1] == "*" || chars[i + 1] == "+") {
+                    score -= 50     // unbounded wildcard — a catch-all
+                    i += 1          // consume the quantifier
+                } else {
+                    score -= 1      // bare single-char wildcard
+                }
+            case "(", ")", "|", "*", "+", "?", "{", "}":
+                break               // structural / quantifier: neutral
+            default:
+                score += 1          // a literal character
+            }
+            i += 1
+        }
+        return score
     }
 
     private let lua = Lua()
@@ -333,7 +415,10 @@ final class LuaScriptEngine: @unchecked Sendable {
     ///   * nil / no return   → unchanged
     ///   * `false` or `""`   → gag the line
     ///   * a string          → replace the displayed line with it (may contain ANSI escapes)
-    /// Disabled rules are skipped; `oneshot` rules are removed after they fire.
+    /// Disabled rules are skipped; `oneshot` rules are removed after they fire. ALL matching rules
+    /// fire, in specificity order (priority desc, specificity desc, registration order) — the array
+    /// is kept sorted at insertion (see `insertSorted`) — so a line's specific parsers/rewriters run
+    /// before broad `.*` observers, and each handler sees the current (possibly rewritten) line.
     func processLine(_ line: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         var current = line
@@ -363,8 +448,9 @@ final class LuaScriptEngine: @unchecked Sendable {
         return current
     }
 
-    /// Fire the first matching alias for user input. Returns true if one matched
-    /// (so the raw input is swallowed).
+    /// Fire the most-specific matching alias for user input. Returns true if one matched (so the raw
+    /// input is swallowed). `aliasRules` is kept sorted (priority desc, specificity desc, registration
+    /// order), so the FIRST match in iteration is the most specific — "most specific match wins".
     func processAlias(_ input: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         for rule in aliasRules {
@@ -432,7 +518,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self.usage(#"trigger: expected (pattern, handler[, opts]) with a valid regex — e.g. trigger("^You hit", function(line) end)"#)
                 return []
             }
-            self.lineRules.append(rule)
+            self.insertSorted(rule, into: &self.lineRules)
             return [.int(Int64(rule.id))]
         }
         // alias(pattern, handler [, opts]) -> id. Same options as trigger().
@@ -442,7 +528,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self.usage(#"alias: expected (pattern, handler[, opts]) with a valid regex — e.g. alias("^gold$", function() send("score gold") end)"#)
                 return []
             }
-            self.aliasRules.append(rule)
+            self.insertSorted(rule, into: &self.aliasRules)
             return [.int(Int64(rule.id))]
         }
         // gag(pattern) -> id. Drops matching lines; removable/toggleable by id like any rule.
@@ -1171,10 +1257,13 @@ final class LuaScriptEngine: @unchecked Sendable {
               let regex = try? Regex(pattern) else { return nil }
         var oneshot = false
         var ruleClass: String? = nil
+        var priority = 0
         if args.count > 2, case .table(_, let opts) = args[2] {
             if case .bool(let b)? = opts["oneshot"] { oneshot = b }
             if case .string(let c)? = opts["class"] { ruleClass = c }
+            if let p = opts["priority"], let n = Self.intArg(p) { priority = n }
         }
-        return Rule(id: nextId(), regex: regex, handler: handler, oneshot: oneshot, ruleClass: ruleClass)
+        return Rule(id: nextId(), regex: regex, handler: handler, oneshot: oneshot,
+                    ruleClass: ruleClass, priority: priority, specificity: Self.specificity(of: pattern))
     }
 }
