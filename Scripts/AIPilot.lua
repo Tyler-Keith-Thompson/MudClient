@@ -90,7 +90,7 @@ local function ser(v)
   return "nil"
 end
 
-local save_gen = 0
+local save_timer
 local function save_map()
   local f = io.open(cfg.map_file, "w")
   if not f then return end
@@ -100,10 +100,12 @@ local function save_map()
                              waypoints = P.waypoints, wp_room = P.wp_room, room_wp = P.room_wp }))
   f:close()
 end
+-- Debounce map writes: each edit cancels the pending save and re-arms a fresh 2s timer, so a burst of
+-- edits coalesces into one write 2s after the last. (Was a generation counter that neutered stale
+-- timers; the host now returns a cancellable timer id, which does the same thing directly.)
 local function schedule_save()
-  save_gen = save_gen + 1
-  local g = save_gen
-  after(2, function() if g == save_gen then save_map() end end)
+  if cancel and save_timer then cancel(save_timer) end
+  save_timer = after(2, save_map)
 end
 local function load_map()
   local chunk = loadfile(cfg.map_file)
@@ -798,9 +800,10 @@ function on_user_input(cmd)
   local wn = waypoint_cmd_num(cmd)              -- "waypoint 8" or an abbreviation ("way 8", "wayp 8")
   if wn then
     P.wp_pending = wn
-    P.wp_gen = (P.wp_gen or 0) + 1
-    local g = P.wp_gen
-    after(8, function() if P.wp_gen == g then P.wp_pending = nil end end)
+    -- Auto-clear the marker if no move follows within a few seconds (a hop that failed / was out of
+    -- range). A new waypoint command cancels the prior timer and re-arms, so only the latest is live.
+    if cancel and P.wp_timer then cancel(P.wp_timer) end
+    P.wp_timer = after(8, function() P.wp_pending = nil end)
   end
   -- Our own AI command echoing back: already logged as [you]; consume the echo and ignore.
   if (P.self_sent[cmd] or 0) > 0 then P.self_sent[cmd] = P.self_sent[cmd] - 1; return end

@@ -106,11 +106,13 @@ local function save_classes()
   f:write("return {" .. table.concat(parts, ",") .. "}")
   f:close()
 end
-local classes_gen = 0
-local function schedule_classes_save()          -- debounce: coalesce a whole table's rows into one write
-  classes_gen = classes_gen + 1
-  local g = classes_gen
-  after(2, function() if g == classes_gen then save_classes() end end)
+-- Debounce: coalesce a whole table's rows into one write. Each new row cancels the pending save and
+-- re-arms a fresh 2s timer, so exactly one write fires 2s after the LAST row (was a generation counter
+-- that neutered stale timers; the cancellable timer id the host now returns does the same, directly).
+local classes_save_timer
+local function schedule_classes_save()
+  if cancel and classes_save_timer then cancel(classes_save_timer) end
+  classes_save_timer = after(2, save_classes)
 end
 -- Load once at startup (not on a live `#ai reload`, where state already holds the fresh table).
 if not next(state.classes) then

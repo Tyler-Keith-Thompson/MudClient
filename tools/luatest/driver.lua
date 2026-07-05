@@ -7,7 +7,8 @@
 
 local noop = function() end
 for _, n in ipairs({
-  "trigger", "alias", "gag", "send", "after",
+  "trigger", "alias", "gag", "send",
+  "rule_remove", "rule_enable", "class_enable", "class_remove",
   "music_play", "music_stop", "music_volume",
   "panel_render", "panel_top", "panel_height", "panel_top_height",
   "ai_request", "ai_local_request", "ai_set_local_endpoint", "ai_set_local_model",
@@ -26,6 +27,16 @@ function bind() _bindid = _bindid + 1; return _bindid end
 function input_get() return "" end
 function scrollback() return {} end
 function scrollback_find() return {} end
+
+-- Timer bridge stubs. There's no event loop in the CLI harness, so callbacks never auto-fire (just as
+-- the old `after` no-op never did); these keep the SAME contract the host now exposes so scripts that
+-- store timer ids and cancel() them load and run cleanly: after/every return a unique cancellable id,
+-- every marks itself repeating, and cancel removes the entry. Specs that need to observe scheduling
+-- override these locally (see pilot_timer_spec).
+local _timers, _timer_id = {}, 0
+function after(_delay, cb) _timer_id = _timer_id + 1; _timers[_timer_id] = { cb = cb }; return _timer_id end
+function every(_delay, cb) _timer_id = _timer_id + 1; _timers[_timer_id] = { cb = cb, repeating = true }; return _timer_id end
+function cancel(id) if id ~= nil then _timers[id] = nil end end
 
 local commands = {}
 function command(name, fn) commands[name] = fn end                 -- capture (unused; we call directly)
