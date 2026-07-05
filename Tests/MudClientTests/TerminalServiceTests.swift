@@ -105,15 +105,21 @@ private typealias E = TerminalService.InputEvent
     #expect(TerminalService.tokenize("\u{1B}").remaining == "\u{1B}")
 }
 
-@Test func scanEscapeDistinguishesCompleteFromPartial() {
-    #expect(TerminalService.scanEscape(Array("\u{1B}")) == .incomplete)
-    #expect(TerminalService.scanEscape(Array("\u{1B}[")) == .incomplete)
-    #expect(TerminalService.scanEscape(Array("\u{1B}[12;5")) == .incomplete)   // params, no final byte
-    #expect(TerminalService.scanEscape(Array("\u{1B}[A")) == .complete(length: 3))
-    #expect(TerminalService.scanEscape(Array("\u{1B}[15~")) == .complete(length: 5))
-    #expect(TerminalService.scanEscape(Array("\u{1B}OP")) == .complete(length: 3))   // SS3 F1
-    #expect(TerminalService.scanEscape(Array("\u{1B}O")) == .incomplete)
-    #expect(TerminalService.scanEscape(Array("\u{1B}a")) == .complete(length: 2))    // alt-a shape
+@Test func tokenizeBuffersPartialEscapeShapesAndCompletesWholeOnes() {
+    // Ported from the old `scanEscape` unit: the declarative grammar must BUFFER any escape shape that
+    // runs off the end of the read (holding it in `remaining`, emitting no event), and CONSUME a whole
+    // one. Covers CSI, SS3 and the two-byte (alt) shape.
+    func buffered(_ s: String) { let r = TerminalService.tokenize(s); #expect(r.events.isEmpty); #expect(r.remaining == s) }
+    buffered("\u{1B}")            // lone ESC — could still become CSI/SS3/alt
+    buffered("\u{1B}[")           // CSI introducer, no params/final yet
+    buffered("\u{1B}[12;5")       // CSI params, no final byte yet
+    buffered("\u{1B}O")           // SS3 introducer, no final yet
+    // Whole shapes are consumed: recognised → a key, unknown-but-complete → dropped (no residue).
+    #expect(TerminalService.tokenize("\u{1B}[A").events == [E.key("up")])       // CSI arrow
+    #expect(TerminalService.tokenize("\u{1B}[15~").events == [E.key("f5")])     // CSI tilde
+    #expect(TerminalService.tokenize("\u{1B}OP").events == [E.key("f1")])       // SS3 F1
+    #expect(TerminalService.tokenize("\u{1B}a").events == [E.key("alt-a")])     // two-byte alt-a
+    #expect(TerminalService.tokenize("\u{1B}a").remaining == "")
 }
 
 @Test func bracketedPasteInsertsAsLiteralText() {

@@ -15,6 +15,7 @@ swift_test(
     visibility = ["//visibility:public"],
     deps = [
         "//Sources/MudClient:MudClientLib",
+        "@swift_parsing//:Parsing",
         "@swiftpkg_dependencyinjection//:DependencyInjection",
     ],
 )

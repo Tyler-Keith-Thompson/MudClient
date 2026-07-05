@@ -1,5 +1,6 @@
 import DependencyInjection
 import Foundation
+import Parsing
 import Testing
 
 @testable import MudClient
@@ -257,6 +258,50 @@ private actor RecordedWrites {
     }
     #expect(option == 69)
     #expect(got == Data([1, 255, 2]))
+}
+
+@Test func iacSubnegotiationEscapedIACBeforeSEIsNotMistakenForTerminator() throws {
+    // The edge a naive `PrefixUpTo(IAC SE)` gets wrong: a payload byte 0xFF is escaped on the wire as
+    // IAC IAC (255 255); when the very next real payload byte is 0xF0 (240), the bytes read 255 255 240
+    // and a two-byte-marker scan stops at the escaped IAC's second byte + that 0xF0, truncating the
+    // payload and terminating early. The escaping-aware parser must skip the escaped pair and only stop
+    // at the genuinely-unescaped IAC SE. Payload here is the two bytes [0xFF, 0xF0].
+    let wire = Data([255, 250, 69, 255, 255, 240, 255, 240])  // IAC SB MSDP  255 255 240  IAC SE
+    var input = Substring(String(data: wire, encoding: .isoLatin1)!)
+    let token = try IAC.streamTokenParser().parse(&input)
+    guard case .subnegotiation(let option, let got) = token else {
+        Issue.record("expected subnegotiation, got \(token)")
+        return
+    }
+    #expect(option == 69)
+    #expect(got == Data([255, 240]))   // both payload bytes recovered, not truncated to [255]
+    #expect(input.isEmpty)             // the whole sequence (incl. the real IAC SE) was consumed
+}
+
+@Test func iacSubnegotiationLoneTrailingIACIsBufferedUntilDisambiguated() throws {
+    // A chunk boundary can fall right after a payload IAC (255), leaving it ambiguous: the next byte
+    // decides whether it was an escaped IAC IAC (payload) or a terminating IAC SE. The parser must
+    // report "incomplete" (not terminate, not leak) and wait. This is the disambiguation `PrefixUpTo`
+    // cannot express, and the reason the payload scan needs the incomplete signal.
+    func latin1(_ bytes: [UInt8]) -> Substring { Substring(String(data: Data(bytes), encoding: .isoLatin1)!) }
+    var driver = StreamingParser(IAC.streamTokenParser())
+    // Chunk 1 ends on the lone trailing IAC → nothing may be decided yet.
+    let first = try driver.feed(latin1([255, 250, 69, 255]))   // IAC SB MSDP + a lone trailing IAC
+    #expect(first.isEmpty)
+    // Chunk 2 resolves it: the lone IAC + a 255 is an escaped 0xFF, then byte 1, then the real IAC SE,
+    // then trailing text "Y".
+    let rest = try driver.feed(latin1([255, 1, 255, 240]) + "Y")
+    var payloads: [Data] = []
+    var text = ""
+    for token in rest {
+        switch token {
+        case .subnegotiation(_, let p): payloads.append(p)
+        case .passthrough(let s): text += s
+        default: break
+        }
+    }
+    #expect(payloads == [Data([255, 1])])   // escaped IAC un-escaped to 0xFF, then byte 1
+    #expect(text == "Y")                     // terminator consumed; only trailing text leaks to display
 }
 
 @Test func iacSubnegotiationSplitAcrossChunksIsBuffered() async throws {

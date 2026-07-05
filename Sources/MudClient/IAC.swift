@@ -368,17 +368,19 @@ extension IAC {
     /// ``StreamToken/subnegotiation(option:payload:)``. The payload is everything between the option
     /// byte and the closing `IAC SE`, with `IAC IAC` un-escaped back to a single `IAC` byte.
     ///
-    /// Built from `PrefixUpTo`, which cooperates with the streaming driver: while the closing `IAC SE`
-    /// has not yet arrived it reports "incomplete" so the driver buffers the partial subnegotiation
-    /// across network reads instead of failing. (Edge case: a raw `0xFF` payload byte immediately
-    /// followed by `0xF0` can be mistaken for the terminator; AlterAeon's GMCP/MSDP payloads are
-    /// UTF-8/low-byte text and never contain a bare `0xFF`, so this does not arise in practice.)
+    /// The payload scan is IAC-escaping-aware (``SubnegotiationPayload``): it treats a doubled
+    /// `IAC IAC` as an escaped literal `0xFF` byte and only stops at an *unescaped* `IAC SE`, so a
+    /// `0xFF` payload byte (sent on the wire as `IAC IAC`) whose second `IAC` happens to be followed by
+    /// `SE` (`0xF0`) is no longer mistaken for the terminator. Like `PrefixUpTo`, it cooperates with the
+    /// streaming driver — while the terminator has not yet arrived (including a lone trailing `IAC` that
+    /// could still resolve either way) it reports "incomplete", so the driver buffers the partial
+    /// subnegotiation across network reads instead of failing.
     static func subnegotiationParser() -> some Parser<Substring, StreamToken> {
         Parse {
             Self.iac.asciiChar
             Self.sb.asciiChar
             Prefix(1).map { UInt8($0.unicodeScalars.first!.value) }   // option byte
-            PrefixUpTo(Self.iac.asciiChar + Self.se.asciiChar)        // payload up to IAC SE
+            SubnegotiationPayload()                                   // payload up to an unescaped IAC SE
             Self.iac.asciiChar
             Self.se.asciiChar
         }
@@ -401,6 +403,61 @@ extension IAC {
             return .subnegotiation(option: option, payload: Data(bytes))
         }
     }
+}
+
+/// Scans a telnet subnegotiation payload up to (but not consuming) its closing `IAC SE`, respecting
+/// telnet's `IAC IAC` escaping. Emitted as its own ``Parser`` — rather than `PrefixUpTo(IAC SE)` — so
+/// that a `0xFF` payload byte (transmitted as the doubled `IAC IAC`) whose trailing `IAC` is followed
+/// by `SE` (`0xF0`) is not mistaken for the terminator, which is the one case a naive "prefix up to
+/// the two-byte marker" scan gets wrong.
+///
+/// Input is Latin-1 `Substring` (one `Character` == one byte, established by ``handleIACCommunication``).
+/// The returned payload is still IAC-escaped; the caller un-escapes `IAC IAC` -> `IAC`.
+///
+/// Streaming: the incremental ``parse(_:isAtEnd:)`` reports `incompleteInput` (the library's public
+/// "need more input" signal) whenever the terminator has not yet been proven — crucially including a
+/// *lone trailing `IAC`* at the end of the buffer, which could still resolve to either an escaped
+/// `IAC IAC` (payload) or a terminating `IAC SE`. That is exactly the disambiguation `PrefixUpTo`
+/// cannot express, and the reason this parser needs the incomplete signal.
+struct SubnegotiationPayload: Parser {
+    private static let iac: UInt32 = 255   // 0xFF
+    private static let se: UInt32 = 240    // 0xF0
+
+    func parse(_ input: inout Substring) throws -> Substring {
+        try parse(&input, isAtEnd: true)
+    }
+
+    func parse(_ input: inout Substring, isAtEnd: Bool) throws -> Substring {
+        var idx = input.startIndex
+        while idx < input.endIndex {
+            guard input[idx].unicodeScalars.first?.value == Self.iac else {
+                idx = input.index(after: idx)                        // ordinary payload byte
+                continue
+            }
+            let next = input.index(after: idx)
+            if next == input.endIndex {
+                // A lone trailing IAC: it could still become IAC IAC (escaped payload) or IAC SE
+                // (terminator). Mid-stream that is "need more"; only at the true end is it a failure.
+                if !isAtEnd { throw incompleteInput(at: input) }
+                throw SubnegotiationError.unterminated
+            }
+            switch input[next].unicodeScalars.first?.value {
+            case Self.se:                                            // unescaped IAC SE → terminator
+                let payload = input[..<idx]
+                input = input[idx...]                                // leave IAC SE for the caller
+                return payload
+            case Self.iac:                                           // escaped IAC IAC → both are payload
+                idx = input.index(idx, offsetBy: 2)
+            default:                                                 // lone IAC byte (kept as payload)
+                idx = input.index(after: idx)
+            }
+        }
+        // Ran off the end without an unescaped IAC SE: mid-stream, wait for more; at end, it's a failure.
+        if !isAtEnd { throw incompleteInput(at: input) }
+        throw SubnegotiationError.unterminated
+    }
+
+    private enum SubnegotiationError: Error { case unterminated }
 }
 
 /// Holds the cross-chunk parsing state for ``handleIACCommunication``. Reference semantics let the

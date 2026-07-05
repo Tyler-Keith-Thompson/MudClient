@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import Parsing
 import DependencyInjection
 #if canImport(AppKit)
 import AppKit
@@ -23,13 +24,25 @@ final class TerminalService {
     
     // MARK: - Input decoding model
     //
-    // Raw stdin bytes are decoded WITHOUT a text parser: a hand-rolled, escape-aware tokenizer turns
-    // the input buffer into a list of `InputEvent`s plus a `remaining` tail (an escape sequence split
-    // across reads). This replaced a swift-parsing grammar whose parse FAILURES on any byte the
-    // line-editor keys didn't match were being printed to the game display (the "error: unexpected
-    // input --> input:1:3" dump). The tokenizer has no failure path — unknown input is handled
-    // structurally (printable → text, unknown escape → dropped whole, partial escape → buffered), so
-    // nothing error-shaped can ever reach the screen.
+    // Raw stdin bytes are decoded by a DECLARATIVE swift-parsing grammar (`inputTokenParser`) driven by
+    // the library's `StreamingParser`, which buffers input across reads so an escape sequence split by
+    // a chunk boundary is held until the rest arrives (rather than mis-parsed as stray text). This is
+    // the same streaming machinery `IAC.streamTokenParser` uses for the telnet byte stream.
+    //
+    // An EARLIER declarative grammar was abandoned for a hand-rolled scanner because it PRINTED its
+    // parse FAILURES to the game display whenever the buffer held an ESC-prefixed fragment it couldn't
+    // match — a chunk-split escape made the `enter` alternative skip the ESC bytes then fail expecting
+    // "\n" (the "error: unexpected input --> input:1:3" dump). Two capabilities on the local fork make
+    // the declarative approach robust and let us restore it:
+    //   • the `incomplete` parsing signal (thrown by `StartsWith`/`Prefix`/`First` when a match runs off
+    //     the end of the buffered input, made STICKY by `OneOf`): a partial escape is "need more bytes",
+    //     NOT a failure, so the driver buffers it instead of erroring;
+    //   • a `Prefix(1)`-style catch-all final alternative (mapping any single leftover character to
+    //     `.text`, exactly as `IAC` maps its passthrough): total failure is structurally impossible, so
+    //     nothing error-shaped can reach the screen. Unknown-but-COMPLETE escapes (e.g. a focus event)
+    //     are matched WHOLE by the generic CSI/SS3 shapes and dropped, never shredded into stray glyphs.
+    // The `tokenize` seam is kept pure (`String -> (events, remaining)`) by running a fresh streaming
+    // driver per call and returning its buffered tail as `remaining`; key NAMING stays in `decodeKey`.
 
     /// One decoded keyboard action. `key` names a recognised special/macro key (arrows, home, f-keys,
     /// ctrl-<letter>, alt-<letter>); the editor-owned control keys get their own cases.
@@ -40,13 +53,6 @@ final class TerminalService {
         case backspace
         case cursorStart       // ctrl-A
         case cursorEnd         // ctrl-E
-    }
-
-    /// The result of measuring a leading escape sequence: either it needs more bytes, or it's a whole
-    /// sequence `length` characters long.
-    enum EscapeScan: Equatable {
-        case incomplete
-        case complete(length: Int)
     }
 
     /// How far a marker (bracketed-paste start/end) matches at a position.
@@ -155,81 +161,89 @@ final class TerminalService {
     }
 
     /// Decode a raw input buffer into an ordered list of `InputEvent`s plus a `remaining` tail — an
-    /// escape sequence that arrived only partially and must be held until the next read. This is the
-    /// escape-aware replacement for the old swift-parsing grammar; unlike that grammar it has no
-    /// failure mode, so nothing it can't classify is ever surfaced as an error:
+    /// escape sequence that arrived only partially and must be held until the next read. Implemented on
+    /// the declarative `inputTokenParser` grammar (see the model note above): a fresh `StreamingParser`
+    /// is fed the whole buffer; whatever it can't yet complete (a partial trailing escape) is left in
+    /// its `remainingInput` and returned as `remaining`. There is no failure path — the grammar's
+    /// catch-all makes total failure impossible, so nothing it can't classify is ever surfaced:
     ///   • printable characters (incl. multi-byte UTF-8) → `.text`;
     ///   • ctrl-A / ctrl-E / backspace(0x7F) / Enter(0x0A) → their editor events;
     ///   • a recognised escape/ctrl-letter key → `.key(name)`;
-    ///   • an unknown but WHOLE escape sequence (generic CSI/SS3 shape) → consumed and dropped;
+    ///   • an unknown but WHOLE escape sequence (generic CSI/SS3/two-byte shape) → consumed and dropped;
     ///   • an INCOMPLETE trailing escape sequence → returned in `remaining` (buffered, not shredded);
     ///   • any other control byte → dropped (never inserted as a stray glyph).
     static func tokenize(_ buffer: String) -> (events: [InputEvent], remaining: String) {
-        let chars = Array(buffer)
+        guard !buffer.isEmpty else { return ([], "") }
+        var driver = StreamingParser(inputTokenParser())
+        // `feed` only throws on a genuine (non-`incomplete`) failure; the `Prefix(1)` catch-all makes
+        // that unreachable, so a nil here can only mean "no progress" — fall back to holding the buffer.
+        guard let outputs = try? driver.feed(Substring(buffer)) else { return ([], buffer) }
+        // The grammar emits one `.text` per character (like `IAC`'s per-byte passthrough); fold runs of
+        // consecutive `.text` back into one event. A dropped token (`nil`, e.g. an unknown escape) BREAKS
+        // the run, so text either side of it stays as separate events.
         var events: [InputEvent] = []
-        var i = 0
-        while i < chars.count {
-            let c = chars[i]
-            if c == "\u{1B}" {
-                let rest = Array(chars[i...])
-                if let (name, length) = decodeKey(String(rest)) {   // a fully-formed escape key
-                    events.append(.key(name)); i += length; continue
-                }
-                switch scanEscape(rest) {
-                case .incomplete:
-                    return (events, String(chars[i...]))            // hold the partial ESC for next read
-                case .complete(let len):
-                    i += max(1, len); continue                      // unknown escape shape → drop whole
-                }
+        var lastWasText = false
+        for output in outputs {
+            guard let event = output else { lastWasText = false; continue }   // dropped token → break the run
+            if case .text(let s) = event, lastWasText, case .text(let prev)? = events.last {
+                events[events.count - 1] = .text(prev + s)
+            } else {
+                events.append(event)
             }
-            if c == "\u{01}" { events.append(.cursorStart); i += 1; continue }
-            if c == "\u{05}" { events.append(.cursorEnd); i += 1; continue }
-            if c == "\u{7F}" { events.append(.backspace); i += 1; continue }
-            if c == "\n" { events.append(.enter); i += 1; continue }
-            if let a = c.asciiValue, (0x01...0x1A).contains(a) {
-                // A control letter (e.g. ctrl-B). decodeKey names the non-reserved ones for macro
-                // dispatch; anything it declines (reserved editor codes, tab, CR) is dropped, never
-                // inserted into the command line as a raw control byte.
-                if let (name, length) = decodeKey(String(chars[i...])) {
-                    events.append(.key(name)); i += length; continue
-                }
-                i += 1; continue
-            }
-            // A run of printable characters, up to the next control/escape byte.
-            var run = ""
-            while i < chars.count {
-                let d = chars[i]
-                if d == "\u{1B}" || d == "\u{7F}" { break }
-                if let a = d.asciiValue, a < 0x20 { break }
-                run.append(d); i += 1
-            }
-            if run.isEmpty { i += 1; continue }                     // safety — shouldn't be reachable
-            events.append(.text(run))
+            if case .text = event { lastWasText = true } else { lastWasText = false }
         }
-        return (events, "")
+        return (events, String(driver.remainingInput))
     }
 
-    /// Measure a leading escape sequence in `s` (caller guarantees `s[0] == ESC`). Returns
-    /// `.complete(length:)` for a whole sequence, or `.incomplete` when more bytes are needed — the
-    /// generic VT shapes: CSI (`ESC [` params intermediates final-byte), SS3 (`ESC O` final), and a
-    /// simple two-byte escape (`ESC <byte>`, e.g. alt-key). Matching the whole shape (not just the
-    /// keys we know) is what lets a foreign sequence be dropped as one unit instead of shredding into
-    /// stray characters.
-    static func scanEscape(_ s: [Character]) -> EscapeScan {
-        guard s.first == "\u{1B}" else { return .complete(length: 0) }
-        guard s.count >= 2 else { return .incomplete }
-        switch s[1] {
-        case "[":
-            var j = 2
-            while j < s.count, let a = s[j].asciiValue, (0x30...0x3F).contains(a) { j += 1 }  // parameters
-            while j < s.count, let a = s[j].asciiValue, (0x20...0x2F).contains(a) { j += 1 }  // intermediates
-            guard j < s.count else { return .incomplete }                                     // no final byte yet
-            return .complete(length: j + 1)                                                   // + the final byte
-        case "O":
-            guard s.count >= 3 else { return .incomplete }
-            return .complete(length: 3)                                                       // SS3: ESC O <final>
-        default:
-            return .complete(length: 2)                                                       // ESC <byte>
+    /// The declarative grammar that extracts ONE input token from the front of the buffered keystroke
+    /// stream. `nil` output means "consumed but produces no event" (an unknown-but-complete escape, or
+    /// an unnamed control byte) — the streaming driver still advances past it. Ordering matters: the
+    /// escape shapes come first so a partial escape reports `incomplete` (which `OneOf` treats as
+    /// sticky) and is buffered rather than falling through to the text catch-all; the final `First()`
+    /// catch-all guarantees any single leftover character is consumed, so the grammar can never fail.
+    static func inputTokenParser() -> some Parser<Substring, InputEvent?> {
+        // Whole-escape matchers. Each consumes the entire VT shape and hands the reconstructed sequence
+        // to `decodeKey` for naming: a recognised key → `.key(name)`, an unknown-but-complete shape →
+        // `nil` (dropped). A shape that runs off the end throws `incomplete` (via `StartsWith`/`Prefix`/
+        // `First`), so the driver holds it for the next read.
+        let escape = OneOf {
+            Parse {                                   // CSI: ESC [ <params> <intermediates> <final>
+                "\u{1B}["
+                Prefix { $0.asciiValue.map { (0x30...0x3F).contains($0) } ?? false }   // parameter bytes
+                Prefix { $0.asciiValue.map { (0x20...0x2F).contains($0) } ?? false }   // intermediate bytes
+                First()                                                                // final byte
+            }.map { (params: Substring, inter: Substring, final: Character) -> InputEvent? in
+                Self.decodeKey("\u{1B}[" + params + inter + String(final)).map { InputEvent.key($0.name) }
+            }
+            Parse {                                   // SS3: ESC O <final>
+                "\u{1B}O"
+                First()
+            }.map { (final: Character) -> InputEvent? in
+                Self.decodeKey("\u{1B}O" + String(final)).map { InputEvent.key($0.name) }
+            }
+            Parse {                                   // two-byte escape: ESC <byte> (e.g. alt-<letter>)
+                "\u{1B}"
+                First()
+            }.map { (byte: Character) -> InputEvent? in
+                Self.decodeKey("\u{1B}" + String(byte)).map { InputEvent.key($0.name) }
+            }
+        }
+        return OneOf {
+            escape
+            Parse { "\u{01}" }.map { InputEvent?.some(.cursorStart) }   // ctrl-A
+            Parse { "\u{05}" }.map { InputEvent?.some(.cursorEnd) }     // ctrl-E
+            Parse { "\u{7F}" }.map { InputEvent?.some(.backspace) }     // DEL
+            Parse { "\n" }.map { InputEvent?.some(.enter) }             // Enter
+            // Catch-all: any single remaining character. A named control letter (e.g. ctrl-B) becomes a
+            // `.key`; a reserved/unnamed control byte (tab, CR, …) is dropped; anything else is printable
+            // text. This alternative always consumes one character, so the grammar never fails.
+            First().map { (c: Character) -> InputEvent? in
+                if let a = c.asciiValue, (0x01...0x1A).contains(a) {
+                    return Self.decodeKey(String(c)).map { InputEvent.key($0.name) }   // names non-reserved ctrl
+                }
+                if let a = c.asciiValue, a < 0x20 { return nil }   // stray C0 control byte → drop
+                return .text(String(c))
+            }
         }
     }
 
