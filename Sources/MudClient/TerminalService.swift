@@ -8,6 +8,9 @@
 import Foundation
 import DependencyInjection
 import Parsing
+#if canImport(AppKit)
+import AppKit
+#endif
 
 final class TerminalService {
     @LazyInjected(Container.cursor) private var cursor
@@ -375,6 +378,10 @@ final class TerminalService {
         }
         return nil
     }
+
+    /// The terminal width in columns, falling back to 80 when the size can't be read (e.g. no tty).
+    /// Exposed to Lua as `__term_cols` so the help renderer can pack output to the real width.
+    func terminalColumns() -> Int { getTerminalWidth() ?? 80 }
     
     private func handleUpArrow() {
         if currentCommandIndex > 0 {
@@ -518,10 +525,9 @@ final class TerminalService {
 
     /// Break one logical line into physical rows of at most `width` VISIBLE characters, copying ANSI
     /// escape sequences verbatim (they never count toward the width). A blank logical line yields one
-    /// blank row so vertical spacing is preserved. NOTE: colour state is not carried across a wrap
-    /// boundary, so the continuation of a coloured line longer than the terminal width renders
-    /// uncoloured — rare in MUD output and purely cosmetic in the scrolled-back view.
-    private func wrapVisible(_ line: String, width: Int) -> [String] {
+    /// blank row so vertical spacing is preserved. This low-level splitter does NOT carry colour across
+    /// rows — `selfContainedPhysicalRows` layers that on top so the scrolled-back repaint stays coloured.
+    static func wrapVisible(_ line: String, width: Int) -> [String] {
         guard width > 0 else { return [line] }
         let chars = Array(line)
         var rows: [String] = []
@@ -558,6 +564,58 @@ final class TerminalService {
         return rows
     }
 
+    /// The SGR escape sequence "active" after processing `text` — the accumulation of colour/attribute
+    /// SGR sequences (`ESC[…m`) not yet cancelled by a reset. A reset (`ESC[0m` or the empty `ESC[m`)
+    /// clears the set; any other SGR sequence is appended verbatim. Non-SGR escapes are ignored. This
+    /// is the carry a scrollback line inherits from everything printed before it — the pure core of the
+    /// "colour survives into the next stored/wrapped line" fix, unit-tested directly.
+    static func activeSGRState(_ text: String) -> String {
+        let chars = Array(text)
+        var active: [String] = []
+        var i = 0
+        while i < chars.count {
+            if chars[i] == "\u{1B}", i + 1 < chars.count, chars[i + 1] == "[" {
+                var j = i + 2                                  // scan CSI parameter/intermediate bytes
+                while j < chars.count, let a = chars[j].asciiValue, (0x20...0x3F).contains(a) { j += 1 }
+                guard j < chars.count else { break }           // incomplete sequence at the tail
+                let final = chars[j]
+                if final == "m" {                              // an SGR sequence
+                    let params = String(chars[(i + 2)..<j])
+                    if params.isEmpty || params == "0" {
+                        active.removeAll()                     // reset clears the carried state
+                    } else {
+                        active.append(String(chars[i...j]))
+                    }
+                }
+                i = j + 1
+            } else {
+                i += 1
+            }
+        }
+        return active.joined()
+    }
+
+    /// Wrap a sequence of logical lines into physical rows, each made SELF-CONTAINED by prefixing the
+    /// SGR state active at that row's start (carried from earlier lines and earlier rows of the same
+    /// logical line). This is the fix for the scrolled-back "only the first line keeps its colour" bug:
+    /// stored logical lines and wrap continuations otherwise inherit no SGR, so a colour set earlier
+    /// renders as default when the row is repainted in isolation (the repaint resets SGR per row).
+    static func selfContainedPhysicalRows(_ lines: [String], width: Int) -> [String] {
+        var rows: [String] = []
+        var carry = ""                                        // SGR active entering the current logical line
+        for line in lines {
+            let base = wrapVisible(line, width: width)
+            var consumed = ""                                 // text seen so far within this line
+            for row in base {
+                let prefix = activeSGRState(carry + consumed) // SGR active at this row's start
+                rows.append(prefix.isEmpty ? row : prefix + row)
+                consumed += row
+            }
+            carry = activeSGRState(carry + consumed)          // state leaving this line → next line's carry
+        }
+        return rows
+    }
+
     /// The number of VISIBLE characters in a string, skipping ANSI escape sequences.
     private func visibleLength(_ s: String) -> Int {
         let chars = Array(s)
@@ -589,10 +647,10 @@ final class TerminalService {
     /// the current live tail. The last element is always the row the live output cursor sits on
     /// (empty when the last write ended on a newline), so index `count-1` is the live bottom row.
     private func physicalRows(width: Int) -> [String] {
-        var rows: [String] = []
-        for line in scrollbackLines { rows += wrapVisible(line, width: width) }
-        rows += wrapVisible(pendingLine, width: width)
-        return rows
+        // Each row carries the SGR state active at its start (see selfContainedPhysicalRows), so the
+        // scrolled-back repaint keeps colour on continuation rows and on lines after the first — the
+        // repaint resets SGR per row, which otherwise dropped every colour set on an earlier line/row.
+        return Self.selfContainedPhysicalRows(scrollbackLines + [pendingLine], width: width)
     }
 
     /// Drop terminal REPLIES from keyboard input: cursor-position reports (`ESC[<n>;<n>R`) and device-
@@ -874,17 +932,25 @@ final class TerminalService {
 
     // MARK: Output niceties
 
-    /// Ring the terminal bell (exposed to Lua as `bell`).
+    /// Ring the terminal bell (exposed to Lua as `bell`), the audible way AND the visible way.
     ///
-    /// BEL goes straight to the CONTROLLING TERMINAL with a raw `write(2)` — deliberately not through
-    /// `writeToStandardOut`/FileHandle like the rest of the screen output. That path had two ways to
-    /// lose a bell silently: a FileHandle write error is swallowed (the `catch` "reports" it via this
-    /// class's own `print`, i.e. back into the same output machinery), and when stdout is wrapped or
-    /// redirected by a launcher the byte never reaches a terminal at all. `/dev/tty` is the process's
-    /// terminal regardless of where stdout points, and `write(2)` is unbuffered, so the BEL is on the
-    /// wire the moment this returns. Falls back to STDOUT_FILENO if `/dev/tty` won't open (e.g. no
-    /// controlling terminal), matching the previous best case.
+    /// First `NSSound.beep()` — the macOS system alert sound. This is what actually makes noise in the
+    /// common real-world setup: most terminal emulators ship with the *audible* bell turned OFF (only a
+    /// visual flash, or nothing), so a bare BEL byte is silent no matter how reliably it's delivered.
+    /// The system beep goes through Core Audio and is heard regardless of the emulator's bell setting.
+    ///
+    /// Then the BEL byte, for terminals that flash/badge/urgent-hint on a bell: it goes straight to the
+    /// CONTROLLING TERMINAL with a raw `write(2)` — deliberately not through `writeToStandardOut`/
+    /// FileHandle. That path had two ways to lose a bell silently: a FileHandle write error is swallowed
+    /// (the `catch` "reports" it via this class's own `print`, i.e. back into the same output
+    /// machinery), and when stdout is wrapped/redirected by a launcher the byte never reaches a terminal
+    /// at all. `/dev/tty` is the process's terminal regardless of where stdout points, and `write(2)` is
+    /// unbuffered, so the BEL is on the wire the moment this returns. Falls back to STDOUT_FILENO if
+    /// `/dev/tty` won't open (e.g. no controlling terminal), matching the previous best case.
     func bell() {
+        #if canImport(AppKit)
+        NSSound.beep()
+        #endif
         var bel: UInt8 = 0x07
         let fd = open("/dev/tty", O_WRONLY)
         if fd >= 0 {

@@ -168,22 +168,67 @@ end)
 
 -- ---- colors() live demo ----
 
-test("colors lists every base color, bright variant, and modifier", function()
+test("colors lists every base color, bright variant, and attribute (exhaustive)", function()
   local names = {}
   for _, n in ipairs(colors) do names[n] = true end
   for _, c in ipairs({ "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white" }) do
     expect(names[c]):truthy()
     expect(names["bright " .. c]):truthy()
   end
-  for _, m in ipairs({ "bold", "dim", "underline", "reversed" }) do expect(names[m]):truthy() end
+  -- All broadly-supported text attributes are present, including the new italic/blink/strikethrough.
+  for _, m in ipairs({ "bold", "dim", "italic", "underline", "blink", "reversed", "strikethrough" }) do
+    expect(names[m]):truthy()
+  end
 end)
 
-test("colors() demo prints every name (rendered in its own color)", function()
+test("colors() demo prints every name grouped, with the colorN escape-hatch note", function()
   local out = joined(function() colors() end)
   for _, n in ipairs(colors) do
     expect(out:find(n, 1, true) ~= nil):truthy()
   end
   expect(out:find("bright red", 1, true) ~= nil):truthy()
+  expect(out:find("attributes:", 1, true) ~= nil):truthy()   -- grouped output
+  expect(out:find("colorN", 1, true) ~= nil):truthy()        -- advanced escape-hatch note
+end)
+
+-- ---- help() horizontal packing (__pack_names) ----
+
+test("__pack_names greedily flows names within the width", function()
+  local lines = __pack_names({ "aa", "bb", "cc", "dd" }, 8, 0)
+  -- "aa bb cc" is exactly 8; adding " dd" would overflow, so it wraps to a second line.
+  expect(#lines):eq(2)
+  expect(lines[1]):eq("aa bb cc")
+  expect(lines[2]):eq("dd")
+end)
+
+test("__pack_names honours the indent on every line", function()
+  local lines = __pack_names({ "one", "two" }, 6, 2)
+  -- indent 2, width 6: "  one" is 5; " two" would make 9 > 6, so "two" wraps (indented).
+  expect(lines[1]):eq("  one")
+  expect(lines[2]):eq("  two")
+end)
+
+test("__pack_names returns one (indent-only) line for an empty list", function()
+  local lines = __pack_names({}, 40, 2)
+  expect(#lines):eq(1)
+  expect(lines[1]):eq("  ")
+end)
+
+test("help() catalog packs group members horizontally (many names, few lines)", function()
+  for i = 1, 12 do doc("packname_" .. i, { text = "x", group = "packgrp" }) end
+  local out = capture(function() help() end)
+  -- Find the "packgrp" header, then confirm its members are flowed onto far fewer than 12 lines.
+  local hi
+  for i, line in ipairs(out) do if line == "packgrp" then hi = i end end
+  expect(hi ~= nil):truthy()
+  -- Collect the indented member lines that immediately follow the header.
+  local member_lines = 0
+  for i = hi + 1, #out do
+    if out[i]:sub(1, 2) == "  " then member_lines = member_lines + 1 else break end
+  end
+  expect(member_lines >= 1):truthy()
+  expect(member_lines < 12):truthy()                          -- packed, not one-per-line
+  expect(out[hi + 1]:find("packname_1", 1, true) ~= nil):truthy()
 end)
 
 -- ---- echo() coercion wrapper ----

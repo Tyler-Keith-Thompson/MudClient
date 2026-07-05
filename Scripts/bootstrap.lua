@@ -194,8 +194,43 @@ local function summary(e)
   return s
 end
 
+-- __pack_names(names, width, indent) -> array of lines. Greedily flows the space-separated `names`
+-- into as few lines as possible, each (including its `indent` leading spaces) at most `width` visible
+-- characters wide. Always returns at least one line (the bare indent for an empty list) so callers can
+-- ipairs() the result unconditionally. Pure — unit-tested directly.
+function __pack_names(names, width, indent)
+  indent = indent or 0
+  width = math.max(width or 80, indent + 1)
+  local pad = string.rep(" ", indent)
+  local lines, cur = {}, nil
+  for _, name in ipairs(names) do
+    if cur == nil then
+      cur = pad .. name
+    elseif #cur + 1 + #name <= width then
+      cur = cur .. " " .. name
+    else
+      lines[#lines + 1] = cur
+      cur = pad .. name
+    end
+  end
+  lines[#lines + 1] = cur or pad
+  return lines
+end
+
+-- The current terminal width (host-provided via __term_cols; 80 when unavailable), for packing.
+local function term_cols()
+  if type(__term_cols) == "function" then
+    local ok, n = pcall(__term_cols)
+    if ok and type(n) == "number" and n > 0 then return math.floor(n) end
+  end
+  return 80
+end
+
 -- List every documented target, grouped; or only the given group. Hidden entries (alias names like
 -- "color" for "colors") resolve via help("name") but don't clutter listings.
+--   * The full catalog (no group given) packs each group's function NAMES horizontally into columns
+--     across the terminal width, so the whole thing fits in ~one screen instead of one line per fn.
+--   * A single-group view keeps the readable one-line-summary style (name + first line of its doc).
 local function help_list(only_group)
   local groups = {}
   for _, e in pairs(__docs.by_name) do
@@ -212,12 +247,21 @@ local function help_list(only_group)
     echo(only_group and ("no documented entries in group '" .. only_group .. "'") or "nothing documented", "yellow")
     return
   end
+  local cols = term_cols()
   for _, g in ipairs(gnames) do
     echo(g, "cyan")
     local es = groups[g]
     table.sort(es, function(a, b) return (a.name or "") < (b.name or "") end)
-    for _, e in ipairs(es) do
-      echo(string.format("  %-22s %s", e.name or "?", summary(e)))
+    if only_group == nil then
+      -- Catalog: flow the names horizontally (indented under the group header).
+      local names = {}
+      for _, e in ipairs(es) do names[#names + 1] = e.name or "?" end
+      for _, line in ipairs(__pack_names(names, cols, 2)) do echo(line) end
+    else
+      -- Single group: one readable summary line per entry.
+      for _, e in ipairs(es) do
+        echo(string.format("  %-22s %s", e.name or "?", summary(e)))
+      end
     end
   end
 end
@@ -305,25 +349,34 @@ end
 -- colors — the named-color help, as a live demo
 --------------------------------------------------------------------------------
 
--- The canonical spec vocabulary. The HOST resolves these (LuaScriptEngine.sgrCodes over
--- PanelHost.palette — the same table the panel/minimap layer uses); this list mirrors it for
--- discovery. A spec is space-separated words: at most one base color, `bright` to brighten it
--- ("bright red" and "brightred" are both fine), plus any modifiers.
+-- The canonical spec vocabulary, and the SINGLE SOURCE the `colors` list and `colors()` demo are both
+-- generated from — add a name here and it appears in both automatically. The HOST resolves specs
+-- (LuaScriptEngine.sgrCodes over PanelHost.palette for colors, LuaScriptEngine.attributeCodes for
+-- attributes); these lists mirror those for discovery. A spec is space-separated words: at most one
+-- base color, `bright` to brighten it ("bright red" and "brightred" are both fine), any attributes,
+-- and the advanced `colorN` (256-color) escape hatch.
 local BASE_COLORS = { "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white" }
-local MODIFIERS   = { "bold", "dim", "underline", "reversed" }
+-- Text attributes, in the order colors() lists them. Each is a valid spec word; the host also accepts
+-- the aliases faint/italics/reverse/inverse/strike/strikethru (see LuaScriptEngine.attributeCodes).
+local ATTRIBUTES  = { "bold", "dim", "italic", "underline", "blink", "reversed", "strikethrough" }
 
 -- `colors` is both a list (its array part holds every name, so `#colors` auto-prints them) and
--- callable: `colors()` prints each name rendered IN that color/modifier — a live palette demo.
+-- callable: `colors()` prints each name rendered IN that color/attribute — a live palette demo,
+-- grouped base / bright / attributes with a footer note about the colorN escape hatch.
 colors = {}
 for _, c in ipairs(BASE_COLORS) do colors[#colors + 1] = c end
 for _, c in ipairs(BASE_COLORS) do colors[#colors + 1] = "bright " .. c end
-for _, m in ipairs(MODIFIERS) do colors[#colors + 1] = m end
+for _, m in ipairs(ATTRIBUTES) do colors[#colors + 1] = m end
 setmetatable(colors, { __call = function()
-  echo("color specs: space-separated words — one base color, 'bright' to brighten it, any modifiers.", "dim")
-  echo('e.g. echo("hello", "bright red")  echo("hi", "bold red underline")  ("brightred" works too)', "dim")
+  echo("color specs: space-separated words — one base color, 'bright' to brighten it, any attributes.", "dim")
+  echo('e.g. echo("hi", "bright red")  echo("x", "bold underline red")  ("brightred" fuses too)', "dim")
+  echo("base colors:", "cyan")
   for _, c in ipairs(BASE_COLORS) do echo("  " .. c, c) end
+  echo("bright:", "cyan")
   for _, c in ipairs(BASE_COLORS) do echo("  bright " .. c, "bright " .. c) end
-  for _, m in ipairs(MODIFIERS) do echo("  " .. m, m) end
+  echo("attributes:", "cyan")
+  for _, m in ipairs(ATTRIBUTES) do echo("  " .. m, m) end
+  echo('note: colorN (0-255) is an advanced 256-color escape hatch — e.g. echo("x", "color214").', "dim")
 end })
 
 -- command(name, handler): the migration bridge. Instead of a host command registry, it defines a global
@@ -358,17 +411,20 @@ doc("send",  { sig = "send(text)", group = "io",
   text = "Send a command to the MUD (goes through the on_send hook and alias handling upstream).",
   example = 'send("look")' })
 doc("echo",  { sig = "echo(text[, color])", group = "io",
-  text = "Print a line to the local display. Non-string text is rendered like a REPL result. color is a spec: one base color, optionally 'bright', plus modifiers bold/dim/underline/reversed — run colors() for a live palette.",
+  text = "Print a line to the local display. Non-string text is rendered like a REPL result. color is a spec: one base color, optionally 'bright', plus attributes bold/dim/italic/underline/blink/reversed/strikethrough (or an advanced colorN) — run colors() for a live palette.",
   example = 'echo("ding!", "bright red")' })
 doc("bell",  { sig = "bell()", group = "io",
-  text = "Ring the terminal bell (an audible BEL written straight to the controlling terminal).",
+  text = "Ring the bell: plays the macOS system alert sound (audible even when the terminal's own bell is muted, which it usually is) and writes a BEL to the controlling terminal so emulators that flash/badge on a bell still do.",
   example = "bell()" })
+doc("copy",  { sig = "copy([n])", group = "terminal",
+  text = "Copy the last n scrollback lines (ANSI stripped) to the macOS clipboard; n defaults to 20. Echoes a confirmation with the number of lines copied.",
+  example = "copy(50)" })
 
 -- colors: the palette topic. help("colors"), help("color"), and help(colors) all land here; calling
 -- colors() prints the live demo. The stdlib `io` TABLE aliases to the "io" doc group so an unquoted
 -- help(io) still works.
 doc("colors", { sig = "colors()", group = "help", topic = true,
-  text = "The named colors echo/panels accept. Call colors() to print every name rendered in its own color; #colors lists the names plainly. Specs combine: \"bright red\", \"bold red underline\", \"brightred\".",
+  text = "The named colors and text attributes echo/panels accept. Call colors() to print every name rendered in its own style; #colors lists them plainly. Specs combine one base color, 'bright', and attributes (bold/dim/italic/underline/blink/reversed/strikethrough): \"bright red\", \"bold underline red\", \"brightred\". Advanced: colorN (0-255) is a 256-color escape hatch, e.g. \"color214\".",
   example = "colors()" })
 doc("color", { sig = "colors()", group = "help", hidden = true,
   text = "Alias of colors — see help(\"colors\") or run colors()." })

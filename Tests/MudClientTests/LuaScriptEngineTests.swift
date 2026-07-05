@@ -1,5 +1,8 @@
 import Foundation
 import Testing
+#if canImport(AppKit)
+import AppKit
+#endif
 
 @testable import MudClient
 
@@ -153,6 +156,77 @@ import Testing
 
     try engine.load(source: #"echo("g", "reversed")"#)
     #expect(echoed.last == "\u{1B}[7mg\u{1B}[0m")
+}
+
+@Test func echoResolvesTheFullAttributeVocabularyAnd256Color() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+
+    try engine.load(source: #"echo("a", "italic")"#)
+    #expect(echoed.last == "\u{1B}[3ma\u{1B}[0m")
+
+    try engine.load(source: #"echo("b", "blink")"#)
+    #expect(echoed.last == "\u{1B}[5mb\u{1B}[0m")
+
+    try engine.load(source: #"echo("c", "strikethrough")"#)
+    #expect(echoed.last == "\u{1B}[9mc\u{1B}[0m")
+
+    try engine.load(source: #"echo("d", "strike")"#)                // alias of strikethrough
+    #expect(echoed.last == "\u{1B}[9md\u{1B}[0m")
+
+    try engine.load(source: #"echo("e", "inverse")"#)              // alias of reversed
+    #expect(echoed.last == "\u{1B}[7me\u{1B}[0m")
+
+    try engine.load(source: #"echo("f", "color214")"#)            // 256-color escape hatch
+    #expect(echoed.last == "\u{1B}[38;5;214mf\u{1B}[0m")
+
+    try engine.load(source: #"echo("g", "bold color39 underline")"#)  // combines with attributes
+    // Attributes and colorN are emitted in encounter order (only a NAMED base color is deferred to the end).
+    #expect(echoed.last == "\u{1B}[1;38;5;39;4mg\u{1B}[0m")
+
+    // colorN out of range (>255) is unknown, not a 256-color select.
+    let (codes, unknown) = LuaScriptEngine.sgrCodes("color999")
+    #expect(codes.isEmpty)
+    #expect(unknown == ["color999"])
+}
+
+@Test func copyWritesJoinedScrollbackToClipboardAndConfirms() throws {
+    // Route copy()'s clipboard write into a capture so the test never touches the real pasteboard,
+    // then assert it echoes a "copied N lines" confirmation and wrote (the scrollback is empty in a
+    // headless test, so N is 0 — the wiring, format, and pasteboard call are what's under test).
+    let original = LuaScriptEngine.pasteboardWrite
+    defer { LuaScriptEngine.pasteboardWrite = original }
+    var captured: String?
+    LuaScriptEngine.pasteboardWrite = { captured = $0; return true }
+
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("copy(5)")
+    #expect(captured != nil)                                        // the pasteboard write happened
+    #expect(echoed.contains { $0.hasPrefix("copied ") && $0.hasSuffix("lines") })
+}
+
+@Test func copyRejectsNonPositiveCount() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("copy(0)")
+    #expect(echoed.contains { $0.contains("copy: expected a positive line count") })
+    echoed.removeAll()
+    engine.evalREPL("copy(-3)")
+    #expect(echoed.contains { $0.contains("copy: expected a positive line count") })
+}
+
+@Test func writeToPasteboardRoundTripsThroughACustomPasteboard() throws {
+    // NSPasteboard IS testable in the sandbox via a uniquely-named private pasteboard — it never
+    // touches the developer's real clipboard.
+    let name = NSPasteboard.Name("mudclient-copy-test-\(UUID().uuidString)")
+    let pb = NSPasteboard(name: name)
+    defer { pb.releaseGlobally() }
+    #expect(LuaScriptEngine.writeToPasteboard("hello\nworld", name: name))
+    #expect(pb.string(forType: .string) == "hello\nworld")
 }
 
 @Test func echoUnknownColorPrintsTextPlusHint() throws {

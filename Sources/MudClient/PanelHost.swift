@@ -29,6 +29,9 @@ final class PanelHost: @unchecked Sendable {
         var dim = false
         var reverse = false
         var underline = false
+        var italic = false
+        var blink = false
+        var strike = false
     }
 
     enum Align { case left, right, center }
@@ -162,8 +165,11 @@ final class PanelHost: @unchecked Sendable {
         var codes: [String] = []
         if span.bold { codes.append("1") }
         if span.dim { codes.append("2") }
+        if span.italic { codes.append("3") }
         if span.underline { codes.append("4") }
+        if span.blink { codes.append("5") }
         if span.reverse { codes.append("7") }
+        if span.strike { codes.append("9") }
         if let fg = span.fg { codes += Self.colorCodes(fg, background: false) }
         if let bg = span.bg { codes += Self.colorCodes(bg, background: true) }
         if codes.isEmpty { return text }
@@ -241,7 +247,10 @@ final class PanelHost: @unchecked Sendable {
              bold: truthy(dict["bold"]),
              dim: truthy(dict["dim"]),
              reverse: truthy(dict["reverse"]),
-             underline: truthy(dict["underline"]))
+             underline: truthy(dict["underline"]),
+             italic: truthy(dict["italic"]),
+             blink: truthy(dict["blink"]),
+             strike: truthy(dict["strike"]))
     }
 
     /// THE named-color table for the whole host: panel/minimap span colors AND `echo(text, color)`

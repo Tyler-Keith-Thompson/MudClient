@@ -12,6 +12,9 @@
 
 import DependencyInjection
 import Foundation
+#if canImport(AppKit)
+import AppKit
+#endif
 
 final class LuaScriptEngine: @unchecked Sendable {
     /// A registered line-trigger, alias, or gag. A reference type so `rule_enable`/`class_enable`
@@ -735,29 +738,93 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // bell() — ring the terminal bell.
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
+        // copy(n) — copy the last n scrollback lines (ANSI-stripped) to the macOS clipboard. n
+        // defaults to 20; a non-positive count is a usage error. Echoes a confirmation with the number
+        // of lines actually copied (fewer than n if the scrollback is shorter).
+        lua.register("copy") { [weak self] args in
+            guard let self else { return [] }
+            let requested = args.first.flatMap(Self.intArg) ?? 20
+            guard requested > 0 else {
+                self.usage(#"copy: expected a positive line count — e.g. copy(20)"#)
+                return []
+            }
+            let lines = Container.terminalService().scrollbackTail(count: requested)
+            _ = Self.pasteboardWrite(lines.joined(separator: "\n"))
+            self.onEcho("copied \(lines.count) line\(lines.count == 1 ? "" : "s")")
+            return []
+        }
+        // __term_cols() -> the terminal width in columns (falls back to 80). Internal (`__`-prefixed):
+        // it exists so the Lua help renderer can pack the catalog to the real width.
+        lua.register("__term_cols") { _ in [.int(Int64(Container.terminalService().terminalColumns()))] }
+    }
+
+    /// The sink `copy(n)` writes the joined scrollback text to. Overridable in tests so the suite can
+    /// point at a private NSPasteboard instead of clobbering the developer's real clipboard. Returns
+    /// true on success. `nonisolated(unsafe)` because it's a deliberate test seam mutated only from a
+    /// single test at a time.
+    nonisolated(unsafe) static var pasteboardWrite: (String) -> Bool = { writeToPasteboard($0) }
+
+    /// Put `text` on a pasteboard as a plain string (the general system pasteboard by default; a named
+    /// pasteboard when `name` is given, which the tests use to avoid touching the real clipboard).
+    @discardableResult
+    static func writeToPasteboard(_ text: String, name: Any? = nil) -> Bool {
+        #if canImport(AppKit)
+        let pb: NSPasteboard = (name as? NSPasteboard.Name).map(NSPasteboard.init(name:)) ?? .general
+        pb.clearContents()
+        return pb.setString(text, forType: .string)
+        #else
+        return false
+        #endif
+    }
+
+    /// The text-attribute vocabulary echo/panels understand → the SGR code each maps to. Broadly
+    /// terminal-supported attributes, with generous aliases. This is the SINGLE source of truth for
+    /// attribute words (the colours themselves come from `PanelHost.palette`); adding one here makes
+    /// it resolvable everywhere the spec layer runs. Kept in sync with the discovery list in
+    /// Scripts/bootstrap.lua (colors()/`#colors`).
+    static let attributeCodes: [String: String] = [
+        "bold": "1",
+        "dim": "2", "faint": "2",
+        "italic": "3", "italics": "3",
+        "underline": "4", "underlined": "4",
+        "blink": "5",
+        "reversed": "7", "reverse": "7", "inverse": "7", "inverted": "7",
+        "strikethrough": "9", "strike": "9", "strikethru": "9", "crossedout": "9",
+    ]
+
+    /// An advanced 256-colour escape hatch: a spec word of the form `colorN` (0-255) resolves to the
+    /// SGR foreground select "38;5;N". Returns the code fragments, or nil if the word isn't a `colorN`.
+    static func color256Codes(_ word: String) -> [String]? {
+        guard word.hasPrefix("color"),
+              let n = Int(word.dropFirst("color".count)), (0...255).contains(n) else { return nil }
+        return ["38", "5", String(n)]
     }
 
     /// Parse an `echo` colour spec into SGR codes. A spec is space-separated words: at most one base
     /// colour (the 16-colour names from `PanelHost.palette` — the SAME table the panel/minimap layer
-    /// uses, so the two surfaces can never disagree) plus any of the modifiers bold/dim/underline/
-    /// reversed. `bright` (as its own word) brightens the colour, so `"bright red"` and `"brightred"`
-    /// are equivalent; a lone `bright` with no colour falls back to bold. Returns the SGR codes to
-    /// apply and any words that resolved to nothing (so the caller can hint at `help(colors)`).
+    /// uses, so the two surfaces can never disagree), `bright` to brighten it, any number of text
+    /// attributes from `attributeCodes` (bold/dim/italic/underline/blink/reversed/strikethrough and
+    /// their aliases), and the advanced `colorN` (256-colour) escape hatch. `bright` (as its own word)
+    /// brightens the colour, so `"bright red"` and `"brightred"` are equivalent; a lone `bright` with
+    /// no colour falls back to bold. Returns the SGR codes to apply and any words that resolved to
+    /// nothing (so the caller can hint at `help(colors)`).
     static func sgrCodes(_ spec: String) -> (codes: [String], unknown: [String]) {
         var codes: [String] = []
         var colorIndex: Int?
         var bright = false
         var unknown: [String] = []
-        for word in spec.lowercased().split(separator: " ") {
-            switch word {
-            case "bold": codes.append("1")
-            case "dim": codes.append("2")
-            case "underline", "underlined": codes.append("4")
-            case "reversed", "reverse", "inverse": codes.append("7")
-            case "bright": bright = true
-            default:
-                if let idx = PanelHost.palette[String(word)] { colorIndex = idx }
-                else { unknown.append(String(word)) }
+        for raw in spec.lowercased().split(separator: " ") {
+            let word = String(raw)
+            if word == "bright" {
+                bright = true
+            } else if let attr = Self.attributeCodes[word] {
+                codes.append(attr)
+            } else if let idx = PanelHost.palette[word] {
+                colorIndex = idx
+            } else if let c256 = Self.color256Codes(word) {
+                codes.append(contentsOf: c256)
+            } else {
+                unknown.append(word)
             }
         }
         if var i = colorIndex {

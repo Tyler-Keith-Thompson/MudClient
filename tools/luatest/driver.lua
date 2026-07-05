@@ -23,9 +23,10 @@ for _, n in ipairs({
   "ai_memory_request", "ai_retrieve", "ai_rag_load",
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
-  "unbind", "input_set", "bell", "disconnect", "is_connected", "connect", "telnet_send",
+  "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send",
   "load_script", "reload", "log_start", "log_stop", "log_active", "replay",
 }) do stub(n) end
+stub("__term_cols", function() return 80 end)   -- internal (__-prefixed): help() packs to this width
 stub("ai_rag_count", function() return 0 end)
 stub("ai_usage", function() return 0, 0, 0, 0 end)
 stub("ai_mem_usage", function() return 0, 0 end)
