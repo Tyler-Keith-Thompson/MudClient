@@ -363,4 +363,5 @@ end
 
 -- Pure, side-effect-free helpers exposed for the test harness (see Scripts/tests/hud_spec.lua). Not
 -- used by the live client — kept in one place so the split-out of this file stays honest about seams.
-_HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next_level }
+_HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next_level,
+              compass = compass, group_member_row = group_member_row, append_col = append_col }

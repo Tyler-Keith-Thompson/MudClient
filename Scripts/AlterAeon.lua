@@ -39,7 +39,8 @@ local function choose_recovery_position()
 end
 
 -- Exposed for the test harness (Scripts/tests/recover_spec.lua).
-_AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT }
+_AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
+             choose_recovery_position = choose_recovery_position }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)

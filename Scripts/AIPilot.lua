@@ -2102,4 +2102,8 @@ _AIP_TEST = {
   parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
   learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
   waypoint_num_for_room = waypoint_num_for_room, waypoint_cmd_num = waypoint_cmd_num,
+  parse_exits = parse_exits, cmd_ends_turn = cmd_ends_turn, untaken_exit = untaken_exit,
+  path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,
+  best_explore_dir = best_explore_dir, block_last_move = block_last_move,
+  arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
 }
