@@ -182,6 +182,21 @@ test("nomelee fight (NO kxwt_fighting): combat layout renders with the best esti
   expect(compass_rows >= 3):truthy()
 end)
 
+test("a freshly TARGETED enemy (no health reading yet) is promoted by name with a '?' estimate", function()
+  -- "You keep a steady eye on a druidess." seeds the name with pct=nil before any combat line;
+  -- the combat block must show the name immediately, with an unknown-health marker.
+  local now = os.time()
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = false
+  st.engaged_until = now + 10
+  st.opponents = { ["a druidess"] = { display = "a druidess", pct = nil, exact = false, t = now } }
+  local _, bottom = paint(st)
+  expect(#bottom):eq(3)
+  expect(all_text(bottom)):contains("a druidess")
+  expect(all_text(bottom)):contains("~?")                     -- unknown health, flagged as estimate
+end)
+
 test("nomelee fight with no opponent named yet still shows an 'engaged' target flag", function()
   local st = {}
   for k, v in pairs(BASE) do st[k] = v end

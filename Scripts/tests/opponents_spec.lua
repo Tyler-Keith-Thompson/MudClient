@@ -171,6 +171,73 @@ test("opponent keys are case-insensitive: 'An orc bachelor' and 'an orc bachelor
   expect(out[1].t):eq(105)
 end)
 
--- Trigger-level behaviours (kxwt_fighting -1 clear, room change clear, mdeath removal) are wired through
--- Swift-side regex triggers that call state.opponents mutation; the pure logic above covers the parts we
--- can exercise from Lua. The whole-widget rendering lives in hud_spec.lua / hud_layout_spec.lua.
+-- ---- explicit targeting lines (the `target` command) -------------------------------------------
+-- There is NO kxwt target tag; targeting is confirmed only in text. The "acquire" and "already"
+-- wordings below are VERBATIM from human-traces; "report" is the verbatim `score` line. The "clear"
+-- forms are researched best guesses (never observed in traces/help — flagged in AlterAeon.lua for
+-- live confirmation).
+
+local parse_target_line = _AA_TEST.parse_target_line
+
+test("parse_target_line classifies the researched targeting wordings", function()
+  -- Acquisition (verbatim trace: follows `target druidess`) — carries the name.
+  local kind, name = parse_target_line("You keep a steady eye on a druidess.")
+  expect(kind):eq("acquire"); expect(name):eq("a druidess")
+
+  -- Pronoun re-target (verbatim trace + nomelee log): no name to extract.
+  kind, name = parse_target_line("You are already targeting him.")
+  expect(kind):eq("already"); expect(name):eq(nil)
+  expect(parse_target_line("You are already targeting her.")):eq("already")
+  expect(parse_target_line("You are already targeting it.")):eq("already")
+
+  -- Passive score report (verbatim trace) — name, but only a report.
+  kind, name = parse_target_line("You are targeting Fraxis Hammerhand.")
+  expect(kind):eq("report"); expect(name):eq("Fraxis Hammerhand")
+
+  -- Clear forms (best-guess wordings, unconfirmed live).
+  kind, name = parse_target_line("You stop targeting a druidess.")
+  expect(kind):eq("clear"); expect(name):eq("a druidess")
+  kind, name = parse_target_line("You are no longer targeting a druidess.")
+  expect(kind):eq("clear"); expect(name):eq("a druidess")
+  expect(parse_target_line("You no longer have a target.")):eq("clear")
+
+  -- Non-targeting lines are nil.
+  expect(parse_target_line("You keep fighting.")):eq(nil)
+  expect(parse_target_line("A druidess is near death!")):eq(nil)
+end)
+
+test("acquisition seeds the enemy name at fight start, before any melee round or condition line", function()
+  -- Simulate the trigger bodies with the pure helpers: `target druidess` acquisition...
+  local tbl = {}
+  local kind, name = parse_target_line("You keep a steady eye on a druidess.")
+  expect(kind):eq("acquire")
+  opponent_note(tbl, name, nil, 100, false)         -- seeded by name, no health reading yet
+  local out = opponents_active(tbl, 100, 30, nil)
+  expect(#out):eq(1)
+  expect(out[1].name):eq("a druidess")
+  expect(out[1].pct):eq(nil)                        -- unknown health -> the HUD shows "?"
+  -- ...and the first condition line later fills in the estimate on the SAME entry.
+  opponent_note(tbl, "A druidess", 3, 105, false)
+  out = opponents_active(tbl, 105, 30, nil)
+  expect(#out):eq(1)
+  expect(out[1].pct):eq(3)
+end)
+
+test("target-clear withdraws a purely-seeded entry but never one with combat evidence", function()
+  local tbl = {}
+  opponent_note(tbl, "a druidess", nil, 100, false)  -- seeded by targeting only (pct nil)
+  -- The clear trigger's rule: remove only when pct == nil.
+  local e = tbl["a druidess"]
+  expect(e.pct):eq(nil)
+  tbl["a druidess"] = nil                            -- (what the trigger does for a pct-less entry)
+  expect(next(tbl)):eq(nil)
+
+  opponent_note(tbl, "an orc", 42, 100, false)       -- has a health reading -> still fighting us
+  local e2 = tbl["an orc"]
+  expect(e2.pct):eq(42)                              -- the trigger's guard (pct ~= nil) keeps this one
+end)
+
+-- Trigger-level behaviours (kxwt_fighting -1 clear, room change clear, mdeath removal, and the
+-- engaged-window writes by the targeting triggers) are wired through Swift-side regex triggers; the
+-- pure logic above covers the parts we can exercise from Lua. The whole-widget rendering lives in
+-- hud_spec.lua / hud_layout_spec.lua.

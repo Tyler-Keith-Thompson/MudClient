@@ -528,6 +528,61 @@ trigger([[(near death|mortally wounded|awful|pretty hurt|nasty wounds|a few woun
       opponent_note(state.opponents, name, pct, os.time(), false)
     end
   end)
+-- ---- explicit targeting (the `target` command) --------------------------------------------------
+-- There is NO kxwt target tag (the full documented tag vocabulary has nothing target-shaped;
+-- kxwt_fighting is the only enemy tag and it's melee-gated) — but the game confirms targeting in TEXT.
+-- Researched wordings, VERBATIM from human-traces:
+--   "You keep a steady eye on a druidess."      <- `target <name>` acquisition (carries the NAME)
+--   "You are already targeting him."            <- re-target, pronoun only (no name)
+--   "You are targeting Fraxis Hammerhand."      <- passive report inside `score` output
+-- Target-CLEARED wordings ('target noone') appear NOWHERE in the traces or help corpus — the forms
+-- below ("You stop targeting …" / "You are no longer targeting …" / "You no longer have a target") are
+-- best guesses, UNCONFIRMED LIVE; adjust here if the real send differs.
+-- Classify a targeting line -> kind ("acquire"|"already"|"report"|"clear"), name-or-nil.
+local function parse_target_line(line)
+  local t = line or ""
+  local name = t:match("^You keep a steady eye on (.+)%.$")
+  if name then return "acquire", name end
+  if t:match("^You are already targeting %a+%.$") then return "already", nil end
+  name = t:match("^You are targeting (.+)%.$")
+  if name then return "report", name end
+  name = t:match("^You stop targeting (.+)%.$") or t:match("^You are no longer targeting (.+)%.$")
+  if name then return "clear", name end
+  if t:match("^You no longer have a target") then return "clear", nil end
+  return nil
+end
+
+-- Acquisition ("steady eye") SEEDS the enemy name immediately — before any melee round or condition
+-- line — and opens the engaged window, so a caster who targets and opens with a spell has a named
+-- combat block up from the first cast. The pronoun form refreshes the window but carries no name
+-- (never creates a nameless entry). The passive `score` report seeds the name only while already
+-- engaged (score is routinely run at rest; a persistent target must not flash the combat HUD).
+trigger([[^You keep a steady eye on .+\.$]], function(line)
+  local _, name = parse_target_line(line)
+  if not name or is_ally(name) then return end
+  local now = os.time()
+  state.engaged_until = now + ENGAGE_TTL
+  opponent_note(state.opponents, name, nil, now, false)
+end)
+trigger([[^You are already targeting \w+\.$]], function(line)
+  if parse_target_line(line) == "already" then state.engaged_until = os.time() + ENGAGE_TTL end
+end)
+trigger([[^You are targeting .+\.$]], function(line)
+  local kind, name = parse_target_line(line)
+  if kind == "report" and name and engaged() and not is_ally(name) then
+    opponent_note(state.opponents, name, nil, os.time(), false)
+  end
+end)
+-- Target cleared (UNCONFIRMED wordings — see note above): withdraw the seeded entry only when it has
+-- no combat evidence yet (pct == nil, i.e. it exists purely because we targeted it); a mob with a
+-- health reading is still fighting us regardless of our targeting choice. Never touches the window.
+trigger([[^You (stop targeting .+|are no longer targeting .+|no longer have a target.*)$]], function(line)
+  local kind, name = parse_target_line(line)
+  if kind ~= "clear" or not name then return end
+  local e = state.opponents[name:lower()]
+  if e and e.pct == nil then state.opponents[name:lower()] = nil end
+end)
+
 trigger([[^kxwt_rvnum ]], function()                   -- room change abandons the engagement
   state.opponents = {}; state.engaged_until = nil
 end)
@@ -546,6 +601,7 @@ _AA_TEST.parse_melee = parse_melee
 _AA_TEST.melee_enemy = melee_enemy
 _AA_TEST.is_ally = is_ally
 _AA_TEST.ENGAGE_TTL = ENGAGE_TTL
+_AA_TEST.parse_target_line = parse_target_line
 
 -- ===== Authoritative spell membership from the `score`/affects block =============================
 -- kxwt_spellup/spelldown keep state.spells live between sightings, but they only carry names and a
