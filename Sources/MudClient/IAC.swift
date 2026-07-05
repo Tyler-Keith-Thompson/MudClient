@@ -29,6 +29,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
     case mxp
     case msp
     case mccp
+    case gmcp
     case `is` // binary
     case binary // is
     case msdp_array_close
@@ -63,6 +64,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         case .mxp: return String(UnicodeScalar(91))
         case .msp: return String(UnicodeScalar(90))
         case .mccp: return String(UnicodeScalar(86))
+        case .gmcp: return String(UnicodeScalar(201))
         case .is, .binary: return String(UnicodeScalar(0))
         case .msdp_array_close: return String(UnicodeScalar(6))
         case .msdp_array_open: return String(UnicodeScalar(5))
@@ -96,6 +98,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         case .mxp: return Data([91])
         case .msp: return Data([90])
         case .mccp: return Data([86])
+        case .gmcp: return Data([201])
         case .is, .binary: return Data([0])
         case .msdp_array_close: return Data([6])
         case .msdp_array_open: return Data([5])
@@ -129,6 +132,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         case .mxp: return "MXP"
         case .msp: return "MSP"
         case .mccp: return "MCCP"
+        case .gmcp: return "GMCP"
         case .is: return "IS"
         case .binary: return "BINARY"
         case .msdp_array_close: return "MSDP_ARRAY_CLOSE"
@@ -163,6 +167,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         Self.mxp,
         Self.msp,
         Self.mccp,
+        Self.gmcp,
         Self.is,
         Self.binary,
         Self.msdp_array_close,
@@ -203,6 +208,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
                 Parse { Self.mxp.asciiChar }.map { _ in Self.mxp }
                 Parse { Self.msp.asciiChar }.map { _ in Self.msp }
                 Parse { Self.mccp.asciiChar }.map { _ in Self.mccp }
+                Parse { Self.gmcp.asciiChar }.map { _ in Self.gmcp }
                 Parse { Self.is.asciiChar }.map { _ in Self.is }
                 Parse { Self.binary.asciiChar }.map { _ in Self.binary }
                 Parse { Self.msdp_array_close.asciiChar }.map { _ in Self.msdp_array_close }
@@ -254,6 +260,14 @@ extension IAC {
         case respond(Data)
         case passthrough(Substring)
         case ignore
+        /// A telnet option negotiation (WILL/WONT/DO/DONT <option>) whose response can be overridden by
+        /// the Lua `on_telnet_negotiate(verb, option)` hook. `verb` is the raw telnet verb byte, `option`
+        /// the numeric option, and `defaultResponse` the hardcoded reply used when the hook is absent or
+        /// declines. Surfaced (rather than pre-answered) so the async layer can consult Lua before replying.
+        case negotiate(verb: UInt8, option: UInt8, defaultResponse: Data)
+        /// A completed telnet subnegotiation (`IAC SB <option> <payload> IAC SE`). `payload` is the raw
+        /// bytes with `IAC IAC` un-escaped to a single `IAC`. Delivered to the Lua `on_telnet` hook.
+        case subnegotiation(option: UInt8, payload: Data)
         /// Telnet GO-AHEAD: the server has finished a (typically no-newline) prompt. Surfaced so the
         /// line assembler can flush its held partial line. See ``promptGoAheadMarker``.
         case promptEnd
@@ -267,6 +281,36 @@ extension IAC {
         codes.reduce(into: Data()) { $0.append($1.data) }
     }
 
+    /// Resolves the reply to a telnet option negotiation, giving the Lua `on_telnet_negotiate(verb,
+    /// option)` hook the chance to override the hardcoded default. The hook may return `"accept"` or
+    /// `"reject"`; anything else (including absence) falls back to `defaultResponse`.
+    ///
+    /// COMPRESS2/MCCP (options 85 and 86) are hard-excluded: the hook is never consulted for them and
+    /// any override is ignored, so compression stays negotiated off exactly as before.
+    static func telnetNegotiationResponse(verb: UInt8, option: UInt8, defaultResponse: Data) -> Data {
+        if option == 85 || option == 86 { return defaultResponse }
+        let verbName: String
+        switch verb {
+        case 251: verbName = "will"
+        case 252: verbName = "wont"
+        case 253: verbName = "do"
+        case 254: verbName = "dont"
+        default: return defaultResponse
+        }
+        guard let decision = Container.scriptInterpreter().engine
+            .telnetNegotiate(verb: verbName, option: Int(option)) else { return defaultResponse }
+        let opt = IAC.unknown(option)
+        switch (verb, decision) {
+        case (251, "accept"): return bytes(.iac, .do, opt)     // WILL -> DO
+        case (251, "reject"): return bytes(.iac, .dont, opt)   // WILL -> DONT
+        case (253, "accept"): return bytes(.iac, .will, opt)   // DO   -> WILL
+        case (253, "reject"): return bytes(.iac, .wont, opt)   // DO   -> WONT
+        case (252, "accept"), (252, "reject"): return bytes(.iac, .dont, opt) // WONT -> DONT
+        case (254, "accept"), (254, "reject"): return bytes(.iac, .wont, opt) // DONT -> WONT
+        default: return defaultResponse
+        }
+    }
+
     /// A parser that extracts a single ``StreamToken`` from the front of the server stream.
     ///
     /// Because it is driven by a `StreamingParser`, the IAC negotiation and command parsers can
@@ -276,35 +320,85 @@ extension IAC {
     /// mistaken for stray text.
     static func streamTokenParser() -> some Parser<Substring, StreamToken> {
         OneOf {
+            // Subnegotiation (`IAC SB <option> ... IAC SE`) must be tried BEFORE the 3-byte negotiation
+            // parser, which would otherwise match `IAC SB <option>` as a triple and leak the payload as
+            // display text. Delivered to Lua via `on_telnet`.
+            subnegotiationParser()
             negotiationParser().map { iac -> StreamToken in
+                // Byte value of an IAC option (named or unknown), for the numeric `option` fields below.
+                func opt(_ o: IAC) -> UInt8 { o.data.first ?? 0 }
                 switch iac {
-                case (.iac, .will, .mssp): return .respond(bytes(.iac, .dont, .mssp))
-                case (.iac, .will, .msdp): return .respond(bytes(.iac, .do, .msdp))
-                case (.iac, .will, .mccp): return .respond(bytes(.iac, .dont, .mccp))
-                case (.iac, .will, .msp): return .respond(bytes(.iac, .do, .msp))
+                // ---- Structural / special cases: answered here, NOT routed through on_telnet_negotiate. ----
                 // SUPPRESS-GO-AHEAD. `WILL SGA` = the server will stop sending GA; accept (DO SGA) and
                 // record that GA is no longer a prompt boundary. `DO SGA` only asks us to suppress the
                 // GA we never send, so just agree (WILL SGA) without touching GA-reception state.
                 case (.iac, .will, .sga): return .suppressGoAhead(bytes(.iac, .do, .sga))
                 case (.iac, .do, .sga): return .respond(bytes(.iac, .will, .sga))
-                case (.iac, .will, .zmp): return .respond(bytes(.iac, .dont, .zmp))
-                case (.iac, .do, .mxp): return .respond(bytes(.iac, .dont, .mxp))
-                case (.iac, .do, .line_mode): return .respond(bytes(.iac, .do, .line_mode))
-                case (.iac, .do, .actp): return .respond(bytes(.iac, .dont, .actp))
-                case (.iac, .do, .ttype): return .respond(bytes(.iac, .will, .ttype))
                 case (.iac, .send, .ttype):
                     return .respond(
                         bytes(.iac, .sb, .ttype, .is) + Data("MudClient".utf8) + bytes(.iac, .se)
                     )
-                case (.iac, .do, .unknown(let byte)): return .respond(bytes(.iac, .wont, .unknown(byte)))
-                case (.iac, .dont, .unknown(let byte)): return .respond(bytes(.iac, .wont, .unknown(byte)))
-                case (.iac, .will, .unknown(let byte)): return .respond(bytes(.iac, .dont, .unknown(byte)))
-                case (.iac, .wont, .unknown(let byte)): return .respond(bytes(.iac, .dont, .unknown(byte)))
+                // MCCP/COMPRESS2 (86): kept exactly as today — refused (DONT) as a plain `respond`, never
+                // routed through `negotiate`, so the Lua override hook can never touch it. See the async
+                // handler for the matching COMPRESS2 (85) hard-exclusion.
+                case (.iac, .will, .mccp): return .respond(bytes(.iac, .dont, .mccp))
+                // ---- Overridable option negotiations: default reply preserved, but on_telnet_negotiate wins. ----
+                case (.iac, .will, .mssp): return .negotiate(verb: opt(.will), option: opt(.mssp), defaultResponse: bytes(.iac, .dont, .mssp))
+                case (.iac, .will, .msdp): return .negotiate(verb: opt(.will), option: opt(.msdp), defaultResponse: bytes(.iac, .do, .msdp))
+                case (.iac, .will, .gmcp): return .negotiate(verb: opt(.will), option: opt(.gmcp), defaultResponse: bytes(.iac, .do, .gmcp))
+                case (.iac, .will, .msp): return .negotiate(verb: opt(.will), option: opt(.msp), defaultResponse: bytes(.iac, .do, .msp))
+                case (.iac, .will, .zmp): return .negotiate(verb: opt(.will), option: opt(.zmp), defaultResponse: bytes(.iac, .dont, .zmp))
+                case (.iac, .do, .mxp): return .negotiate(verb: opt(.do), option: opt(.mxp), defaultResponse: bytes(.iac, .dont, .mxp))
+                case (.iac, .do, .line_mode): return .negotiate(verb: opt(.do), option: opt(.line_mode), defaultResponse: bytes(.iac, .do, .line_mode))
+                case (.iac, .do, .actp): return .negotiate(verb: opt(.do), option: opt(.actp), defaultResponse: bytes(.iac, .dont, .actp))
+                case (.iac, .do, .ttype): return .negotiate(verb: opt(.do), option: opt(.ttype), defaultResponse: bytes(.iac, .will, .ttype))
+                case (.iac, .do, .unknown(let byte)): return .negotiate(verb: opt(.do), option: byte, defaultResponse: bytes(.iac, .wont, .unknown(byte)))
+                case (.iac, .dont, .unknown(let byte)): return .negotiate(verb: opt(.dont), option: byte, defaultResponse: bytes(.iac, .wont, .unknown(byte)))
+                case (.iac, .will, .unknown(let byte)): return .negotiate(verb: opt(.will), option: byte, defaultResponse: bytes(.iac, .dont, .unknown(byte)))
+                case (.iac, .wont, .unknown(let byte)): return .negotiate(verb: opt(.wont), option: byte, defaultResponse: bytes(.iac, .dont, .unknown(byte)))
                 default: return .ignore
                 }
             }
             IAC.commandParser().map { _ in StreamToken.promptEnd } // currently only IAC GA
             Prefix(1).map { StreamToken.passthrough($0) }
+        }
+    }
+
+    /// Parses one complete telnet subnegotiation, `IAC SB <option> <payload> IAC SE`, into a
+    /// ``StreamToken/subnegotiation(option:payload:)``. The payload is everything between the option
+    /// byte and the closing `IAC SE`, with `IAC IAC` un-escaped back to a single `IAC` byte.
+    ///
+    /// Built from `PrefixUpTo`, which cooperates with the streaming driver: while the closing `IAC SE`
+    /// has not yet arrived it reports "incomplete" so the driver buffers the partial subnegotiation
+    /// across network reads instead of failing. (Edge case: a raw `0xFF` payload byte immediately
+    /// followed by `0xF0` can be mistaken for the terminator; AlterAeon's GMCP/MSDP payloads are
+    /// UTF-8/low-byte text and never contain a bare `0xFF`, so this does not arise in practice.)
+    static func subnegotiationParser() -> some Parser<Substring, StreamToken> {
+        Parse {
+            Self.iac.asciiChar
+            Self.sb.asciiChar
+            Prefix(1).map { UInt8($0.unicodeScalars.first!.value) }   // option byte
+            PrefixUpTo(Self.iac.asciiChar + Self.se.asciiChar)        // payload up to IAC SE
+            Self.iac.asciiChar
+            Self.se.asciiChar
+        }
+        .map { (option: UInt8, payload: Substring) -> StreamToken in
+            // Un-escape IAC IAC -> IAC and convert the Latin-1 scalars back to raw bytes.
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(payload.count)
+            var iterator = payload.unicodeScalars.makeIterator()
+            var pending: UInt8? = iterator.next().map { UInt8($0.value) }
+            while let b = pending {
+                if b == 255 { // IAC — collapse a doubled IAC IAC into one literal byte
+                    let next = iterator.next().map { UInt8($0.value) }
+                    bytes.append(255)
+                    pending = (next == 255) ? iterator.next().map { UInt8($0.value) } : next
+                } else {
+                    bytes.append(b)
+                    pending = iterator.next().map { UInt8($0.value) }
+                }
+            }
+            return .subnegotiation(option: option, payload: Data(bytes))
         }
     }
 }
@@ -348,6 +442,11 @@ extension AsyncSequence where Self: Sendable, Element == Data {
                 case .suppressGoAhead(let data):
                     try await writeToStream(data)
                     state.goAheadInEffect = false
+                case .negotiate(let verb, let option, let defaultResponse):
+                    try await writeToStream(IAC.telnetNegotiationResponse(verb: verb, option: option,
+                                                                          defaultResponse: defaultResponse))
+                case .subnegotiation(let option, let payload):
+                    Container.scriptInterpreter().engine.notifyTelnet(option: Int(option), payload: payload)
                 }
             }
             return output

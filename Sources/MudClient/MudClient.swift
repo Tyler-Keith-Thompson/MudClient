@@ -36,34 +36,24 @@ struct Connect: ParsableCommand {
         try Container.scriptInterpreter().parser.parse("#load {HUD}")
         try Container.scriptInterpreter().parser.parse("#load {Trivia}")
         
+        // The connection lifecycle now lives in ConnectionManager, which owns the current connection,
+        // pumps its output to the terminal/HUD, and can be re-driven at runtime (by the Lua
+        // connect/disconnect builtins). The default startup connection is unchanged.
+//        Container.connectionManager().connect(host: "godwars2.org", port: 3000)
+        Container.connectionManager().connect(host: "alteraeon.com", port: 3002)
+//        Container.connectionManager().connect(host: "localhost", port: 3000)
         Task {
-//            let connection = Connection(host: "godwars2.org", port: 3000)
-            let connection = Connection(host: "alteraeon.com", port: 3002)
-//            let connection = Connection(host: "localhost", port: 3000)
-            try await connection.connect()
-            Task {
-                for try await string in connection {
-                    // Refresh the panel model FIRST (triggers have already updated `state`), then paint.
-                    // render() draws output for a real chunk, or just refreshes the furniture for an
-                    // empty (fully-gagged kxwt status) batch — which is exactly when hp/mana/room change.
-                    Container.scriptInterpreter().engine.notifyUpdate()
-                    Container.sessionLog().logServer(string)   // TinTin #log: record live server output
-                    Container.terminalService().render(string)
-                }
-            }
-            Task {
-                let stream = Container.inputService().commandStream.processScriptInput()
-                for try await command in stream {
-                    // Consult the optional Lua `on_send` hook per final atomic command (may drop it,
-                    // replace it, or inject additional commands), then transmit and log what's sent.
-                    for outbound in Container.scriptInterpreter().engine.filterOutbound(command) {
-                        Container.sessionLog().logCommand(outbound)
-                        try await connection.send(outbound)
-                    }
+            let stream = Container.inputService().commandStream.processScriptInput()
+            for try await command in stream {
+                // Consult the optional Lua `on_send` hook per final atomic command (may drop it,
+                // replace it, or inject additional commands), then transmit and log what's sent.
+                for outbound in Container.scriptInterpreter().engine.filterOutbound(command) {
+                    Container.sessionLog().logCommand(outbound)
+                    Container.connectionManager().send(outbound)
                 }
             }
         }
-        
+
         dispatchMain()
     }
     

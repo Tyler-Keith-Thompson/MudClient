@@ -212,6 +212,42 @@ final class LuaScriptEngine: @unchecked Sendable {
         return out + base
     }
 
+    /// The socket just went active. No-op unless the script defines `on_connect`.
+    func notifyConnect() {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_connect", [])
+    }
+
+    /// The socket went down. No-op unless the script defines `on_disconnect(reason)`.
+    func notifyDisconnect(reason: String) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_disconnect", [.string(reason)])
+    }
+
+    /// A GO-AHEAD prompt boundary flushed `text`. No-op unless the script defines `on_prompt(text)`.
+    func notifyPrompt(_ text: String) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_prompt", [.string(text)])
+    }
+
+    /// A telnet subnegotiation arrived. Delivers the numeric `option` and the raw `payload` bytes (as
+    /// a byte-exact Lua string) to `on_telnet(option, payload)`. No-op unless the script defines it.
+    func notifyTelnet(option: Int, payload: Data) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_telnet", [.int(Int64(option)), .bytes(payload)])
+    }
+
+    /// Consult the optional `on_telnet_negotiate(verb, option)` hook for a WILL/WONT/DO/DONT option.
+    /// Returns its string result (expected `"accept"`/`"reject"`), or nil if the hook is absent or
+    /// returns a non-string. Called synchronously from the telnet layer to decide a negotiation reply.
+    func telnetNegotiate(verb: String, option: Int) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let value = try? lua.callGlobalReturning("on_telnet_negotiate",
+                                                       [.string(verb), .int(Int64(option))]) else { return nil }
+        if case .string(let s) = value { return s }
+        return nil
+    }
+
     // MARK: - Loading scripts
 
     /// Register an extra game-specific builtin (e.g. `kxwt`, `recover`). Call
@@ -409,6 +445,40 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let name)? = args.first, args.count > 1, case .function(let handler) = args[1] {
                 self?.commands[name.lowercased()] = handler
             }
+            return []
+        }
+        // ---- Connection lifecycle control (host-generic; the default startup connection is unchanged) ----
+        // connect(host, port) — open (or re-open) the connection. `port` defaults to 23 if omitted.
+        lua.register("connect") { args in
+            guard case .string(let host)? = args.first else { return [] }
+            let port = UInt16(args.count > 1 ? (Self.intArg(args[1]) ?? 23) : 23)
+            Container.connectionManager().connect(host: host, port: port)
+            return []
+        }
+        // disconnect() — close the current connection.
+        lua.register("disconnect") { _ in
+            Container.connectionManager().disconnect()
+            return []
+        }
+        // is_connected() -> bool.
+        lua.register("is_connected") { _ in
+            [.bool(Container.connectionManager().isConnected)]
+        }
+        // telnet_send(option, payload) — send `IAC SB <option> <payload> IAC SE`, escaping IAC bytes in
+        // the payload. `option` is numeric; `payload` is a (byte) string.
+        lua.register("telnet_send") { args in
+            guard let option = args.first.flatMap(Self.intArg), option >= 0, option <= 255 else { return [] }
+            let payload: [UInt8] = {
+                if args.count > 1, case .string(let s) = args[1] { return Array(s.utf8) }
+                return []
+            }()
+            var data: [UInt8] = [255, 250, UInt8(option)]        // IAC SB <option>
+            for b in payload {
+                if b == 255 { data.append(255) }                 // escape IAC as IAC IAC
+                data.append(b)
+            }
+            data.append(contentsOf: [255, 240])                  // IAC SE
+            Container.connectionManager().sendRaw(Data(data))
             return []
         }
         installLogReplay()

@@ -227,6 +227,64 @@ private actor RecordedWrites {
     #expect(!suppressed.contains(promptGoAheadMarker))
 }
 
+@Test func iacSubnegotiationParsesOptionAndPayload() throws {
+    // IAC SB GMCP <payload> IAC SE — the payload is delivered verbatim and the whole sequence is
+    // consumed (never leaked to the display).
+    let payload = Data("Core.Hello { }".utf8)
+    let wire = Data([255, 250, 201]) + payload + Data([255, 240])
+    var input = Substring(String(data: wire, encoding: .isoLatin1)!)
+    let token = try IAC.streamTokenParser().parse(&input)
+    guard case .subnegotiation(let option, let got) = token else {
+        Issue.record("expected subnegotiation, got \(token)")
+        return
+    }
+    #expect(option == 201)
+    #expect(got == payload)
+    #expect(input.isEmpty)
+}
+
+@Test func iacSubnegotiationUnescapesDoubledIAC() throws {
+    // A raw 0xFF inside a subnegotiation is escaped on the wire as IAC IAC (255 255); it must be
+    // collapsed back to a single 0xFF in the delivered payload. MSDP option (69) here.
+    let wire = Data([255, 250, 69, 1, 255, 255, 2, 255, 240])  // payload bytes: 1, 0xFF, 2
+    var input = Substring(String(data: wire, encoding: .isoLatin1)!)
+    let token = try IAC.streamTokenParser().parse(&input)
+    guard case .subnegotiation(let option, let got) = token else {
+        Issue.record("expected subnegotiation, got \(token)")
+        return
+    }
+    #expect(option == 69)
+    #expect(got == Data([1, 255, 2]))
+}
+
+@Test func iacSubnegotiationSplitAcrossChunksIsBuffered() async throws {
+    // The closing IAC SE lands in a later chunk. The streaming driver must buffer the partial
+    // subnegotiation (not fail, not leak the payload as text), then consume it whole once SE arrives.
+    let chunks: [Data] = [
+        Data([255, 250, 201]) + Data("Core".utf8),                 // IAC SB GMCP + partial payload
+        Data(".Ping".utf8) + Data([255, 240]) + Data("X".utf8),    // rest + IAC SE + trailing text
+    ]
+    let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+    var output = ""
+    for try await piece in stream.handleIACCommunication(writeToStream: { _ in }) {
+        output += piece
+    }
+    #expect(output == "X")  // subnegotiation fully consumed; only the trailing text is visible
+}
+
+@Test func iacGmcpWillIsAccepted() async throws {
+    // With no on_telnet_negotiate hook, IAC WILL GMCP (255 251 201) must be accepted with IAC DO
+    // GMCP (255 253 201) so the server will actually start sending GMCP.
+    let stream = AsyncStream<Data> { c in c.yield(Data([255, 251, 201])); c.finish() }
+    let writes = RecordedWrites()
+    var output = ""
+    for try await piece in stream.handleIACCommunication(writeToStream: { await writes.add($0) }) {
+        output += piece
+    }
+    #expect(output.isEmpty)
+    #expect(await writes.all == [Data([255, 253, 201])])
+}
+
 @Test func gaggedKxwtBatchesRenderNothing() async throws {
     // Regression for "a bunch of blank lines before my command". When the player is idle, AlterAeon
     // streams kxwt_ status batches (group HP, prompt, sky/time) as their OWN network packets. Each

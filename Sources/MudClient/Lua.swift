@@ -20,6 +20,10 @@ enum LuaValue {
     case int(Int64)
     case number(Double)
     case string(String)
+    /// Raw bytes pushed to Lua byte-for-byte (via `lua_pushlstring`), preserving embedded NULs and
+    /// high bytes that a UTF-8 `String` round-trip would mangle. Used for binary telnet payloads.
+    /// Only ever produced host-side (pushed to Lua); Lua strings decode back as `.string`.
+    case bytes(Data)
     /// A reference to a Lua function stashed in the registry (e.g. a trigger handler).
     case function(LuaFunctionRef)
     /// A Lua table, split into its array part (1..#t, in order) and its string-keyed part.
@@ -175,7 +179,8 @@ final class Lua: @unchecked Sendable {
 
     /// Call a global function and return its first result, or `.nil` if it returned nothing. Returns
     /// Swift `nil` when the global is undefined or not a function — lets the host consult an optional
-    /// hook that yields a value (e.g. `on_send`) while distinguishing "no hook" from "hook returned nil".
+    /// hook that yields a value (e.g. `on_send`, `on_telnet_negotiate`) while distinguishing "no hook"
+    /// from "hook returned nil".
     func callGlobalReturning(_ name: String, _ args: [LuaValue]) throws -> LuaValue? {
         drainUnrefs()
         name.withCString { _ = lua_getglobal(state, $0) }
@@ -289,6 +294,7 @@ final class Lua: @unchecked Sendable {
         case .int(let i): lua_pushinteger(state, i)
         case .number(let d): lua_pushnumber(state, d)
         case .string(let s): pushString(s)
+        case .bytes(let d): pushBytes(d)
         case .function(let f): lua_rawgeti(state, clua_registryindex(), lua_Integer(f.ref))
         case .table(let array, let dict):
             lua_createtable(state, Int32(array.count), Int32(dict.count))
@@ -299,6 +305,15 @@ final class Lua: @unchecked Sendable {
             for (k, v) in dict {
                 push(v)
                 k.withCString { lua_setfield(state, -2, $0) }  // t[k] = v (pops v)
+            }
+        }
+    }
+
+    private func pushBytes(_ d: Data) {
+        if d.isEmpty { _ = lua_pushlstring(state, "", 0); return }
+        d.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            raw.baseAddress!.withMemoryRebound(to: CChar.self, capacity: raw.count) {
+                _ = lua_pushlstring(state, $0, raw.count)
             }
         }
     }

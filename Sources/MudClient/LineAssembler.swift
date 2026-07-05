@@ -7,6 +7,7 @@
 
 import Foundation
 import Afluent
+import DependencyInjection
 
 /// Private-use scalar the IAC layer injects wherever the server sent a telnet GO-AHEAD (IAC GA).
 /// AlterAeon marks the end of a no-newline prompt with GO-AHEAD, so this doubles as the "flush the
@@ -30,12 +31,22 @@ final class LineAssembler: @unchecked Sendable {
     /// Text received but not yet terminated by a newline or a GO-AHEAD flush.
     private var carry = ""
 
+    /// Called with the flushed partial-line text each time a GO-AHEAD prompt boundary flushes it, so
+    /// the host can surface the prompt (e.g. to a Lua `on_prompt` hook). Defaults to a no-op.
+    var onPrompt: (String) -> Void = { _ in }
+
     func assemble(_ incoming: String) -> String {
         carry += incoming
         var output = ""
         while let idx = carry.firstIndex(where: { $0 == "\n" || $0 == promptGoAheadMarker }) {
-            output += carry[..<idx]
-            if carry[idx] == "\n" { output.append("\n") } // keep the newline; drop the GO-AHEAD marker
+            let segment = carry[..<idx]
+            output += segment
+            if carry[idx] == "\n" {
+                output.append("\n") // keep the newline; drop the GO-AHEAD marker
+            } else {
+                // A GO-AHEAD flush: the just-flushed segment is a complete prompt. Surface it.
+                onPrompt(String(segment))
+            }
             carry = String(carry[carry.index(after: idx)...])
         }
         return output
@@ -48,6 +59,8 @@ extension AsyncSequence where Self: Sendable, Element == String {
     /// never seen — and gagged — in fragments.
     func assembleLines() -> AnyAsyncSequence<String> {
         let assembler = LineAssembler()
+        // Surface each flushed prompt to the script's optional `on_prompt` hook.
+        assembler.onPrompt = { Container.scriptInterpreter().engine.notifyPrompt($0) }
         return map { assembler.assemble($0) }.eraseToAnyAsyncSequence()
     }
 }
