@@ -2,7 +2,7 @@
 --
 -- Drives the character via the local model. Uses the generic host primitives ai_request / after,
 -- reads game state from AlterAeon.lua's `state` table + describe_state(), builds its own room map
--- (persisted with Lua serialization), and owns the prompt, turn loop, and #ai controls — all
+-- (persisted with Lua serialization), and owns the prompt, turn loop, and the pilot.* controls — all
 -- hot-reloadable.
 
 local cfg = {
@@ -18,12 +18,12 @@ local cfg = {
   use_memory = true,
   -- Memory head does EASY, FREQUENT extraction (parse room text -> structured facts), so it wants a
   -- cheap fast model. Haiku is the right default; the DECISION brain is where Sonnet belongs.
-  mem_model = "claude-haiku-4-5-20251001",  -- #ai memmodel haiku|sonnet|<id> to switch
+  mem_model = "claude-haiku-4-5-20251001",  -- pilot.memmodel('haiku'|'sonnet'|<id>) to switch
   -- RAG: retrieve the few doc passages most relevant to the current situation and feed them to the
   -- brain, so it knows the game's mechanics on demand instead of us hardcoding facts. Index is built
   -- offline (tools/finetune/build_rag_index.py) and embedded with the LOCAL embedding model.
   use_rag = true, rag_k = 3,
-  budget = 0,   -- session $ cap; auto-disarms when exceeded (0 = off). Set with `#ai budget <dollars>`.
+  budget = 0,   -- session $ cap; auto-disarms when exceeded (0 = off). Set with pilot.budget(<dollars>).
   home = os.getenv("HOME") or "",
   -- Trailing assistant prefill sent with every request. Qwen3.x always opens a <think> block and
   -- spends the whole token budget reasoning (→ empty/truncated commands); prefilling a CLOSED,
@@ -38,7 +38,7 @@ cfg.human_trace_file = cfg.dir .. "/human-traces.jsonl"   -- demonstrations from
 cfg.rag_index = cfg.dir .. "/rag_index.json"              -- doc embeddings; loader prefers the .bin sibling
 os.execute("mkdir -p '" .. cfg.dir .. "' 2>/dev/null")
 
--- Runtime state that should survive `#ai reload` (globals persist in the lua state across the
+-- Runtime state that should survive pilot.reload() (globals persist in the lua state across the
 -- script re-running). The epoch invalidates callbacks/timers scheduled by the previous load so a
 -- pre-reload in-flight model request can't fire stale commands afterward.
 _AIP = _AIP or {}
@@ -54,11 +54,11 @@ local P = {
   world = { creatures = {}, items = {}, inventory = {}, summary = "", room_id = nil }, mem_fail = 0,
   manual = "", nav = nil,
   rooms = {}, current_room = nil, dir_deltas = {}, trace = true, memories = {},
-  demo_count = 0,   -- human demonstrations captured this session (see #ai record)
+  demo_count = 0,   -- human demonstrations captured this session
 }
 
 -- The parsed `waypoint` list (P.waypoints) and the learned number<->room maps (P.wp_room/P.room_wp) are
--- PERSISTED with the map (save_map/load_map), so they survive both a hot `#ai reload` and a full
+-- PERSISTED with the map (save_map/load_map), so they survive both a hot pilot.reload() and a full
 -- relaunch — you list your waypoints once and goto keeps working. They're lazy-created where first used
 -- and repopulated by load_map() at the bottom of this file.
 
@@ -565,7 +565,7 @@ end
 
 -- Learn that waypoint NUMBER `num` travels to room `id` — recorded by OBSERVING an actual `waypoint <n>`
 -- move (see on_user_input + pilot_room_change). Writes into the _AIP-backed maps, so it survives a hot
--- `#ai reload`; a full relaunch forgets it (numbers shift with decay/reorder anyway), and the live-list
+-- pilot.reload(); a full relaunch forgets it (numbers shift with decay/reorder anyway), and the live-list
 -- name match carries goto across relaunches. Also confirms the destination is a waypoint room.
 local function learn_waypoint(num, id)
   if not num or not id or not P.rooms[id] then return end
@@ -697,7 +697,7 @@ local function exploration_summary()
   if ml ~= "" then
     lines[#lines + 1] = "Marked places (navigate('<label>') routes to the nearest):\n" .. ml
   end
-  -- Fast-travel: waypoints seen this session. From a waypoint room, `command("waypoint <n>")` jumps to
+  -- Fast-travel: waypoints seen this session. From a waypoint room, the game's `waypoint <n>` jumps to
   -- another; recall (unreliable) returns you to your recall site. Surfaced so the model can cross the
   -- world instead of walking when a destination is far.
   local wpn = {}
@@ -1194,7 +1194,7 @@ local function request_script_change(req)
   P.requested[key] = true
   local f = io.open(cfg.dir .. "/.ai-script-requests.jsonl", "a")
   if f then f:write('{"request":"' .. json_escape(req) .. '"}\n'); f:close() end
-  echo("[ai] ✎ requested a script change: \"" .. req .. "\" (queued; edit a script + #ai reload to apply)")
+  echo("[ai] ✎ requested a script change: \"" .. req .. "\" (queued; edit a script + pilot.reload() to apply)")
 end
 
 -- ---- reply handling ------------------------------------------------------------------------
@@ -1336,7 +1336,7 @@ local function run_memory_head(done)
       P.mem_fail = P.mem_fail + 1
       echo("[ai] (memory head error: " .. err .. ")")
       if P.mem_fail >= 2 then cfg.use_memory = false
-        echo("[ai] memory head disabled — set ANTHROPIC_API_KEY or `#ai memkey <key>`, then `#ai mem on`.") end
+        echo("[ai] memory head disabled — set ANTHROPIC_API_KEY or pilot.memkey('<key>'), then pilot.mem('on').") end
     else
       P.mem_fail = 0
       local t = extract_json(reply)
@@ -1450,16 +1450,19 @@ alias([[^explore$]], function()
   nav_step()
 end)
 
--- `#mark <label>` tags the CURRENT room with a landmark label (e.g. `#mark trainer`) so you can
--- `goto <label>` back to it later and the pilot can navigate('<label>') to it. `#mark` with no args
--- lists every tagged room; `#mark del <label>` (or `#mark -<label>`) removes one. Marks persist with
--- the map and show as ★ on the minimap. Multiple labels per room are fine.
-if command then command("mark", function(rest) mark_command(rest) end) end
+-- mark(label) tags the CURRENT room with a landmark label (e.g. mark('trainer')) so you can
+-- travel('<label>') back to it later and the pilot can navigate('<label>') to it. mark() with no args
+-- lists every tagged room; mark('del <label>') (or mark('-<label>')) removes one. Marks persist with
+-- the map and show as ★ on the minimap. Multiple labels per room are fine. (The `mark <label>` typed
+-- straight into the game line is a separate game alias and still works.)
+function mark(label) return mark_command(label) end
+doc(mark, { name = "mark", sig = "mark([label])", group = "map",
+  text = "Tag the current room with a landmark label; mark() lists all marks; mark('del <label>') removes one. Marks persist with the map, show as ★ on the minimap, and are travel()/navigate() targets." })
 function mark_command(args)
   args = trim(args or "")
   if args == "" then
     local s = marks_list()
-    if s == "" then echo("[mark] nothing marked yet. Stand in a room and `#mark <label>` (e.g. `#mark trainer`).")
+    if s == "" then echo("[mark] nothing marked yet. Stand in a room and mark('<label>') (e.g. mark('trainer')).")
     else echo("[mark] marked rooms:\n" .. s) end
     return
   end
@@ -1596,7 +1599,7 @@ end
 -- watching you actually `waypoint <n>` — never a fragile description match.
 function human_goto(label)
   label = trim(label or ""):lower()
-  if label == "" then echo("[goto] usage: goto <mark>  (see `#mark`; `goto stop` cancels)"); return end
+  if label == "" then echo("[goto] usage: travel('<mark>') or the game alias `goto <mark>`  (see mark(); travel('stop') cancels)"); return end
   if label == "stop" then
     P.goto_bridge = nil
     if P.nav then P.nav = nil; echo("[goto] stopped.") else echo("[goto] not navigating.") end
@@ -1687,7 +1690,7 @@ function human_goto(label)
   end
   -- plan.mode == "none": distinguish "not tagged anywhere" from "tagged, but not reachable overland".
   if plan.reason == "unmarked" then
-    echo("[goto] nothing is marked '" .. label .. "'. Stand in the room and `#mark " .. label .. "` first.")
+    echo("[goto] nothing is marked '" .. label .. "'. Stand in the room and mark('" .. label .. "') first.")
     return
   end
   -- "unreachable" also covers a mark that IS walkable from a known waypoint whose NUMBER we haven't
@@ -1707,8 +1710,17 @@ function human_goto(label)
 end
 alias([[^goto (.+)$]], function(_, label) human_goto(label) end)
 
--- `#waypoints` — show the fast-travel waypoints parsed from `waypoint` listings this session.
-if command then command("waypoints", function() echo(waypoints_hint()) end) end
+-- travel(mark) — the REPL-callable form of `goto`. `goto` is a Lua reserved word, so #goto('x') can't
+-- parse; use travel('x'). The `goto <mark>` typed straight into the game line (the alias above) still
+-- works unchanged. travel('stop') cancels an in-progress route.
+function travel(label) return human_goto(label) end
+doc(travel, { name = "travel", sig = "travel(mark)", group = "map",
+  text = "Route to a marked room (or 'death'/'corpse'), costing walking vs. recall/waypoint bridging and taking the cheaper. travel('stop') cancels. Same engine as the in-game `goto <mark>` alias (goto is a Lua keyword, so use travel() from the REPL)." })
+
+-- waypoints() — show the fast-travel waypoints parsed from `waypoint` listings this session.
+function waypoints() echo(waypoints_hint()) end
+doc(waypoints, { name = "waypoints", sig = "waypoints()", group = "map",
+  text = "List the fast-travel waypoints learned from `waypoint` listings this session (number, name, reachability)." })
 
 local RECALL_MAX_TRIES, HOP_MAX = 6, 5
 
@@ -1840,10 +1852,12 @@ function waypoints_hint()
   return table.concat(lines, "\n")
 end
 
--- `#reset room <dir>` — forget the room in <dir> from where you're standing (a manual heal for a bad
+-- reset('room <dir>') — forget the room in <dir> from where you're standing (a manual heal for a bad
 -- write to the map). Purges that room AND every edge pointing at it, so the direction shows as an
--- unexplored exit again; just walk there to remap it clean. `#reset here` forgets the current room.
-if command then command("reset", function(rest) reset_command(rest) end) end
+-- unexplored exit again; just walk there to remap it clean. reset('here') forgets the current room.
+function reset(args) return reset_command(args) end
+doc(reset, { name = "reset", sig = "reset('room <dir>' | 'here')", group = "map",
+  text = "Forget a mis-mapped room and every edge pointing at it, so its direction reads unexplored again — reset('room <dir>') for a neighbour, reset('here') for the current room. Walk back to remap it clean." })
 function reset_command(args)
   args = trim(args or ""):lower()
   local sub = args:match("^%S*")
@@ -1855,11 +1869,11 @@ function reset_command(args)
     target = cur
   elseif sub == "room" then
     local dir = CANON[args:match("^%S+%s+(%S+)") or ""]
-    if not dir then echo("[reset] usage: #reset room <dir>   (n/s/e/w/ne/nw/se/sw/u/d)"); return end
+    if not dir then echo("[reset] usage: reset('room <dir>')   (n/s/e/w/ne/nw/se/sw/u/d)"); return end
     target = P.rooms[cur].moves and P.rooms[cur].moves[dir]
     if not target then echo("[reset] no known room to the " .. dir .. " from here — nothing to forget."); return end
   else
-    echo("[reset] usage: #reset room <dir>  |  #reset here"); return
+    echo("[reset] usage: reset('room <dir>')  |  reset('here')"); return
   end
 
   local name = (P.rooms[target] and P.rooms[target].name) or ("room " .. tostring(target))
@@ -1944,7 +1958,7 @@ function take_turn_decide()
       if cfg.budget and cfg.budget > 0 then
         local spent = session_cost()
         if spent >= cfg.budget then
-          echo(string.format("[ai] budget cap $%.2f reached (~$%.2f spent this session) — disarming. `#ai budget 0` to lift it, then `#ai on`.", cfg.budget, spent))
+          echo(string.format("[ai] budget cap $%.2f reached (~$%.2f spent this session) — disarming. pilot.budget(0) to lift it, then pilot.on().", cfg.budget, spent))
           P.enabled = false; _AIP.enabled = false; return
         end
       end
@@ -2071,7 +2085,7 @@ local function set_enabled(on)
   _AIP.enabled = on
   if on then
     P.recent_cmds = {}; P.stale_skips = 0
-    echo("[ai] armed — the local model is now driving. `#ai off` to stop.")
+    echo("[ai] armed — the local model is now driving. pilot.off() to stop.")
     for _, primer in ipairs({ "look", "spells", "skills" }) do echo("[ai] > " .. primer); send(primer) end
     arm()
   else
@@ -2097,14 +2111,14 @@ function ai_command(args)
     if not P.busy then P.busy = true; take_turn() else echo("[ai] busy") end
   elseif verb == "goal" then if rest ~= "" then P.goal = rest; _AIP.goal = rest end; echo("[ai] goal: " .. P.goal)
   elseif verb == "tell" or verb == "say" or verb == "nudge" then
-    if rest == "" then echo("[ai] usage: #ai tell <one-off instruction>") else
+    if rest == "" then echo("[ai] usage: pilot.tell('<one-off instruction>')") else
       P.pending = rest; echo("[ai] director note (next turn): " .. rest)
-      if P.enabled then arm() else echo("[ai] (idle — #ai on to act)") end
+      if P.enabled then arm() else echo("[ai] (idle — pilot.on() to act)") end
     end
   elseif verb == "model" then ai_set_model(rest); echo("[ai] model: " .. (rest ~= "" and rest or "(auto)"))
   elseif verb == "brain" then
     local desc = set_brain(rest)
-    if desc then echo("[ai] brain: " .. desc) else echo("[ai] usage: #ai brain local | haiku | sonnet") end
+    if desc then echo("[ai] brain: " .. desc) else echo("[ai] usage: pilot.brain('local' | 'haiku' | 'sonnet')") end
   elseif verb == "mode" then
     local m = rest:lower()
     if m == "text" or m == "cmd" then cfg.use_tools = false
@@ -2123,21 +2137,21 @@ function ai_command(args)
     ai_set_memory_model(cfg.mem_model); echo("[ai] memory model: " .. cfg.mem_model)
   elseif verb == "memkey" then
     if rest ~= "" then ai_set_memory_key(rest); cfg.use_memory = true; P.mem_fail = 0; echo("[ai] memory key set; memory head on")
-    else echo("[ai] usage: #ai memkey <anthropic-api-key>") end
+    else echo("[ai] usage: pilot.memkey('<anthropic-api-key>')") end
   elseif verb == "cost" then
-    if not ai_usage then echo("[ai] cost tracking needs the new build — run `just run`, then `#ai reload`")
+    if not ai_usage then echo("[ai] cost tracking needs the new build — run `just run`, then pilot.reload()")
     else
       local total, dc, mc, du = session_cost()
       local seen = (du.i or 0) + (du.cr or 0) + (du.cw or 0)
       local cached = seen > 0 and math.floor(100 * (du.cr or 0) / seen) or 0
-      echo(string.format("[ai] session ~$%.2f | brain=%s $%.2f (%d%% of input served from cache) | memory $%.2f | `#ai usagereset` to zero it",
+      echo(string.format("[ai] session ~$%.2f | brain=%s $%.2f (%d%% of input served from cache) | memory $%.2f | pilot.usagereset() to zero it",
         total, cfg.brain, dc, cached, mc))
     end
   elseif verb == "usagereset" then ai_usage_reset(); echo("[ai] usage counters reset")
   elseif verb == "budget" then
     local n = tonumber(rest)
     if n then cfg.budget = n; echo("[ai] budget cap: " .. (n > 0 and ("$" .. n .. " (auto-disarms when a turn crosses it)") or "off"))
-    else echo("[ai] usage: #ai budget <dollars>  (0 = off). Current: $" .. (cfg.budget or 0)) end
+    else echo("[ai] usage: pilot.budget(<dollars>)  (0 = off). Current: $" .. (cfg.budget or 0)) end
   elseif verb == "rag" then
     local m = rest:lower()
     if m == "off" then cfg.use_rag = false elseif m == "on" then cfg.use_rag = true; ai_rag_load(cfg.rag_index) end
@@ -2155,20 +2169,65 @@ function ai_command(args)
   elseif verb == "tools" then
     echo(tools_json())   -- the exact OpenAI tool definitions sent to the model each turn
   elseif verb == "demo" then
-    if rest == "" then echo("[ai] usage: #ai demo <command> — preview the training example your command maps to")
+    if rest == "" then echo("[ai] usage: pilot.demo('<command>') — preview the training example your command maps to")
     else echo(build_human_demo(rest)) end
   elseif verb == "remember" then
-    if rest ~= "" then remember(rest) else echo("[ai] usage: #ai remember <fact>") end
+    if rest ~= "" then remember(rest) else echo("[ai] usage: pilot.remember('<fact>')") end
   elseif verb == "memories" then
     if #P.memories == 0 then echo("[ai] no memories yet") end
     for _, m in ipairs(P.memories) do echo("[ai] • " .. m.text .. (m.area and (" (" .. m.area .. ")") or "")) end
   elseif verb == "forget" then
     if rest:lower() == "all" then P.memories = {}; schedule_save(); echo("[ai] forgot everything")
-    else echo("[ai] usage: #ai forget all") end
+    else echo("[ai] usage: pilot.forget('all')") end
   else
-    echo("[ai] commands: on | off | once | status | goal <text> | tell <text> | remember <fact> | memories | forget all | model <id> | url <base> | trace [on|off] | tools")
+    echo("[ai] commands via the pilot table: pilot.on() | pilot.off() | pilot.once() | pilot.status() | pilot.goal(text) | pilot.tell(text) | pilot.remember(fact) | pilot.memories() | pilot.forget('all') | pilot.model(id) | pilot.brain('local'|'haiku'|'sonnet') | pilot.trace('on'|'off') | pilot.tools()  —  help(pilot)")
   end
 end
+
+-- ---- public pilot surface (the `pilot` table) ----------------------------------------------
+-- First-class, documented replacement for the old `#ai <sub>` string commands. Each member forwards
+-- its verb to ai_command; the table is callable so a legacy `#ai on` (rewritten by the host to
+-- `ai("on")`) and `pilot("on")` both still work. `ai(args)` remains as a thin deprecated wrapper.
+pilot = {}
+-- verb -> { sig, text }; turned into pilot.<verb>(arg) forwarders + individual docs.
+local PILOT_CMDS = {
+  on         = { sig = "pilot.on()",              text = "Arm the pilot: the decision model starts driving." },
+  off        = { sig = "pilot.off()",             text = "Disengage the pilot." },
+  once       = { sig = "pilot.once()",            text = "Take a single pilot turn without arming." },
+  status     = { sig = "pilot.status()",          text = "Show armed state, brain/memory/RAG config, and the current goal." },
+  goal       = { sig = "pilot.goal([text])",      text = "Set (or, with no arg, show) the standing goal the pilot pursues." },
+  tell       = { sig = "pilot.tell(text)",        text = "Queue a one-off director note for the pilot's next turn." },
+  model      = { sig = "pilot.model(id)",         text = "Set the decision model id directly." },
+  brain      = { sig = "pilot.brain(which)",      text = "Choose the decision brain: 'local' | 'haiku' | 'sonnet'." },
+  mode       = { sig = "pilot.mode(m)",           text = "Force 'tools' (base models) or 'text'/'cmd' (fine-tuned) mode." },
+  url        = { sig = "pilot.url(base)",         text = "Set the decision client's API endpoint." },
+  mem        = { sig = "pilot.mem(on_off)",       text = "Turn the memory head on or off ('on'/'off')." },
+  memmodel   = { sig = "pilot.memmodel(which)",   text = "Set the memory head's model ('haiku' | 'sonnet' | <id>)." },
+  memkey     = { sig = "pilot.memkey(key)",       text = "Set the memory head's Anthropic API key and enable it." },
+  cost       = { sig = "pilot.cost()",            text = "Report this session's estimated token spend." },
+  usagereset = { sig = "pilot.usagereset()",      text = "Zero the token/cost counters." },
+  budget     = { sig = "pilot.budget([dollars])", text = "Set a session $ cap that auto-disarms the pilot when crossed (0 = off)." },
+  rag        = { sig = "pilot.rag(on_off)",       text = "Toggle RAG manual retrieval ('on'/'off')." },
+  trace      = { sig = "pilot.trace(on_off)",     text = "Toggle turn tracing to the trace file ('on'/'off')." },
+  tools      = { sig = "pilot.tools()",           text = "Print the exact tool definitions sent to the model each turn." },
+  demo       = { sig = "pilot.demo(command)",     text = "Preview the training example a command maps to." },
+  remember   = { sig = "pilot.remember(fact)",    text = "Add a memory the pilot will carry." },
+  memories   = { sig = "pilot.memories()",        text = "List the pilot's remembered facts." },
+  forget     = { sig = "pilot.forget(what)",      text = "Forget memories (pilot.forget('all'))." },
+}
+for verb, info in pairs(PILOT_CMDS) do
+  pilot[verb] = function(arg) return ai_command(trim(verb .. " " .. (arg == nil and "" or tostring(arg)))) end
+  doc(pilot[verb], { name = "pilot." .. verb, sig = info.sig, text = info.text, group = "pilot" })
+end
+function pilot.reload() return reload() end
+doc(pilot.reload, { name = "pilot.reload", sig = "pilot.reload()", group = "pilot",
+  text = "Hot-reload every loaded script (same as the reload() builtin / legacy `#ai reload`)." })
+setmetatable(pilot, { __call = function(_, args) return ai(args) end })
+
+-- `ai` stays as a thin, deprecated wrapper (bootstrap defines it; here we just re-document it) so the
+-- legacy `#ai …` typed form keeps working while pilot.* is the real surface.
+doc("ai", { sig = "ai(args)", group = "pilot",
+  text = "Deprecated: use the pilot.* table (pilot.on(), pilot.status(), …). Thin wrapper kept for the legacy `#ai …` typed form; ai('reload') re-runs scripts, else forwards to the pilot." })
 
 -- ---- wiring --------------------------------------------------------------------------------
 trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
@@ -2201,7 +2260,7 @@ if P.enabled then
   echo("[ai] pilot reloaded — still ARMED.")
   arm()                                    -- resume without needing #ai on again
 else
-  echo("[ai] pilot loaded. #ai on to start.")
+  echo("[ai] pilot loaded. pilot.on() to start.")
 end
 
 -- Pure helpers exposed for the test harness (see Scripts/tests/aipilot_spec.lua). `P` is closed over,

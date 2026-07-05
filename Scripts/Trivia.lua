@@ -11,18 +11,18 @@
 --      shared RAG index and ask the active decision brain (ai_request) for a single letter.
 --
 -- It answers with the LOCAL model (ai_local_request — a dedicated client pinned to LM Studio /
--- localhost:1234), NOT the pilot's decision brain. So it works and stays free even when `#ai brain` is a
+-- localhost:1234), NOT the pilot's decision brain. So it works and stays free even when pilot.brain(…) is a
 -- hosted API that's down or unconfigured (which otherwise just errors, making us guess every time). It
 -- grounds with the shared RAG index (ai_retrieve) but never touches or reconfigures the pilot's clients.
 -- (If the local builtin is missing on an un-relaunched binary, it falls back to the shared brain.)
 --
--- INDEPENDENT of the AI pilot: this answers whether or not `#ai on` is set — it has its own `#trivia`
+-- INDEPENDENT of the AI pilot: this answers whether or not the pilot is armed — it has its own trivia.on()
 -- toggle and only the memory/RAG/model plumbing is shared. And it ALWAYS answers: on a memory miss with
 -- no usable model reply (model errored, unparseable, or no brain configured) it GUESSES a random choice
 -- rather than sitting out — a 1-in-4 shot plus a chance to learn the real answer from the reveal.
 --
--- Controls: `#trivia` status · `#trivia on|off` · `#trivia stats` · `#trivia forget` (clear learned cache).
--- Hot-reloadable: edit + `#ai reload`.
+-- Controls: trivia.status() · trivia.on() / trivia.off() · trivia.stats() · trivia.forget() (clear learned cache); help(trivia).
+-- Hot-reloadable: edit + pilot.reload().
 
 local cfg = {
   enabled = true,          -- auto-answer by default (that's the whole point); `#trivia off` to disable
@@ -42,7 +42,7 @@ local cfg = {
 cfg.dir = cfg.home .. "/Documents/MudClient"
 cfg.cache_file = cfg.dir .. "/trivia_answers.lua"
 
--- Survive `#ai reload`: keep the toggle, stats, and in-flight question in a global, and bump an epoch so
+-- Survive pilot.reload(): keep the toggle, stats, and in-flight question in a global, and bump an epoch so
 -- a model reply that lands after a reload can't fire a stale `event answer`.
 _TRIVIA = _TRIVIA or { enabled = cfg.enabled, stats = { attempts = 0, correct = 0, learned = 0 } }
 _TRIVIA.epoch = (_TRIVIA.epoch or 0) + 1
@@ -354,16 +354,38 @@ local function status_line()
   return string.format("[trivia] %s · %d learned%s", S.enabled and "ON" or "OFF", s.learned, acc)
 end
 
-if command then command("trivia", function(rest)
+-- The `trivia` control surface: a documented, first-class table (Phase-2 migration off the old
+-- command("trivia", …) string parser). Members are individually doc()'d so help(trivia) lists them;
+-- the table is *callable* so the legacy typed `#trivia on` (rewritten to `trivia("on")`) still works.
+trivia = {}
+function trivia.on() S.enabled = true; echo(status_line()) end
+function trivia.off() S.enabled = false; echo("[trivia] OFF (auto-answer disabled)") end
+function trivia.status() echo(status_line()) end
+function trivia.stats() echo(status_line()) end
+function trivia.forget()
+  cache = {}; S.stats.learned = 0; save_cache(); echo("[trivia] cleared learned-answer cache")
+end
+
+doc(trivia.on, { name = "trivia.on", sig = "trivia.on()", group = "trivia",
+  text = "Enable auto-answering of the game's trivia questions." })
+doc(trivia.off, { name = "trivia.off", sig = "trivia.off()", group = "trivia",
+  text = "Disable auto-answering." })
+doc(trivia.status, { name = "trivia.status", sig = "trivia.status()", group = "trivia",
+  text = "Show whether auto-answer is on, how many answers are learned, and the running accuracy." })
+doc(trivia.stats, { name = "trivia.stats", sig = "trivia.stats()", group = "trivia",
+  text = "Same readout as trivia.status(): on/off, learned count, accuracy." })
+doc(trivia.forget, { name = "trivia.forget", sig = "trivia.forget()", group = "trivia",
+  text = "Clear the learned-answer cache." })
+
+setmetatable(trivia, { __call = function(_, rest)
   local verb = trim((rest or "")):lower()
-  if verb == "on" then S.enabled = true; echo(status_line())
-  elseif verb == "off" then S.enabled = false; echo("[trivia] OFF (auto-answer disabled)")
-  elseif verb == "stats" then echo(status_line())
-  elseif verb == "forget" then
-    cache = {}; S.stats.learned = 0; save_cache(); echo("[trivia] cleared learned-answer cache")
-  elseif verb == "" or verb == "status" then echo(status_line())
-  else echo("[trivia] usage: #trivia [on|off|stats|forget]") end
-end) end
+  if verb == "on" then trivia.on()
+  elseif verb == "off" then trivia.off()
+  elseif verb == "stats" then trivia.stats()
+  elseif verb == "forget" then trivia.forget()
+  elseif verb == "" or verb == "status" then trivia.status()
+  else echo("[trivia] usage: trivia.on() | trivia.off() | trivia.stats() | trivia.forget()  (help(trivia))") end
+end })
 
 -- Pure helpers exposed for the test harness (Scripts/tests/trivia_spec.lua).
 _TRIVIA_TEST = {

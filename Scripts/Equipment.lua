@@ -22,9 +22,9 @@
 -- separately and preferred over the persistent cache.
 --
 -- It uses the LOCAL model (ai_local_request) with a per-CALL model override — the smarter dense
--- qwen3.6-27b — so it never disturbs Trivia's pinned local model. Hot-reloadable: edit + `#ai reload`.
+-- qwen3.6-27b — so it never disturbs Trivia's pinned local model. Hot-reloadable: edit + pilot.reload().
 --
--- Controls: `#eq scan` · `#eq compare [slot|item]` · `#eq shop` · `#eq id <item>` · `#eq stats` · `#eq forget`.
+-- Controls: eq.scan(['quick']) · eq.compare([slot|item]) · eq.shop() · eq.id(item) · eq.stats() · eq.forget()  (help(eq)).
 
 local cfg = {
   home = os.getenv("HOME") or "",
@@ -45,14 +45,14 @@ local cfg = {
 cfg.dir = cfg.home .. "/Documents/MudClient"
 cfg.cache_file = cfg.dir .. "/equipment_items.lua"
 
--- Survive `#ai reload`: keep the item cache, the this-session bindings, scan/shop buffers and generation
+-- Survive pilot.reload(): keep the item cache, the this-session bindings, scan/shop buffers and generation
 -- counter in a global, and bump an epoch so a model reply landing after a reload is dropped.
 _EQUIP = _EQUIP or { items = {}, session = {}, gen = 0 }
 _EQUIP.epoch = (_EQUIP.epoch or 0) + 1
 local EPOCH = _EQUIP.epoch
 local S = _EQUIP
 
--- Reload safety: a hot-reload (`#ai reload`) wipes every trigger/timer, so an in-flight auto-identify
+-- Reload safety: a hot-reload (pilot.reload()) wipes every trigger/timer, so an in-flight auto-identify
 -- queue is orphaned. Drop it — its pending timers no-op on the EPOCH check — and warn loudly if a
 -- container item was OUT of its container when the reload hit, so the user knows to put it back.
 if S.idq then
@@ -460,9 +460,9 @@ end
 local function describe_item_for_prompt(name, char)
   local r = resolve_item(name)
   if r.status == "unknown" then
-    return string.format("- %s: unidentified — cannot judge; run `#eq id %s`", name, first_kw(name))
+    return string.format("- %s: unidentified — cannot judge; run eq.id('%s')", name, first_kw(name))
   elseif r.status == "multi" then
-    return string.format("- %s: AMBIGUOUS — %d different '%s' variants known; re-identify the one you hold (`#eq id %s`)",
+    return string.format("- %s: AMBIGUOUS — %d different '%s' variants known; re-identify the one you hold (eq.id('%s'))",
       name, r.count, name, first_kw(name))
   else
     local v = r.variant
@@ -480,7 +480,7 @@ local function build_compare_prompt(char, worn, candidates, focus)
   local u = { "=== CHARACTER ===", char_sheet_lines(char) }
   if focus and focus ~= "" then u[#u + 1] = "\n=== FOCUS ===\nAdvise specifically about: " .. focus end
   u[#u + 1] = "\n=== CURRENTLY WORN ==="
-  if #worn == 0 then u[#u + 1] = "(no worn gear recorded — run #eq scan)" end
+  if #worn == 0 then u[#u + 1] = "(no worn gear recorded — run eq.scan())" end
   for _, w in ipairs(worn) do
     u[#u + 1] = (w.slot and (w.slot .. ": ") or "- ") .. (describe_item_for_prompt(w.name, char):gsub("^%- ", ""))
   end
@@ -533,7 +533,7 @@ local function combat_block()
 end
 
 -- One local-model call with the per-request dense-model override, generation-guarded so a reply landing
--- after `#ai reload` or a newer request is dropped.
+-- after pilot.reload() or a newer request is dropped.
 local function run_model(sys, user, on_reply)
   if not ai_local_request then echo("[eq] no local model available (ai_local_request missing — relaunch).", "red"); return end
   S.gen = (S.gen or 0) + 1
@@ -713,7 +713,7 @@ idq_finish = function()
     echo("[eq] WARNING — could NOT return to their container, they are ON YOU now: "
       .. table.concat(q.left_out, ", ") .. " — put them back manually.", "red")
   end
-  echo("[eq] now try `#eq compare`.", "cyan")
+  echo("[eq] now try eq.compare().", "cyan")
 end
 
 idq_next_entry = function()
@@ -803,7 +803,7 @@ end
 local function idq_start(queue, known)
   if #queue == 0 then
     echo(string.format("[eq] nothing to auto-identify — %d item(s) already identified this session.", known), "cyan")
-    echo("[eq] now try `#eq compare`.", "cyan")
+    echo("[eq] now try eq.compare().", "cyan")
     return
   end
   S.idq = { list = queue, i = 0, known = known, ident = 0, failed = 0, left_out = {},
@@ -874,8 +874,8 @@ local function finish_scan()
   echo(string.format("[eq] scan: %d worn, %d in inventory, %d in %d container(s).",
     #sc.eq, #sc.inv, ccount, (function() local n = 0; for _ in pairs(sc.containers) do n = n + 1 end; return n end)()), "cyan")
   if sc.quick then
-    echo("[eq] quick scan — collected names only (no identify). Run `#eq scan` to auto-identify.", "dim")
-    echo("[eq] now try `#eq compare` (items you've never identified will read 'unidentified').", "cyan")
+    echo("[eq] quick scan — collected names only (no identify). Run eq.scan() to auto-identify.", "dim")
+    echo("[eq] now try eq.compare() (items you've never identified will read 'unidentified').", "cyan")
     return
   end
   -- The point of `#eq scan`: identify everything that lacks a trustworthy binding so compare/shop can
@@ -940,7 +940,7 @@ local function eq_compare(focus)
   focus = trim(focus)
   local char = char_from_state()
   local worn, cands = current_worn(), current_candidates()
-  if #worn == 0 and #cands == 0 then echo("[eq] nothing to compare — run `#eq scan` first.", "yellow"); return end
+  if #worn == 0 and #cands == 0 then echo("[eq] nothing to compare — run eq.scan() first.", "yellow"); return end
   local sys, user = build_compare_prompt(char, worn, cands, focus)
   echo("[eq] asking " .. cfg.model .. " to review your gear…", "cyan")
   run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan") end)
@@ -949,7 +949,7 @@ end
 -- ---- #eq id ---------------------------------------------------------------------------------------
 local function eq_id(arg)
   arg = trim(arg)
-  if arg == "" then echo("[eq] usage: #eq id <item keyword>", "yellow"); return end
+  if arg == "" then echo("[eq] usage: eq.id('<item keyword>')", "yellow"); return end
   if combat_block() then return end
   echo("[eq] identifying '" .. arg .. "' (higher-level items need an identify scroll/spell)…", "cyan")
   send("identify " .. arg)   -- the passive capture folds the resulting block into the cache
@@ -1006,24 +1006,60 @@ local function eq_stats()
 end
 
 local function eq_usage()
-  return "[eq] usage: #eq scan [quick] | compare [slot|item] | shop | id <item> | stats | forget"
+  return "[eq] usage: eq.scan(['quick']) | eq.compare([slot|item]) | eq.shop() | eq.id(item) | eq.stats() | eq.forget()  —  help(eq)"
 end
 
-if command then command("eq", function(rest)
-  rest = trim(rest)
+-- ---- public command surface: the `eq` table ------------------------------------------------------
+-- First-class, documented Lua API (Phase-2 migration off the old `command("eq", …)` string parser).
+-- Every member is individually doc()'d so `help(eq)` lists them, and the table is *callable* so the
+-- legacy typed `#eq scan` (rewritten by the host to `eq("scan")`) still dispatches to the right member.
+eq = {}
+
+function eq.scan(mode)
+  if type(mode) == "table" then mode = mode.quick and "quick" or "" end
+  eq_scan(mode)
+end
+function eq.quick() eq_scan("quick") end
+function eq.compare(slot_or_item) eq_compare(slot_or_item) end
+function eq.id(item) eq_id(item) end
+function eq.shop() eq_shop() end
+function eq.stats() eq_stats() end
+function eq.forget()
+  for k in pairs(items) do items[k] = nil end
+  for k in pairs(session) do session[k] = nil end
+  save_items(); echo("[eq] cleared the item cache")
+end
+
+doc(eq.scan, { name = "eq.scan", sig = "eq.scan(['quick'])", group = "equipment",
+  text = "Read worn gear, inventory, and every container, then auto-identify anything not cached so compare/shop can reason about stats. Pass 'quick' (or eq.quick()) to only collect names." })
+doc(eq.quick, { name = "eq.quick", sig = "eq.quick()", group = "equipment",
+  text = "Fast scan: collect worn/inventory/container names only, no identify. Same as eq.scan('quick')." })
+doc(eq.compare, { name = "eq.compare", sig = "eq.compare([slot_or_item])", group = "equipment",
+  text = "Ask the equipment model to review your loadout (per-slot keep/swap verdicts). Optional focus narrows it to one slot or item." })
+doc(eq.id, { name = "eq.id", sig = "eq.id(item)", group = "equipment",
+  text = "Identify a carried/worn item by keyword (game `identify`; higher-level items need a scroll/spell). The result folds into the item cache." })
+doc(eq.shop, { name = "eq.shop", sig = "eq.shop()", group = "equipment",
+  text = "At a shopkeeper, read `list`, shortlist the wearable rows, pull per-item detail, then ask the model what's worth buying." })
+doc(eq.stats, { name = "eq.stats", sig = "eq.stats()", group = "equipment",
+  text = "Report the item-cache size (names, variants, this-session identifies) and the model in use." })
+doc(eq.forget, { name = "eq.forget", sig = "eq.forget()", group = "equipment",
+  text = "Clear the persisted item cache and this-session identify bindings." })
+
+-- Callable table: forward a legacy subcommand string (`eq("scan")`, `eq("id sword")`) to the member,
+-- so both `eq.scan()` and the legacy `#eq scan` typed form work.
+setmetatable(eq, { __call = function(_, rest)
+  rest = trim(rest or "")
   local verb = (rest:match("^%S*") or ""):lower()
   local arg = rest:match("^%S+%s+(.*)$") or ""
-  if verb == "scan" then eq_scan(arg)
-  elseif verb == "compare" or verb == "cmp" then eq_compare(arg)
-  elseif verb == "id" or verb == "identify" then eq_id(arg)
-  elseif verb == "shop" then eq_shop()
-  elseif verb == "stats" or verb == "cache" then eq_stats()
-  elseif verb == "forget" then
-    for k in pairs(items) do items[k] = nil end
-    for k in pairs(session) do session[k] = nil end
-    save_items(); echo("[eq] cleared the item cache")
+  if verb == "scan" then eq.scan(arg ~= "" and arg or nil)
+  elseif verb == "quick" then eq.quick()
+  elseif verb == "compare" or verb == "cmp" then eq.compare(arg)
+  elseif verb == "id" or verb == "identify" then eq.id(arg)
+  elseif verb == "shop" then eq.shop()
+  elseif verb == "stats" or verb == "cache" then eq.stats()
+  elseif verb == "forget" then eq.forget()
   else echo(eq_usage(), "cyan") end
-end) end
+end })
 
 -- Pure helpers exposed for the test harness (Scripts/tests/equipment_spec.lua). The cache tables are
 -- exposed too so specs can seed/inspect variant dedup, ambiguity, and session-binding preference.
@@ -1062,4 +1098,4 @@ _EQ_TEST = {
 }
 
 load_items()
-echo("[eq] equipment adviser ready (model " .. cfg.model .. "). `#eq` for commands.", "dim")
+echo("[eq] equipment adviser ready (model " .. cfg.model .. "). help(eq) for commands.", "dim")

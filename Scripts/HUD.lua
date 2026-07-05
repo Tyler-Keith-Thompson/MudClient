@@ -12,7 +12,7 @@
 --   width = N   (fixed cells)   flex = F   (share of leftover width, default 1)
 --   align = "left" | "right" | "center"
 -- A SPAN understands: text, fg, bg (named 16-colour, "#rrggbb", or {r,g,b}), bold, dim, reverse,
--- underline. All widget/layout logic lives here — edit + `#ai reload` to iterate live.
+-- underline. All widget/layout logic lives here — edit + pilot.reload() to iterate live.
 
 local function cat(...)
   local out = {}

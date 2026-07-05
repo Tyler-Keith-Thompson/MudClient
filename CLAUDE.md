@@ -22,13 +22,20 @@ against, but it needs the embedding model and isn't queryable from a shell — u
 ## Scripts (the hot-reloadable Lua)
 
 - `Scripts/AlterAeon.lua` — game/kxwt protocol: parses `kxwt_*` into the shared `state` table, corpse
-  automation, recovery, the `#kxwt`/`#test` commands, the command reference fed to the AI.
+  automation, recovery, the `kxwt.dump()`/`kxwt.corpse()`/`volume()`/`test()` functions, the command
+  reference fed to the AI.
 - `Scripts/AIPilot.lua` — the AI pilot + the room map/minimap, pathfinding (`navigate`/`explore`/`goto`),
-  landmarks (`#mark`), and waypoint/recall bridging. The big one.
+  landmarks (`mark()`), waypoints (`waypoints()`), routing (`travel()`), and the `pilot.*` control table
+  (pilot.on/off/status/…). The big one.
 - `Scripts/HUD.lua` — the status panels (vitals/gauges, group roster, minimap, compass).
 
-Edit any of them and run `#ai reload` in the app to apply live (no rebuild). Host builtins are registered
-in `Sources/MudClient/LuaScriptEngine.swift` (trigger/alias/command/echo/send/after/panel/ai_*/music/…).
+`#…` input is a live Lua REPL over the loaded scripts (see `Scripts/bootstrap.lua` for the `doc()`/`help()`
+registry) — type `#help()` to list everything, `#help(eq)` / `#help("map")` to drill in. The game surface
+is first-class Lua now: tables `eq`, `pilot`, `kxwt`, `trivia` (each callable, so legacy `#eq scan` still
+works via `eq("scan")`) and functions `mark`/`waypoints`/`reset`/`travel`/`test`/`volume`. Edit any script
+and run `#pilot.reload()` (or `#reload`) in the app to apply live (no rebuild). Host builtins are registered
+in `Sources/MudClient/LuaScriptEngine.swift` (trigger/alias/command/echo/send/after/panel/ai_*/music/…);
+the `#word rest` → `word("rest")` legacy rewrite also fires for callable tables (`globalIsCallable`).
 
 Host hook surface (all optional Lua globals / builtins; see LuaScriptEngine.swift for signatures):
 - Rules: `trigger`/`alias`/`gag` return ids; opts `{oneshot=, class=}`; `rule_remove`/`rule_enable`/
@@ -53,7 +60,7 @@ Pure Lua logic is unit-tested. Specs live in `Scripts/tests/*_spec.lua`; exposed
 ```
 ./tools/luatest/run.sh          # standalone: compiles a tiny Lua from Sources/CLua, no Xcode needed
 just test-lua                   # via Bazel (fast, cached)
-#test                           # in-app, in the live Lua state, after `#ai reload`
+#test()                         # in-app, in the live Lua state, after `#pilot.reload()`
 ```
 
 Adding a spec is just dropping a `Scripts/tests/foo_spec.lua` — the Bazel filegroup globs it. Trigger

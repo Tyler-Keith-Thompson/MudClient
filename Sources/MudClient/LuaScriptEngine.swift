@@ -704,9 +704,10 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// Evaluate one line of `#`-prefixed REPL input (the `#` already stripped by the caller). The line
     /// is Lua run in the live script state; an expression's results are pretty-printed, a statement's
     /// aren't, and errors echo in red. Two conveniences preserve old habits during the command-language
-    /// migration: an empty line means `help()`, and a bare `#word …` whose `word` names a global
-    /// function (and whose remainder isn't a valid Lua expression) is rewritten to `word("…")` — so
-    /// legacy typed commands like `#eq scan`, `#load {HUD}`, and `#reload` keep working.
+    /// migration: an empty line means `help()`, and a bare `#word …` whose `word` names a callable
+    /// global — a function or a `__call` table like `eq`/`kxwt`/`pilot` — (and whose remainder isn't a
+    /// valid Lua expression) is rewritten to `word("…")` — so legacy typed commands like `#eq scan`,
+    /// `#load {HUD}`, and `#reload` keep working.
     func evalREPL(_ raw: String) {
         lock.lock(); defer { lock.unlock() }
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
@@ -721,7 +722,8 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     /// Rewrite legacy typed-command shapes into Lua calls, or return `raw` unchanged for real Lua.
     /// `#reload` / `#load X` map to the `reload()` / `load_script("X")` builtins; a bare `#word` naming
-    /// a global function becomes `word()`; `#word rest` becomes `word("rest")` — but only when the whole
+    /// a callable global (function or `__call` table) becomes `word()`; `#word rest` becomes
+    /// `word("rest")` — but only when the whole
     /// line doesn't already parse as a Lua expression (so `#panel.height(2)` or `#foo(1, 2)` are left
     /// alone). Must be called with the lock held.
     private func legacyRewrite(_ raw: String) -> String {
@@ -733,7 +735,7 @@ final class LuaScriptEngine: @unchecked Sendable {
         // Host command words first (stdlib `load` would otherwise shadow the `#load {X}` habit).
         if word == "reload" { return "reload()" }
         if word == "load", !rest.isEmpty { return "load_script(\(Self.luaQuote(rest)))" }
-        guard lua.globalIsFunction(word) else { return raw }
+        guard lua.globalIsCallable(word) else { return raw }
         if rest.isEmpty { return "\(word)()" }
         // `word rest` — only rewrite if it isn't already a valid Lua expression on its own.
         if lua.compiles("return (\(line))") { return raw }

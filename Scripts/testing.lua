@@ -3,7 +3,7 @@
 -- Loaded on demand by the `#test` command (registered in AlterAeon.lua). It runs in the SAME Lua state
 -- as the live scripts, so specs can call the real widget/map code (exposed via _HUD_TEST / _AIP_TEST)
 -- and even drive the real `on_update` with a stubbed panel. No external interpreter or build step — it
--- executes inside the app's own embedded Lua. Workflow: edit a script, `#ai reload`, then `#test`.
+-- executes inside the app's own embedded Lua. Workflow: edit a script, pilot.reload(), then test().
 --
 -- A spec file (Scripts/tests/*.lua) registers cases with:
 --     test("what it does", function() expect(actual):eq(expected) end)

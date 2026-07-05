@@ -212,6 +212,26 @@ final class Lua: @unchecked Sendable {
         return isFn
     }
 
+    /// Is the global `name` currently *callable* — a plain function, or a table carrying a `__call`
+    /// metamethod? The migrated command surface exposes tables (`eq`, `kxwt`, `pilot`, `trivia`) that
+    /// are documented member-by-member yet stay callable so a legacy `#eq scan` still rewrites to
+    /// `eq("scan")`. The REPL uses this (not `globalIsFunction`) so those callable tables keep working.
+    /// Caller holds the lock.
+    func globalIsCallable(_ name: String) -> Bool {
+        drainUnrefs()
+        name.withCString { _ = lua_getglobal(state, $0) }
+        defer { lua_settop(state, -2) }
+        let t = lua_type(state, -1)
+        if t == LUA_TFUNCTION { return true }
+        if t == LUA_TTABLE, lua_getmetatable(state, -1) != 0 {   // pushes the metatable
+            _ = "__call".withCString { lua_getfield(state, -1, $0) } // pushes mt.__call
+            let callable = lua_type(state, -1) != LUA_TNIL
+            lua_settop(state, -3)                                 // pop __call value + metatable
+            return callable
+        }
+        return false
+    }
+
     /// Load `src` under chunk name `name`, leaving the compiled function on the stack on success (and
     /// an error object on failure). Returns whether it compiled.
     private func loadBuffer(_ src: String, name: String) -> Bool {

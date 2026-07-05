@@ -257,7 +257,7 @@ test("build_compare_prompt: character sheet, distilled rules, and per-item verdi
   expect(user):contains("AC 4")
   expect(user):contains("equippable")
   expect(user):contains("unidentified")                   -- the unknown items flagged, not judged
-  expect(user):contains("#eq id")
+  expect(user):contains("eq.id(")                          -- migrated hint form (was "#eq id")
 end)
 
 test("build_compare_prompt: a multi-variant name is surfaced as AMBIGUOUS, never silently resolved", function()

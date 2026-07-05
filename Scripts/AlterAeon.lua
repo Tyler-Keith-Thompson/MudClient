@@ -47,33 +47,50 @@ trigger([[^kxwt_supported$]], function() send("set kxwt") end)
 gag([[^kxwt_]])
 
 -- Ring buffer of the last N gagged kxwt_ lines. Triggers fire even on gagged lines, so this
--- catch-all records them all so `#kxwt dump [n]` can show the machinery that's normally hidden.
+-- catch-all records them all so kxwt.dump([n]) can show the machinery that's normally hidden.
 local kxwt_ring, KXWT_RING_MAX = {}, 300
 trigger([[^kxwt_]], function(line)
   kxwt_ring[#kxwt_ring + 1] = line
   if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
 end)
 
--- `#kxwt ...` control surface. Registered as a script-owned command so the generic Swift client
--- carries no game-specific command names (it just forwards `#<word> <rest>` to whoever claimed it).
-if command then command("kxwt", function(rest) kxwt_command(rest) end) end  -- guard: builtin is new
-function kxwt_command(args)
+-- The `kxwt` protocol-inspection surface: a documented, first-class table (Phase-2 migration off the
+-- old `command("kxwt", …)` string parser). kxwt.dump([n]) shows the last n captured kxwt_ lines;
+-- kxwt.corpse(...) drives the corpse-automation extension. The table is *callable* so the legacy typed
+-- `#kxwt dump 5` (rewritten by the host to `kxwt("dump 5")`) still dispatches to the right member.
+kxwt = {}
+
+function kxwt.dump(n)
+  n = tonumber(n) or 15
+  if n < 1 then n = 15 end
+  if #kxwt_ring == 0 then echo("[kxwt] no kxwt lines captured yet"); return end
+  local first = math.max(1, #kxwt_ring - n + 1)
+  echo(string.format("[kxwt] last %d of %d captured kxwt lines:", #kxwt_ring - first + 1, #kxwt_ring))
+  for i = first, #kxwt_ring do echo("  " .. kxwt_ring[i]) end
+end
+
+-- kxwt.corpse(['on'|'off'|'status']) — toggle/report the after-kill corpse automation (see corpse_command,
+-- defined further down; it's only called at runtime, so the later definition is fine).
+function kxwt.corpse(mode) return corpse_command("corpse", mode or "") end
+
+doc(kxwt.dump, { name = "kxwt.dump", sig = "kxwt.dump([n])", group = "protocol",
+  text = "Show the last n (default 15) captured kxwt_ protocol lines — the machinery normally hidden from the display." })
+doc(kxwt.corpse, { name = "kxwt.corpse", sig = "kxwt.corpse(['on'|'off'|'status'])", group = "protocol",
+  text = "Control the after-kill corpse automation (loot -> harvest -> sacrifice). No arg reports status." })
+
+-- Callable table: forward a legacy subcommand string to the right member.
+setmetatable(kxwt, { __call = function(_, args)
   args = (args or ""):match("^%s*(.-)%s*$")
   local verb = (args:match("^%S*") or ""):lower()
   local rest = args:match("^%S*%s+(.*)$") or ""
   if verb == "" or verb == "dump" or verb:match("^%d+$") then
-    local n = tonumber(rest) or tonumber(verb) or 15
-    if n < 1 then n = 15 end
-    if #kxwt_ring == 0 then echo("[kxwt] no kxwt lines captured yet"); return end
-    local first = math.max(1, #kxwt_ring - n + 1)
-    echo(string.format("[kxwt] last %d of %d captured kxwt lines:", #kxwt_ring - first + 1, #kxwt_ring))
-    for i = first, #kxwt_ring do echo("  " .. kxwt_ring[i]) end
-  elseif corpse_command and corpse_command(verb, rest) then
-    -- handled by the corpse-automation extension
+    kxwt.dump(tonumber(rest) or tonumber(verb))
+  elseif verb == "corpse" then
+    kxwt.corpse(rest)
   else
-    echo("[kxwt] commands: dump [n] | corpse on|off|status")
+    echo("[kxwt] commands: kxwt.dump([n]) | kxwt.corpse('on'|'off'|'status')")
   end
-end
+end })
 
 -- Character / progress
 trigger([[^kxwt_myname (.+)$]],   function(_, n) state.name = n end)
@@ -114,7 +131,7 @@ local function schedule_classes_save()
   if cancel and classes_save_timer then cancel(classes_save_timer) end
   classes_save_timer = after(2, save_classes)
 end
--- Load once at startup (not on a live `#ai reload`, where state already holds the fresh table).
+-- Load once at startup (not on a live pilot.reload(), where state already holds the fresh table).
 if not next(state.classes) then
   local chunk = loadfile(CLASSES_FILE)
   if chunk then local ok, t = pcall(chunk); if ok and type(t) == "table" then state.classes = t end end
@@ -254,20 +271,24 @@ trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch)
   if music then music.stop(ch) end
 end)
 
--- `#volume music <0-100>` — master volume for the layered music player (all channels). A bare
--- `#volume` or `#volume music` with no number just reports the current level. Swift starts at 35%
+-- volume('music <0-100>') — master volume for the layered music player (all channels). A bare
+-- volume() or volume('music') with no number just reports the current level. Swift starts at 35%
 -- (deliberately quiet); we mirror that default here for the readout. `if music.volume` guards an
 -- un-relaunched binary that lacks the new builtin.
 state.music_volume = state.music_volume or 35
-if command then command("volume", function(rest) volume_command(rest) end) end
+-- volume('music <0-100>') — master volume for the layered music player. First-class documented function
+-- (migrated off command("volume", …)); the legacy typed `#volume music 40` rewrites to volume("music 40").
+function volume(args) return volume_command(args) end
+doc(volume, { name = "volume", sig = "volume(['music <0-100>'])", group = "audio",
+  text = "Set or report the layered music player's master volume (0-100). volume() or volume('music') reports; volume('40') / volume('music 40') sets it." })
 function volume_command(args)
   args = (args or ""):match("^%s*(.-)%s*$")
   local target = (args:match("^%S*") or ""):lower()
   local rest = args:match("^%S*%s+(.*)$") or ""
-  -- accept both `#volume music 40` and the shorthand `#volume 40`
+  -- accept both volume('music 40') and the shorthand volume('40')
   local num = rest:match("^(%d+)") or (target:match("^%d+$") and target or nil)
   if target ~= "" and target ~= "music" and not target:match("^%d+$") then
-    echo("[volume] usage: #volume music <0-100>"); return
+    echo("[volume] usage: volume('music <0-100>')"); return
   end
   if num then
     local n = math.max(0, math.min(100, tonumber(num)))
@@ -275,7 +296,7 @@ function volume_command(args)
     if music and music.volume then music.volume(n) end
     echo(string.format("[volume] music set to %d%%", n))
   else
-    echo(string.format("[volume] music is at %d%% (use #volume music <0-100>)", state.music_volume))
+    echo(string.format("[volume] music is at %d%% (use volume('music <0-100>'))", state.music_volume))
   end
 end
 
@@ -350,7 +371,7 @@ end
 function in_combat() return state.fighting == true end
 
 -- ===== Corpse automation (kxwt_mdeath-driven) — fully stream/trigger-driven, NO timers =====
--- ON by default (`#kxwt corpse off` to stop). Runs only after an actual KILL (not a flee — see below).
+-- ON by default (kxwt.corpse('off') to stop). Runs only after an actual KILL (not a flee — see below).
 -- When you're OUT OF COMBAT, walk the corpses in the room BY INDEX (1.corpse, 2.corpse, ...). For each:
 -- get all -> harvest teeth -> harvest spellcomps, then
 --   * LOOTED/EMPTY corpse -> bsac -> sac. `sac` removes it, so the next corpse shifts into THIS index
@@ -454,7 +475,7 @@ trigger([[^Looks like the corpse of .+ is too damaged for you to use]], function
 trigger([[^You sacrifice blood from]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
 trigger([[^You can only blood sacrifice]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
 
--- `#kxwt corpse on|off|status` (dispatched from kxwt_command). Returns true if it handled the verb.
+-- kxwt.corpse('on'|'off'|'status') (dispatched from the kxwt table). Returns true if it handled the verb.
 function corpse_command(verb, rest)
   if verb ~= "corpse" then return false end
   local m = (rest or ""):lower():match("^%s*(%S*)")
@@ -474,7 +495,7 @@ end
 -- A concise reference of REAL AlterAeon commands, condensed from the official command guide
 -- (alteraeon.com/guides/commands.html). AIPilot folds this into the system prompt so the model
 -- reaches for actual commands (via the `command` tool) instead of inventing them. Game knowledge,
--- so it lives here in the game layer; edit + `#ai reload` to tweak.
+-- so it lives here in the game layer; edit + pilot.reload() to tweak.
 function game_command_reference()
   return [[MOVEMENT: type a direction or its abbreviation — north/n south/s east/e west/w up/u down/d northeast/ne northwest/nw southeast/se southwest/sw. 'recall' returns to your waypoint; 'waypoint' travels between set waypoints.
 LOOKING/INFO: 'look' (room), 'look <thing>', 'exits', 'hp', 'score', 'inventory' (i/inv), 'equipment' (what you're wearing/wielding), 'spells', 'skills', 'consider <target>' (gauge a fight), 'who', 'help <topic>'.
@@ -502,12 +523,16 @@ alias([[^recover$]], function()
   end
 end)
 
--- `#test` — run the Lua test suite against the CURRENTLY-LOADED scripts, in this same Lua state, so you
--- can verify a change right after `#ai reload`. Re-reads the harness + every Scripts/tests/*.lua so it
--- always reflects the latest edits. Pure Lua; no external interpreter or build step. `if command then`
--- guards an un-relaunched binary that predates the `command` builtin.
-if command then command("test", function() run_test_suite() end) end
--- Returns (pass, fail) so a CLI runner can set its exit code; the in-app `#test` just ignores them.
+-- test() — run the Lua spec suite against the CURRENTLY-LOADED scripts, in this same Lua state, so you
+-- can verify a change right after pilot.reload(). Re-reads the harness + every Scripts/tests/*.lua so it
+-- always reflects the latest edits. Pure Lua; no external interpreter or build step. A first-class
+-- documented function (migrated off the command() bridge); the legacy typed `#test` rewrites to test().
+-- (Note: the spec harness itself, testing.lua, temporarily rebinds the global `test` to the case
+-- registrar while a run is in progress — same as the old bridge did — so re-run via pilot.reload() first.)
+function test() return run_test_suite() end
+doc("test", { sig = "test() -> (pass, fail)", group = "scripts",
+  text = "Run the Lua spec suite (Scripts/tests/*.lua) against the live, currently-loaded scripts and report pass/fail per case — verify an edit right after pilot.reload()." })
+-- Returns (pass, fail) so a CLI runner can set its exit code; the in-app test() just ignores them.
 function run_test_suite()
   local pass, fail = 0, 0
   local ok, err = pcall(function()
