@@ -7,7 +7,6 @@
 
 import Foundation
 import DependencyInjection
-import Parsing
 #if canImport(AppKit)
 import AppKit
 #endif
@@ -22,65 +21,44 @@ final class TerminalService {
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
     }
     
-    enum KeyCommand {
-        case leftArrow
-        case rightArrow
-        case upArrow
-        case downArrow
-        case backspace
-        case controlA
-        case controlE
+    // MARK: - Input decoding model
+    //
+    // Raw stdin bytes are decoded WITHOUT a text parser: a hand-rolled, escape-aware tokenizer turns
+    // the input buffer into a list of `InputEvent`s plus a `remaining` tail (an escape sequence split
+    // across reads). This replaced a swift-parsing grammar whose parse FAILURES on any byte the
+    // line-editor keys didn't match were being printed to the game display (the "error: unexpected
+    // input --> input:1:3" dump). The tokenizer has no failure path — unknown input is handled
+    // structurally (printable → text, unknown escape → dropped whole, partial escape → buffered), so
+    // nothing error-shaped can ever reach the screen.
+
+    /// One decoded keyboard action. `key` names a recognised special/macro key (arrows, home, f-keys,
+    /// ctrl-<letter>, alt-<letter>); the editor-owned control keys get their own cases.
+    enum InputEvent: Equatable {
+        case text(String)      // printable characters (incl. multi-byte UTF-8) to insert at the cursor
+        case key(String)       // a recognised special/macro key name (offered to bindings, else editor)
         case enter
-    }
-    
-    private lazy var lineParser = Parse {
-        OneOf {
-            controlA
-            controlE
-            leftArrow
-            rightArrow
-            upArrow
-            downArrow
-            backspace
-            enter
-        }
+        case backspace
+        case cursorStart       // ctrl-A
+        case cursorEnd         // ctrl-E
     }
 
-    private lazy var controlA = Parse {
-        "\u{01}".map { KeyCommand.controlA }
+    /// The result of measuring a leading escape sequence: either it needs more bytes, or it's a whole
+    /// sequence `length` characters long.
+    enum EscapeScan: Equatable {
+        case incomplete
+        case complete(length: Int)
     }
-    
-    private lazy var controlE = Parse {
-        "\u{05}".map { KeyCommand.controlE }
-    }
-    
-    private lazy var leftArrow = Parse {
-        "\u{1B}[D".map { KeyCommand.leftArrow }
-    }
-    
-    private lazy var rightArrow = Parse {
-        "\u{1B}[C".map { KeyCommand.rightArrow }
-    }
-    
-    private lazy var upArrow = Parse {
-        "\u{1B}[A".map { KeyCommand.upArrow }
-    }
-    
-    private lazy var downArrow = Parse {
-        "\u{1B}[B".map { KeyCommand.downArrow }
-    }
-    
-    private lazy var backspace = Parse {
-        "\u{7F}".map { KeyCommand.backspace }
-    }
-    
-    private lazy var enter: AnyParser<Substring, KeyCommand> = Parse {
-        Skip { Optionally { Prefix { $0 != "\n" } } }
-        "\n".map { KeyCommand.enter }
-    }.eraseToAnyParser()
-    
+
+    /// How far a marker (bracketed-paste start/end) matches at a position.
+    private enum MarkerMatch { case full, partial }
+
     var lineBuffer: String = ""
     var partialInput: String = ""
+    /// True while between a bracketed-paste start (`ESC[200~`) and end (`ESC[201~`) marker, so pasted
+    /// bytes are routed to the line as literal text rather than interpreted as keystrokes.
+    private var inPaste = false
+    /// Bytes held between reads that may be the start of a paste marker split across a chunk boundary.
+    private var pastePartial = ""
     var visibleStartColumn = 0
     var commandHistory: [String] = []
     var currentCommandIndex: Int = 0
@@ -121,43 +99,186 @@ final class TerminalService {
         // attribute reports) BEFORE line editing — they must never reach the line editor or the MUD.
         // What remains is real keyboard input.
         let keyInput = stripTerminalReports(consumeMouseEvents(in: input))
-        guard !keyInput.isEmpty else { return }
-        partialInput.append(keyInput)
 
-        // Consume any leading key the script has a macro for (TinTin++ #macro). A recognised-but-
-        // unbound special key (e.g. an arrow) leaves the loop and falls through to the line editor,
-        // so unbound keys behave exactly as before.
-        while let (name, length) = decodeKey(partialInput), engine.handleKey(name) {
-            partialInput.removeFirst(length)
-        }
+        // Pull bracketed-paste content out first: everything between ESC[200~ and ESC[201~ is inserted
+        // as LITERAL, editable text (never auto-sent — the user reviews it and presses Enter). Embedded
+        // newlines become spaces so a multi-line paste collapses into one reviewable command line.
+        // Start/end markers split across reads are reassembled via `pastePartial`.
+        let paste = Self.extractPaste(keyInput, inPaste: inPaste, partial: pastePartial)
+        inPaste = paste.inPaste
+        pastePartial = paste.partial
+        if !paste.pasted.isEmpty { insertText(paste.pasted) }
+
+        partialInput.append(paste.passthrough)
         guard !partialInput.isEmpty else { return }
 
-        switch Result(catching: { try lineParser.parse(partialInput) }) {
-        case .success(let command):
-            switch command {
-            case .leftArrow:
+        // Decode the buffer into events, keeping any incomplete trailing escape sequence for the next
+        // read (chunk-boundary safety). There is deliberately NO failure branch: unmatched input is
+        // handled structurally inside `tokenize`, so a parser error can never be printed to the display.
+        let decoded = Self.tokenize(partialInput)
+        partialInput = decoded.remaining
+        for event in decoded.events { apply(event) }
+    }
+
+    /// Apply one decoded input event to the line editor. A `key` is first offered to the scripting
+    /// engine's bindings (TinTin++ #macro); if unbound it drives the built-in editor (arrows) or is
+    /// dropped (any other recognised-but-unbound special key).
+    private func apply(_ event: InputEvent) {
+        switch event {
+        case .text(let s):
+            insertText(s)
+        case .enter:
+            handleEnter()
+        case .backspace:
+            handleBackspace()
+        case .cursorStart:
+            cursor.moveToStartOfLine()
+            refreshDisplay(cursorColumn: cursor.column)
+        case .cursorEnd:
+            cursor.moveToEndOf(line: lineBuffer)
+            refreshDisplay(cursorColumn: cursor.column)
+        case .key(let name):
+            if engine.handleKey(name) { return }         // a bound macro consumed the key
+            switch name {
+            case "up": handleUpArrow()
+            case "down": handleDownArrow()
+            case "left":
                 cursor.moveLeft()
                 refreshDisplay(cursorColumn: cursor.column)
-            case .rightArrow:
+            case "right":
                 cursor.moveRight(line: lineBuffer)
                 refreshDisplay(cursorColumn: cursor.column)
-            case .upArrow: handleUpArrow()
-            case .downArrow: handleDownArrow()
-            case .backspace: handleBackspace()
-            case .controlA:
-                cursor.moveToStartOfLine()
-                refreshDisplay(cursorColumn: cursor.column)
-            case .controlE:
-                cursor.moveToEndOf(line: lineBuffer)
-                refreshDisplay(cursorColumn: cursor.column)
-            case .enter: handleEnter()
+            default:
+                break                                    // recognised but unbound special key → drop
             }
-            partialInput = ""
-        case .failure where !partialInput.hasPrefix("\u{1B}") || partialInput.count > 2:
-            handleOther(input: input)
-        case .failure(let error):
-            print(sanitizedMessage(String(describing: error)))
         }
+    }
+
+    /// Decode a raw input buffer into an ordered list of `InputEvent`s plus a `remaining` tail — an
+    /// escape sequence that arrived only partially and must be held until the next read. This is the
+    /// escape-aware replacement for the old swift-parsing grammar; unlike that grammar it has no
+    /// failure mode, so nothing it can't classify is ever surfaced as an error:
+    ///   • printable characters (incl. multi-byte UTF-8) → `.text`;
+    ///   • ctrl-A / ctrl-E / backspace(0x7F) / Enter(0x0A) → their editor events;
+    ///   • a recognised escape/ctrl-letter key → `.key(name)`;
+    ///   • an unknown but WHOLE escape sequence (generic CSI/SS3 shape) → consumed and dropped;
+    ///   • an INCOMPLETE trailing escape sequence → returned in `remaining` (buffered, not shredded);
+    ///   • any other control byte → dropped (never inserted as a stray glyph).
+    static func tokenize(_ buffer: String) -> (events: [InputEvent], remaining: String) {
+        let chars = Array(buffer)
+        var events: [InputEvent] = []
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\u{1B}" {
+                let rest = Array(chars[i...])
+                if let (name, length) = decodeKey(String(rest)) {   // a fully-formed escape key
+                    events.append(.key(name)); i += length; continue
+                }
+                switch scanEscape(rest) {
+                case .incomplete:
+                    return (events, String(chars[i...]))            // hold the partial ESC for next read
+                case .complete(let len):
+                    i += max(1, len); continue                      // unknown escape shape → drop whole
+                }
+            }
+            if c == "\u{01}" { events.append(.cursorStart); i += 1; continue }
+            if c == "\u{05}" { events.append(.cursorEnd); i += 1; continue }
+            if c == "\u{7F}" { events.append(.backspace); i += 1; continue }
+            if c == "\n" { events.append(.enter); i += 1; continue }
+            if let a = c.asciiValue, (0x01...0x1A).contains(a) {
+                // A control letter (e.g. ctrl-B). decodeKey names the non-reserved ones for macro
+                // dispatch; anything it declines (reserved editor codes, tab, CR) is dropped, never
+                // inserted into the command line as a raw control byte.
+                if let (name, length) = decodeKey(String(chars[i...])) {
+                    events.append(.key(name)); i += length; continue
+                }
+                i += 1; continue
+            }
+            // A run of printable characters, up to the next control/escape byte.
+            var run = ""
+            while i < chars.count {
+                let d = chars[i]
+                if d == "\u{1B}" || d == "\u{7F}" { break }
+                if let a = d.asciiValue, a < 0x20 { break }
+                run.append(d); i += 1
+            }
+            if run.isEmpty { i += 1; continue }                     // safety — shouldn't be reachable
+            events.append(.text(run))
+        }
+        return (events, "")
+    }
+
+    /// Measure a leading escape sequence in `s` (caller guarantees `s[0] == ESC`). Returns
+    /// `.complete(length:)` for a whole sequence, or `.incomplete` when more bytes are needed — the
+    /// generic VT shapes: CSI (`ESC [` params intermediates final-byte), SS3 (`ESC O` final), and a
+    /// simple two-byte escape (`ESC <byte>`, e.g. alt-key). Matching the whole shape (not just the
+    /// keys we know) is what lets a foreign sequence be dropped as one unit instead of shredding into
+    /// stray characters.
+    static func scanEscape(_ s: [Character]) -> EscapeScan {
+        guard s.first == "\u{1B}" else { return .complete(length: 0) }
+        guard s.count >= 2 else { return .incomplete }
+        switch s[1] {
+        case "[":
+            var j = 2
+            while j < s.count, let a = s[j].asciiValue, (0x30...0x3F).contains(a) { j += 1 }  // parameters
+            while j < s.count, let a = s[j].asciiValue, (0x20...0x2F).contains(a) { j += 1 }  // intermediates
+            guard j < s.count else { return .incomplete }                                     // no final byte yet
+            return .complete(length: j + 1)                                                   // + the final byte
+        case "O":
+            guard s.count >= 3 else { return .incomplete }
+            return .complete(length: 3)                                                       // SS3: ESC O <final>
+        default:
+            return .complete(length: 2)                                                       // ESC <byte>
+        }
+    }
+
+    /// Pull bracketed-paste content (between `ESC[200~` and `ESC[201~`) out of `input`, returning the
+    /// non-paste `passthrough` bytes, the extracted `pasted` text (newlines normalised to spaces), and
+    /// the carried paste state (`inPaste`, and a `partial` marker held across a chunk boundary). Pure
+    /// so it's unit-testable; the caller owns the state and inserts `pasted` as literal text.
+    static func extractPaste(_ input: String, inPaste: Bool, partial: String)
+        -> (passthrough: String, pasted: String, inPaste: Bool, partial: String) {
+        let startMarker = Array("\u{1B}[200~")
+        let endMarker = Array("\u{1B}[201~")
+        let chars = Array(partial + input)
+        var inPaste = inPaste
+        var passthrough = ""
+        var pasted = ""
+        var i = 0
+        while i < chars.count {
+            let marker = inPaste ? endMarker : startMarker
+            switch matchMarker(chars, at: i, marker) {
+            case .full:
+                inPaste.toggle()
+                i += marker.count
+            case .partial:
+                // A marker that runs off the end of what we have → hold it for the next read.
+                return (passthrough, pasted, inPaste, String(chars[i...]))
+            case nil:
+                let c = chars[i]
+                if inPaste {
+                    pasted.append(c == "\n" || c == "\r" ? " " : c)   // keep the paste one editable line
+                } else {
+                    passthrough.append(c)
+                }
+                i += 1
+            }
+        }
+        return (passthrough, pasted, inPaste, "")
+    }
+
+    /// Whether `marker` matches `chars` starting at `i`: `.full` (all bytes present), `.partial` (a
+    /// prefix matched but the buffer ended mid-marker → needs more bytes), or `nil` (a real mismatch).
+    private static func matchMarker(_ chars: [Character], at i: Int, _ marker: [Character]) -> MarkerMatch? {
+        var k = 0
+        while k < marker.count {
+            let idx = i + k
+            if idx >= chars.count { return .partial }
+            if chars[idx] != marker[k] { return nil }
+            k += 1
+        }
+        return .full
     }
     
     func setup() {
@@ -175,6 +296,10 @@ final class TerminalService {
         // Trade-off: with reporting on, the terminal hands clicks to us instead of doing local
         // text selection; most emulators still allow selection while holding Shift/Option.
         writeToStandardOut(data: Data("\u{1B}[?1000h\u{1B}[?1006h".utf8))
+        // Enable bracketed paste (ESC[?2004h): the terminal now wraps pasted text in ESC[200~…ESC[201~
+        // so we can insert it as literal, editable characters instead of having every pasted line
+        // interpreted as typed keystrokes (and multi-line pastes fire off as commands). See extractPaste.
+        writeToStandardOut(data: Data("\u{1B}[?2004h".utf8))
         setupScreen()
     }
 
@@ -357,6 +482,7 @@ final class TerminalService {
     /// a weird state on exit.
     func teardownScreen() {
         var out = "\u{1B}[?1000l\u{1B}[?1006l"              // disable mouse reporting (restore native wheel/selection)
+        out += "\u{1B}[?2004l"                              // disable bracketed paste
         out += "\u{1B}[r"                                   // reset scroll region to the full screen
         out += "\u{1B}[?25h"                                // make sure the cursor is visible again
         out += "\u{1B}[\(getTerminalHeight() ?? 24);1H"
@@ -437,7 +563,8 @@ final class TerminalService {
     
     private func handleEnter() {
         snapToLive()   // if you were reading history, sending a command jumps you back to the live tail
-        lineBuffer.append(contentsOf: partialInput.dropLast())
+        // Typed text has already been inserted into `lineBuffer` as `.text` events by the time this
+        // Enter event fires, so the buffer is the command to send — nothing to pull off `partialInput`.
         cursor.moveToStartOfLine()
         let echo = lineBuffer
         lineBuffer = ""
@@ -456,13 +583,14 @@ final class TerminalService {
         }
     }
     
-    private func handleOther(input: String) {
-        // Handle normal character input
+    /// Insert literal text into the input line at the cursor and redraw it, advancing the cursor.
+    /// Used for normal typing and for pasted content (both arrive as `.text`/paste, never as keys).
+    private func insertText(_ text: String) {
+        guard !text.isEmpty else { return }
         let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
-        lineBuffer.insert(contentsOf: input, at: index)
+        lineBuffer.insert(contentsOf: text, at: index)
         refreshDisplay(cursorColumn: cursor.column)
-        cursor.moveRightBy(amount: input.count)
-        partialInput = ""
+        cursor.moveRightBy(amount: text.count)
     }
 
     /// Redraw just the input line (used by the keystroke handlers). Looks up the current layout so the
@@ -966,7 +1094,7 @@ final class TerminalService {
     /// If `s` begins with a recognised special key, return its canonical name and the number of
     /// characters it occupies; otherwise nil. Only FULLY-formed sequences match — a lone/partial
     /// escape returns nil so the existing line-editor path handles it exactly as before.
-    private func decodeKey(_ s: String) -> (name: String, length: Int)? {
+    private static func decodeKey(_ s: String) -> (name: String, length: Int)? {
         let c = Array(s)
         guard let first = c.first else { return nil }
         if first == "\u{1B}" { return decodeEscape(c) }
@@ -980,7 +1108,7 @@ final class TerminalService {
     }
 
     /// Decode an escape-introduced key (`c[0] == ESC`): alt-<letter>, or a CSI/SS3 sequence.
-    private func decodeEscape(_ c: [Character]) -> (name: String, length: Int)? {
+    private static func decodeEscape(_ c: [Character]) -> (name: String, length: Int)? {
         guard c.count >= 2 else { return nil }                // lone ESC → not yet a complete key
         let second = c[1]
         if second == "[" || second == "O" { return decodeCSI(c) }
@@ -993,7 +1121,7 @@ final class TerminalService {
 
     /// Decode a CSI (`ESC[…`) or SS3 (`ESC O…`) key sequence into a canonical name. Handles arrows
     /// (with xterm modifiers), Home/End/Insert/Delete/PageUp/PageDown, and F1–F12.
-    private func decodeCSI(_ c: [Character]) -> (name: String, length: Int)? {
+    private static func decodeCSI(_ c: [Character]) -> (name: String, length: Int)? {
         var i = 2
         var paramChars = ""
         while i < c.count, let a = c[i].asciiValue, (0x30...0x3F).contains(a) {  // digits, ';', etc.
@@ -1046,7 +1174,7 @@ final class TerminalService {
 
     /// Turn an xterm modifier code (2…16) into a canonical prefix ("ctrl-", "alt-", "shift-", "meta-"
     /// in that order). 1 (or absent) → no modifiers. Must match LuaScriptEngine.normalizeKeyName.
-    private func modifierPrefix(_ m: Int) -> String {
+    private static func modifierPrefix(_ m: Int) -> String {
         guard m >= 2 else { return "" }
         let bits = m - 1
         var p = ""
