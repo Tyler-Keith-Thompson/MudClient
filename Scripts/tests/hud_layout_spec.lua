@@ -158,6 +158,54 @@ test("in-combat bottom panel grows an inferred bar row per OTHER opponent, betwe
   expect(all_text(bottom):find("a goblin", 1, true)):ne(nil)   -- target still shown (on the stats line)
 end)
 
+test("nomelee fight (NO kxwt_fighting): combat layout renders with the best estimate PROMOTED to the target slot", function()
+  -- Raw-capture-proven state: with nocombat on the server never sends kxwt_fighting, so
+  -- state.fighting is false for the whole fight; only the text-inferred engaged window is open.
+  local now = os.time()
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = false
+  st.engaged_until = now + 10
+  st.opponents = { ["an orc bachelor"] = { display = "An orc bachelor", pct = 3, exact = false, t = now } }
+  local top, bottom = paint(st)
+  -- Combat layout: 3 rows (stats+promoted target, spells, room) — the single opponent is promoted, so
+  -- no extra bar rows; spells/room are full-width spans rows just like a kxwt fight.
+  expect(#bottom):eq(3)
+  expect(#bottom[1].cols):eq(4)
+  expect(bottom[2].cols):eq(nil); expect(bottom[2].spans):truthy()
+  expect(all_text(bottom)):contains("An orc bachelor")
+  expect(all_text(bottom)):contains("near death")             -- pct 3 -> the estimate's condition word
+  expect(all_text(bottom)):contains("~")                      -- flagged as an estimate, not exact
+  -- The exits rose relocates to the top panel, exactly as in a kxwt-confirmed fight.
+  local compass_rows = 0
+  for _, r in ipairs(top) do if r.cols and #r.cols == 2 then compass_rows = compass_rows + 1 end end
+  expect(compass_rows >= 3):truthy()
+end)
+
+test("nomelee fight with no opponent named yet still shows an 'engaged' target flag", function()
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = false
+  st.engaged_until = os.time() + 10
+  st.opponents = {}
+  local _, bottom = paint(st)
+  expect(#bottom):eq(3)                                       -- combat layout even without a name
+  expect(all_text(bottom)):contains("engaged")
+end)
+
+test("engaged window expired: the HUD is back to the out-of-combat layout (block clears)", function()
+  local now = os.time()
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = false
+  st.engaged_until = now - 1                                  -- window closed (fight over)
+  st.opponents = { ["an orc bachelor"] = { display = "An orc bachelor", pct = 3, exact = false, t = now - 60 } }
+  local _, bottom = paint(st)
+  expect(#bottom):eq(3)
+  expect(#bottom[2].cols):eq(2)                               -- spells | compass -> out-of-combat shape
+  expect(all_text(bottom):find("An orc bachelor", 1, true)):eq(nil)
+end)
+
 test("top panel shows the group roster header only once you have 2+ members", function()
   local st = {}
   for k, v in pairs(BASE) do st[k] = v end

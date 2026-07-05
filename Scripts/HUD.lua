@@ -73,9 +73,40 @@ local WALK_ARROW = { north = "↑", south = "↓", east = "→", west = "←",
 
 -- ============================ BOTTOM PANEL (combat) ============================
 
+-- Fighting, by ANY evidence: the exact kxwt_fighting target, or the text-inferred engaged() state
+-- (nomelee fights get NO kxwt_fighting at all — proven by raw captures — so the combat block must not
+-- gate on state.fighting alone). `engaged` is AlterAeon's; guard for load order.
+local function in_fight()
+  return state.fighting or (engaged ~= nil and engaged())
+end
+
+-- Estimate rendering shared by the promoted target cell and the opponent bars. COND_WORD maps the
+-- ladder pcts back to a short condition word; est_gauge is a dim hollow bar so estimates never read
+-- as exact readings. pct may be nil (mob sighted in melee lines but no condition line yet) -> empty
+-- bar, "?" word.
+local OPP_CAP = 4
+local COND_WORD = { [3] = "near death", [8] = "mortally wounded", [15] = "awful", [28] = "pretty hurt",
+                    [42] = "nasty wounds", [55] = "many wounds", [68] = "small wounds",
+                    [82] = "scratches", [95] = "healthy" }
+local function cond_word(pct)
+  if pct == nil then return "?" end
+  return COND_WORD[pct] or (tostring(pct) .. "%")
+end
+-- A dim, hollow gauge to visually separate an ESTIMATE from the solid exact vital/target bars.
+local function est_gauge(p100, width)
+  local w = width or 8
+  local full = math.floor(math.max(0, math.min(1, (p100 or 0) / 100)) * w + 0.5)
+  return {
+    { text = string.rep("▓", full), fg = "brightblack", dim = true },
+    { text = string.rep("░", math.max(0, w - full)), fg = "brightblack", dim = true },
+  }
+end
+
 -- The enemy: name + health bar + %, as a column that rides alongside the vitals (wider via flex so
--- the name has room). Idle when not fighting.
-local function target_cell()
+-- the name has room). With an exact kxwt target that's the solid bar; in an engaged-only (nomelee)
+-- fight the best-known inferred opponent is PROMOTED here as a clearly-marked estimate ("~"), so the
+-- fight is never bar-less; engaged with no name known yet shows a plain "engaged" flag.
+local function target_cell(promoted)
   if state.fighting then
     return { flex = 1.6, spans = cat(
       { { text = "⚔ ", fg = "yellow" },
@@ -83,6 +114,17 @@ local function target_cell()
       gauge(state.fight_pct, 100, 10, "hp"),
       { { text = string.format(" %d%%", state.fight_pct or 0), dim = true } }
     ) }
+  end
+  if promoted then
+    return { flex = 1.6, spans = cat(
+      { { text = "⚔ ", fg = "yellow" },
+        { text = (promoted.name or "?") .. " ", fg = "brightred", dim = true } },
+      est_gauge(promoted.pct, 10),
+      { { text = " ~" .. cond_word(promoted.pct), fg = "brightblack", dim = true } }
+    ) }
+  end
+  if in_fight() then
+    return { flex = 1.6, spans = { { text = "⚔ engaged", fg = "yellow", dim = true } } }
   end
   return { flex = 1.6, text = "⚔ —", fg = "brightblack" }
 end
@@ -118,25 +160,11 @@ local function spells_row()
   return { spans = spans }
 end
 
--- Inferred bars for the OTHER mobs you're fighting (the current target has its own EXACT bar on the
--- stats line). The protocol only reports one target, so these healths are ESTIMATED from AlterAeon's
--- condition ladder (see AlterAeon.lua) — rendered dim, with a hollow ▓ fill and the condition WORD, so
--- they read plainly as guesses rather than exact readings. A tilde marks the estimate.
-local OPP_CAP = 4
-local COND_WORD = { [3] = "near death", [8] = "mortally wounded", [15] = "awful", [28] = "pretty hurt",
-                    [42] = "nasty wounds", [55] = "many wounds", [68] = "small wounds",
-                    [82] = "scratches", [95] = "healthy" }
--- A dim, hollow gauge to visually separate an ESTIMATE from the solid exact vital/target bars.
-local function est_gauge(p100, width)
-  local w = width or 8
-  local full = math.floor(math.max(0, math.min(1, (p100 or 0) / 100)) * w + 0.5)
-  return {
-    { text = string.rep("▓", full), fg = "brightblack", dim = true },
-    { text = string.rep("░", math.max(0, w - full)), fg = "brightblack", dim = true },
-  }
-end
-
--- One row per other opponent (capped; a "+N more" tail on overflow). `list` is active_opponents()'s
+-- Inferred bars for the OTHER mobs you're fighting (the current target — exact or promoted-estimate —
+-- has its own bar on the stats line). The protocol only reports one target, so these healths are
+-- ESTIMATED from AlterAeon's condition ladder (see AlterAeon.lua) — rendered dim, with a hollow ▓ fill
+-- and the condition WORD, so they read plainly as guesses rather than exact readings. A tilde marks the
+-- estimate. One row per opponent (capped; a "+N more" tail on overflow). `list` is active_opponents()'s
 -- output: { {name, pct, est}, ... }, already newest-first.
 local function opponent_bars(list, cap)
   cap = cap or OPP_CAP
@@ -144,7 +172,7 @@ local function opponent_bars(list, cap)
   local shown = math.min(n, cap)
   for i = 1, shown do
     local o = list[i]
-    local word = COND_WORD[o.pct] or (tostring(o.pct) .. "%")
+    local word = cond_word(o.pct)
     rows[#rows + 1] = { spans = cat(
       { { text = "⚔ ", fg = "brightblack", dim = true },
         { text = (o.name or "?") .. " ", fg = "brightred", dim = true } },
@@ -188,15 +216,20 @@ end
 -- the stats. In combat the target takes the stats line's 4th slot and the rose shoots up to the top
 -- panel (see update_top), so it's always the full rose — never a one-liner.
 local function update_bottom()
-  local fighting = state.fighting
+  local fighting = in_fight()                    -- kxwt target OR text-inferred (nomelee) engagement
+  -- Inferred opponents. Without an exact kxwt target (nomelee) the best-known one is PROMOTED into
+  -- the target slot; the rest render as estimate bars below.
+  local others, promoted = {}, nil
+  if fighting and active_opponents then
+    others = active_opponents(os.time())
+    if not state.fighting and #others > 0 then promoted = table.remove(others, 1) end
+  end
   local stats = vital_cells()
-  stats[#stats + 1] = fighting and target_cell() or compass(1)   -- 4th slot: target, or rose row 1
+  stats[#stats + 1] = fighting and target_cell(promoted) or compass(1)   -- 4th slot: target, or rose row 1
   local rows = { { cols = stats } }
   if fighting then
     -- Inferred bars for any OTHER mobs you're engaged with, between the target line and your buffs.
-    if active_opponents then
-      for _, r in ipairs(opponent_bars(active_opponents(os.time()))) do rows[#rows + 1] = r end
-    end
+    for _, r in ipairs(opponent_bars(others)) do rows[#rows + 1] = r end
     rows[#rows + 1] = spells_row()
     rows[#rows + 1] = room_name_cell()
   else
@@ -380,7 +413,7 @@ local function update_top()
     left[#left + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
     for _, m in ipairs(g) do left[#left + 1] = group_member_row(m) end
   end
-  if state.fighting then   -- the stats line is busy with the target, so the exits rose lives up here
+  if in_fight() then   -- the stats line is busy with the target, so the exits rose lives up here
     left[#left + 1] = { cols = { { text = "" }, compass(1) } }
     left[#left + 1] = { cols = { { spans = { { text = "exits", dim = true } } }, compass(2) } }
     left[#left + 1] = { cols = { { text = "" }, compass(3) } }
@@ -414,4 +447,5 @@ end
 -- used by the live client — kept in one place so the split-out of this file stays honest about seams.
 _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next_level,
               exp_spans = exp_spans, compass = compass, group_member_row = group_member_row,
-              append_col = append_col, opponent_bars = opponent_bars }
+              append_col = append_col, opponent_bars = opponent_bars,
+              target_cell = target_cell, cond_word = cond_word, in_fight = in_fight }

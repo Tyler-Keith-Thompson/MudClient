@@ -374,22 +374,33 @@ local function parse_opponent(line)
   return subj, pct
 end
 
--- Record (or refresh) an opponent's reading. `exact` true only for the kxwt_fighting target.
+-- Record (or refresh) an opponent's reading. Keyed by LOWERCASED name (the wire mixes "An orc bachelor"
+-- and "an orc bachelor" for the same mob); the display name is the first-seen original. `exact` is true
+-- only for the kxwt_fighting target. A nil pct (a melee sighting with no condition phrase) refreshes the
+-- timestamp but never clobbers a known health estimate.
 local function opponent_note(tbl, name, pct, now, exact)
   if not name then return end
-  tbl[name] = { pct = pct, exact = exact == true, t = now }
+  local key = name:lower()
+  local e = tbl[key]
+  if e then
+    e.t = now
+    if pct ~= nil then e.pct, e.exact = pct, exact == true end
+  else
+    tbl[key] = { display = name, pct = pct, exact = exact == true, t = now }
+  end
 end
 
 -- Live opponents as an array, sorted most-recently-seen first (name breaks ties deterministically),
--- excluding `exclude` (the current target, shown by its own exact bar) and dropping entries not seen
--- within `ttl` seconds. Prunes the expired entries from `tbl` in place.
+-- excluding `exclude` (the current target, shown by its own exact bar; compared case-insensitively) and
+-- dropping entries not seen within `ttl` seconds. Prunes the expired entries from `tbl` in place.
 local function opponents_active(tbl, now, ttl, exclude)
+  local exl = exclude and exclude:lower() or nil
   local out = {}
-  for name, o in pairs(tbl or {}) do
+  for key, o in pairs(tbl or {}) do
     if now - (o.t or 0) > ttl then
-      tbl[name] = nil
-    elseif name ~= exclude then
-      out[#out + 1] = { name = name, pct = o.pct, est = not o.exact, t = o.t }
+      tbl[key] = nil
+    elseif key ~= exl then
+      out[#out + 1] = { name = o.display or key, pct = o.pct, est = not o.exact, t = o.t }
     end
   end
   table.sort(out, function(a, b)
@@ -408,38 +419,133 @@ end
 doc(active_opponents, { name = "active_opponents", sig = "active_opponents([now])", group = "combat",
   text = "Inferred list of the OTHER mobs you're fighting (not the current kxwt_fighting target), health estimated from the condition ladder. Returns an array of {name, pct, est} newest-first; prunes entries older than 30s." })
 
--- Is `name` one of your groupmates/minions (so a condition line about them is NOT an enemy)?
+-- Is `name` you or one of your groupmates/minions (so a combat line about them is NOT an enemy)?
+-- "you"/"You" (the melee lines' pronoun for yourself) counts, as does your kxwt_myname.
 local function is_ally(name)
-  for _, m in ipairs(state.group or {}) do if m.name == name then return true end end
+  if not name then return false end
+  local low = name:lower()
+  if low == "you" then return true end
+  if state.name and low == state.name:lower() then return true end   -- kxwt_myname
+  for _, m in ipairs(state.group or {}) do if m.name:lower() == low then return true end end
   return false
 end
 
--- Feed the tracker. The current target's EXACT reading (kxwt_fighting) and every textual condition line
--- update the table; combat end / room change / mob death clear or remove entries. The condition trigger
--- only runs mid-combat, so equipment "in excellent condition" lines can't spawn phantom opponents.
+-- ---- "engaged" (fighting without kxwt_fighting) ------------------------------------------------
+-- PROVEN BY THE RAW LOGS: with `nocombat` (nomelee) toggled on, the server does NOT send kxwt_fighting
+-- AT ALL during a fight — not per round, not even -1 — because you're not in the melee round. The fight
+-- exists only as text: melee-round lines between your minions and the mob, the mob's attacks on you,
+-- and the condition ladder. So we derive an ENGAGED state from those lines: any melee-round line
+-- involving you or an ally refreshes `state.engaged_until`; it expires ENGAGE_TTL seconds after the
+-- last one (rounds are ~2s apart), and is cleared eagerly on room change, kxwt_fighting -1, and when
+-- the last known opponent dies (kxwt_mdeath) so post-kill looting isn't held up.
+local ENGAGE_TTL = 10
+
+-- The canonical melee damage-verb ladder, from 'help default damage strings' (both the flat and the
+-- percentage-based combatmode sets), lowercased for matching.
+local MELEE_VERBS = {
+  annoys = true, scratches = true, hits = true, injures = true, wounds = true, mauls = true,
+  decimates = true, devastates = true, maims = true, mutilates = true, dismembers = true,
+  disembowels = true, massacres = true, obliterates = true, demolishes = true, destroys = true,
+  annihilates = true, misses = true,
+  -- percentage-mode edged/pointed + blunt variants
+  nicks = true, cuts = true, gouges = true, gashes = true, lacerates = true, shreds = true,
+  mangles = true, rends = true, thumps = true, mars = true, batters = true, thrashes = true,
+  clobbers = true, smashes = true, pulverizes = true,
+}
+
+-- Parse a melee-round line into (attacker, target), or nil. Forms:
+--   "<attacker>'s <skill> <verb> <target>."   (greedy attacker match so a name containing 's survives)
+--   "Your <skill> <verb> <target>."           (your own melee swings)
+-- The *** BIG DAMAGE *** decorations are stripped first. Lua patterns can't alternate on the verb set,
+-- so after splitting off the attacker we SCAN the remaining words for the first damage verb; everything
+-- before it is the skill (1..4 words) and everything after is the target.
+local function parse_melee(line)
+  local t = (line or ""):gsub("%*", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  local attacker, rest = t:match("^(.+)'s (.+)$")
+  if not attacker then
+    rest = t:match("^[Yy]our (.+)$")
+    if rest then attacker = "you" end
+  end
+  if not rest then return nil end
+  local body = rest:match("^(.-)[%.!]+$")          -- combat sends always end in . or !
+  if not body then return nil end
+  local before = 0
+  for s, word in body:gmatch("()(%S+)") do
+    if MELEE_VERBS[word:lower()] and before >= 1 and before <= 4 then
+      local target = body:sub(s + #word + 1)
+      if target ~= "" then return attacker, target end
+    end
+    before = before + 1
+  end
+  return nil
+end
+
+-- The enemy in an (attacker, target) melee pair: whichever side is NOT you/an ally. nil when the pair
+-- doesn't involve your side at all (bystander mob-vs-mob), or when both sides are yours.
+local function melee_enemy(attacker, target)
+  local a_ally, t_ally = is_ally(attacker), is_ally(target)
+  if a_ally and not t_ally then return target end
+  if t_ally and not a_ally then return attacker end
+  return nil
+end
+
+-- Are we engaged in a fight, kxwt-confirmed or text-inferred? THE combat predicate — HUD gating,
+-- in_combat() and every pilot/equipment consumer sit on this.
+function engaged(now)
+  if state.fighting then return true end
+  return (state.engaged_until or 0) > (now or os.time())
+end
+doc(engaged, { name = "engaged", sig = "engaged([now])", group = "combat",
+  text = "True when you're in a fight: the kxwt_fighting target is live OR combat text (melee-round lines) was seen within the last ~10s. Covers nomelee fights, where the server sends NO kxwt_fighting at all." })
+
+-- Feed the tracker. The current target's EXACT reading (kxwt_fighting), every melee-round line (names
+-- the enemy and proves engagement), and every condition line while engaged update the table; combat
+-- end / room change / mob death clear or remove entries. The condition trigger is gated on engaged()
+-- so out-of-combat 'look' condition lines can't spawn phantom opponents.
 trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, p, name)
   opponent_note(state.opponents, name, tonumber(p), os.time(), true)
 end)
-trigger([[^kxwt_fighting -1$]], function() state.opponents = {} end)
+trigger([[^kxwt_fighting -1$]], function()
+  state.opponents = {}; state.engaged_until = nil
+end)
+trigger([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|devastates|maims|mutilates|dismembers|disembowels|massacres|obliterates|demolishes|destroys|annihilates|misses|nicks|cuts|gouges|gashes|lacerates|shreds|mangles|rends|thumps|mars|batters|thrashes|clobbers|smashes|pulverizes) ]],
+  function(line)
+    local attacker, target = parse_melee(line)
+    if not attacker then return end
+    local enemy = melee_enemy(attacker, target)
+    if not enemy then return end                       -- bystander fight; not ours
+    local now = os.time()
+    state.engaged_until = now + ENGAGE_TTL
+    state.recover = false                              -- fights (kxwt-visible or not) cancel recovery
+    opponent_note(state.opponents, enemy, nil, now, false)   -- name sighting; keeps any known pct
+  end)
 trigger([[(near death|mortally wounded|awful|pretty hurt|nasty wounds|a few wounds|small wounds|few scratches|excellent)]],
   function(line)
-    if not state.fighting then return end
+    if not engaged() then return end
     local name, pct = parse_opponent(line)
-    if name and not is_ally(name) then opponent_note(state.opponents, name, pct, os.time(), false) end
+    if name and not is_ally(name) then
+      state.engaged_until = os.time() + ENGAGE_TTL
+      opponent_note(state.opponents, name, pct, os.time(), false)
+    end
   end)
-trigger([[^kxwt_rvnum ]], function() state.opponents = {} end)   -- room change abandons the engagement
-trigger([[^kxwt_mdeath (.+)$]], function(_, name)               -- a mob died -> drop its bar immediately
-  if state.opponents[name] then state.opponents[name] = nil
-  else                                                          -- kxwt name may differ in case from text
-    local low = name:lower()
-    for k in pairs(state.opponents) do if k:lower() == low then state.opponents[k] = nil end end
-  end
+trigger([[^kxwt_rvnum ]], function()                   -- room change abandons the engagement
+  state.opponents = {}; state.engaged_until = nil
+end)
+trigger([[^kxwt_mdeath (.+)$]], function(_, name)      -- a mob died -> drop its bar immediately
+  state.opponents[name:lower()] = nil
+  -- Last opponent down and no kxwt melee target -> the fight is over; clear the engaged window NOW so
+  -- corpse looting (gated on in_combat()) isn't stalled for the TTL tail.
+  if not state.fighting and not next(state.opponents) then state.engaged_until = nil end
 end)
 
 _AA_TEST.condition_pct = condition_pct
 _AA_TEST.parse_opponent = parse_opponent
 _AA_TEST.opponent_note = opponent_note
 _AA_TEST.opponents_active = opponents_active
+_AA_TEST.parse_melee = parse_melee
+_AA_TEST.melee_enemy = melee_enemy
+_AA_TEST.is_ally = is_ally
+_AA_TEST.ENGAGE_TTL = ENGAGE_TTL
 
 -- ===== Authoritative spell membership from the `score`/affects block =============================
 -- kxwt_spellup/spelldown keep state.spells live between sightings, but they only carry names and a
@@ -547,6 +653,15 @@ function describe_state()
   if state.area then out[#out+1] = "area: " .. state.area end
   if state.fighting then
     out[#out+1] = string.format("combat: fighting %s (%d%%)", state.fight_name or "?", state.fight_pct or 0)
+  elseif engaged() then
+    -- nomelee fight: no kxwt target, but combat text proves an engagement. Name the inferred enemies.
+    local opps = active_opponents()
+    local names = {}
+    for _, o in ipairs(opps) do
+      names[#names + 1] = o.name .. (o.pct and string.format(" (~%d%%)", o.pct) or "")
+    end
+    out[#out+1] = "combat: ENGAGED (nomelee — no exact target data)"
+      .. (#names > 0 and (": " .. table.concat(names, ", ")) or "")
   else
     out[#out+1] = "combat: not fighting"
   end
@@ -560,7 +675,12 @@ function describe_state()
   return table.concat(out, "\n")
 end
 
-function in_combat() return state.fighting == true end
+-- THE combat predicate for every consumer (pilot navigation/prompt gating, equipment swaps, corpse
+-- automation, recovery). Broadened to the engaged() state: in a nomelee fight kxwt_fighting is never
+-- sent, but you're still very much in combat — navigation must not walk off, eq swaps must not start,
+-- recovery must not begin, and the pilot must be told it's fighting. Consumers that specifically need
+-- "am I in the melee round with an exact target" should read state.fighting directly.
+function in_combat() return engaged() end
 
 -- ===== Corpse automation (kxwt_mdeath-driven) — fully stream/trigger-driven, NO timers =====
 -- ON by default (kxwt.corpse('off') to stop). Runs only after an actual KILL (not a flee — see below).

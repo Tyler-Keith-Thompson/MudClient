@@ -89,6 +89,88 @@ test("opponents_active sort is deterministic on a same-timestamp tie (by name)",
   end
 end)
 
+-- ---- nomelee fights: melee-round parsing + the text-inferred engaged() state -----------------------
+-- PROVEN BY RAW CAPTURE (mud_raw_nomelee.log): with `nocombat` on, the server sends NO kxwt_fighting at
+-- all during a fight (the only kxwt_fighting in the whole log is the connect-time -1), so state.fighting
+-- stays false. The fight exists only as text; these lines are VERBATIM from that log's orc-bachelor
+-- fight, and the melee parser + engaged() predicate must reconstruct the combat state from them.
+
+local parse_melee = _AA_TEST.parse_melee
+local melee_enemy = _AA_TEST.melee_enemy
+local is_ally     = _AA_TEST.is_ally
+
+test("parse_melee parses the verbatim nomelee-log round lines into attacker/target", function()
+  local a, t = parse_melee("An orc bachelor's punch hits A flesh beast.")
+  expect(a):eq("An orc bachelor"); expect(t):eq("A flesh beast")
+
+  a, t = parse_melee("A flesh beast's bite scratches an orc bachelor.")
+  expect(a):eq("A flesh beast"); expect(t):eq("an orc bachelor")
+
+  a, t = parse_melee("an orc bachelor's kick hits you.")
+  expect(a):eq("an orc bachelor"); expect(t):eq("you")
+
+  a, t = parse_melee("A skeleton's slice devastates an orc bachelor!")
+  expect(a):eq("A skeleton"); expect(t):eq("an orc bachelor")
+
+  a, t = parse_melee("A skeleton's slice wounds an orc bachelor.")
+  expect(a):eq("A skeleton"); expect(t):eq("an orc bachelor")
+
+  -- Your own swings (melee mode): "Your <skill> <verb> <target>."
+  a, t = parse_melee("Your slash MUTILATES an orc bachelor!")
+  expect(a):eq("you"); expect(t):eq("an orc bachelor")
+
+  -- Non-combat lines with an incidental verb-word do not parse.
+  expect(parse_melee("A squat orc putters around his hovel.")):eq(nil)
+  expect(parse_melee("You are already targeting him.")):eq(nil)
+  expect(parse_melee("An orc bachelor is burned by your fire shield!")):eq(nil)
+end)
+
+test("melee_enemy picks the non-ally side of a round line, using the kxwt_group roster", function()
+  local saved = state.group
+  -- The verbatim kxwt_group roster from the log: you + three minions.
+  state.group = {
+    { name = "Vaelith", flags = "XLN" }, { name = "A skeleton", flags = "M" },
+    { name = "A flesh beast", flags = "MT" }, { name = "an energetic green demon", flags = "MN" },
+  }
+  -- Mob hits minion -> the mob is the enemy; minion hits mob -> still the mob (case-insensitive roster).
+  expect(melee_enemy("An orc bachelor", "A flesh beast")):eq("An orc bachelor")
+  expect(melee_enemy("A flesh beast", "an orc bachelor")):eq("an orc bachelor")
+  expect(melee_enemy("an orc bachelor", "you")):eq("an orc bachelor")
+  expect(melee_enemy("you", "an orc bachelor")):eq("an orc bachelor")
+  -- Both sides yours (minion sparring?) or neither (bystander fight) -> no enemy.
+  expect(melee_enemy("A skeleton", "A flesh beast")):eq(nil)
+  expect(melee_enemy("a rabid dog", "a deer")):eq(nil)
+  expect(is_ally("A FLESH BEAST")):truthy()          -- roster match is case-insensitive
+  state.group = saved
+end)
+
+test("engaged() is true while the text-inferred window is open, without any kxwt_fighting", function()
+  local saved_f, saved_u = state.fighting, state.engaged_until
+  state.fighting = false
+  state.engaged_until = nil
+  expect(engaged(1000)):falsy()                      -- idle
+  state.engaged_until = 1000 + _AA_TEST.ENGAGE_TTL   -- a melee-round line just refreshed the window
+  expect(engaged(1000)):truthy()                     -- engaged with state.fighting == false (nomelee!)
+  expect(engaged(1000 + _AA_TEST.ENGAGE_TTL + 1)):falsy()   -- window expired -> fight over
+  state.fighting, state.engaged_until = saved_f, saved_u
+end)
+
+test("opponent keys are case-insensitive: 'An orc bachelor' and 'an orc bachelor' are ONE mob", function()
+  local tbl = {}
+  -- Melee sighting (no health info yet) under one casing...
+  opponent_note(tbl, "an orc bachelor", nil, 100, false)
+  -- ...then the condition line under sentence-case must UPDATE it, not fork a second entry.
+  opponent_note(tbl, "An orc bachelor", 3, 101, false)
+  local out = opponents_active(tbl, 101, 30, nil)
+  expect(#out):eq(1)
+  expect(out[1].pct):eq(3)
+  -- And a later pct-less melee sighting refreshes recency WITHOUT clobbering the known estimate.
+  opponent_note(tbl, "an orc bachelor", nil, 105, false)
+  out = opponents_active(tbl, 105, 30, nil)
+  expect(out[1].pct):eq(3)
+  expect(out[1].t):eq(105)
+end)
+
 -- Trigger-level behaviours (kxwt_fighting -1 clear, room change clear, mdeath removal) are wired through
 -- Swift-side regex triggers that call state.opponents mutation; the pure logic above covers the parts we
 -- can exercise from Lua. The whole-widget rendering lives in hud_spec.lua / hud_layout_spec.lua.
