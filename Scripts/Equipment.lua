@@ -75,19 +75,55 @@ local function strip_ansi(s) return (s or ""):gsub("\27%[[%d;]*%a", "") end
 local function now() return os.time() end
 
 local ARTICLE = { a = true, an = true, the = true, some = true, pair = true, of = true }
--- Cache key: lowercased, article-stripped, whitespace-collapsed, trailing-period-dropped. Matches an
--- inventory line ("a lost lead ring") to its identify display name ("a lost lead ring").
+
+-- Trailing display markers the listings tack onto item names: "an imp eye ring (glow)",
+-- "a quartz-tipped wooden cane (light)", "an obsidian doom-ring (hum)". These are item PROPERTIES,
+-- not part of the name — they MUST NOT reach the identity key or the keyword derivation (a real live
+-- bug: four glowing items all keyed/keyworded as 'glow', and identify bindings never matched).
+-- They ARE worth keeping, so parsers split them into a separate flags table.
+local FLAG_MARKERS = { glow = true, glowing = true, hum = true, humming = true, light = true,
+                       rare = true, artifact = true, invis = true, invisible = true,
+                       magic = true, magical = true, unique = true }
+local CANON_FLAG = { glowing = "glow", humming = "hum", invisible = "invis", magical = "magic" }
+-- Split trailing "(marker)" groups off a listing name into `flags` (canonicalized for known markers,
+-- literal for unknown ones — they're still display metadata, not name words). Loops: "(glow) (hum)".
+local function split_flags(s, flags)
+  flags = flags or {}
+  s = trim(s or "")
+  while true do
+    local body, mark = s:match("^(.-)%s*%(([%a%s]+)%)$")
+    if not body or body == "" then break end       -- no trailing group / whole string parenthesized
+    s = trim(body)
+    local m = trim(mark):lower()
+    flags[CANON_FLAG[m] or m:gsub("%s+", "_")] = true
+  end
+  return s, flags
+end
+
+-- Cache key: lowercased, article-stripped, whitespace-collapsed, trailing-period-dropped, and any
+-- trailing KNOWN flag markers dropped (defence in depth — upstream parsers already split them, but raw
+-- lines from `state.inventory` etc. can still carry "(glow)"). Matches an inventory line
+-- ("a lost lead ring") to its identify display name ("a lost lead ring").
 local function norm_name(s)
   s = trim((strip_ansi(s):lower():gsub("%s+", " "):gsub("%.%s*$", "")))
+  while true do
+    local body, mark = s:match("^(.-)%s*%((%a+)%)$")
+    if body and body ~= "" and FLAG_MARKERS[mark] then s = trim(body) else break end
+  end
   s = s:gsub("^a ", ""):gsub("^an ", ""):gsub("^the ", ""):gsub("^some ", "")
   return trim(s)
 end
 
 -- The keyword AlterAeon expects for `identify`/`look in` is usually the last noun of the name:
 -- "a small sack" -> "sack", "well made leather gloves" -> "gloves", "a lost lead ring" -> "ring".
+-- Parenthesized groups and flag words are never keywords: "an imp eye ring (glow)" -> "ring", not "glow".
 local function first_kw(name)
+  local clean = (name or ""):gsub("%b()", " ")
   local last
-  for w in (name or ""):gmatch("%a+") do if not ARTICLE[w:lower()] then last = w end end
+  for w in clean:gmatch("%a+") do
+    local lw = w:lower()
+    if not ARTICLE[lw] and not FLAG_MARKERS[lw] then last = w end
+  end
   return last or trim(name or "")
 end
 
@@ -288,18 +324,20 @@ local function precheck_equip(v, char)
 end
 
 -- ---- inventory / equipment / container parsing ---------------------------------------------------
--- A single inventory/container line -> item name, or nil for non-items (headers, prompts, counts). Handles
--- both plain lines ("a red leather cap") and the count-prefixed container form ("(    1) a red leather cap").
+-- A single inventory/container line -> item name + flags, or nil for non-items (headers, prompts,
+-- counts). Handles plain lines ("a red leather cap"), the count-prefixed container form
+-- ("(    1) a red leather cap"), and trailing display markers ("sleeves of the warmage (glow)").
 local function parse_item_line(line)
   local L = trim(strip_ansi(line))
   if L == "" then return nil end
   if L:match("^<%d+hp") or L:match("^kxwt_") or L:match("^%[the human typed%]") or L:match("BLOCKSEP") then return nil end
   if L:match("^You are ") or L:find("contains:", 1, true) or L:match("items? total%.?$") then return nil end
   L = L:gsub("^%(%s*%d+%s*%)%s*", "")               -- drop a "(    1)" count prefix
-  L = trim((L:gsub("%s*%(.-%)%s*$", "")))           -- drop a trailing "(light)"/"(glow)" tag
+  local flags
+  L, flags = split_flags(L)                          -- "(glow)"/"(light)"/… -> metadata, off the name
   local low = L:lower()
   if low == "" or low == "nothing" or low == "nothing." then return nil end
-  return L
+  return L, flags
 end
 
 -- A container header: "(carried) a small sack contains:" / "(on ground) a cedar chest contains:".
@@ -310,10 +348,12 @@ local function parse_container_header(line)
   return name and trim(name) or nil
 end
 
--- An `equipment`/`eq` slot line -> slot, item. e.g.
+-- An `equipment`/`eq` slot line -> slot, item, flags. e.g.
 --   "head        -              a circlet of dried vines"
---   "neck        - (rare)       a necklace of human ears"   (an optional (flag) column)
---   "weapon      - (rare)       a charred black staff"
+--   "neck        - (rare)       a necklace of human ears"    (an optional leading (flag) column)
+--   "finger      -              an imp eye ring (glow)"      (and/or a trailing display marker)
+-- Both marker positions land in `flags` (canonical keys: rare/artifact/glow/hum/light/…), never in
+-- the item name — the live 'glow' bug was this trailing marker leaking into names and keywords.
 local EQ_SLOTS = { head = true, neck = true, arms = true, wrist = true, hands = true, finger = true,
                    waist = true, legs = true, feet = true, held = true, weapon = true, shield = true,
                    back = true, ears = true, eyes = true, face = true, floating = true, body = true,
@@ -324,10 +364,18 @@ local function parse_eq_line(line)
   if not slot then return nil end
   slot = trim(slot):lower()
   if not EQ_SLOTS[slot] then return nil end
-  local item = rest:match("^%b()%s*(.+)$") or rest       -- strip an optional leading "(rare)" flag column
+  local flags = {}
+  local col, tail = rest:match("^(%b())%s*(.+)$")        -- optional leading "(rare)"/"(artifact)" column
+  if col then
+    local m = trim(col:sub(2, -2)):lower()
+    if m ~= "" then flags[CANON_FLAG[m] or m:gsub("%s+", "_")] = true end
+    rest = tail
+  end
+  local item
+  item, flags = split_flags(rest, flags)                 -- trailing "(glow)" etc. -> flags, off the name
   item = norm_name(item)
   if item == "" then return nil end
-  return slot, item
+  return slot, item, flags
 end
 
 -- ---- shop `list` parsing -------------------------------------------------------------------------
@@ -455,38 +503,55 @@ local function variant_stats_str(v)
   return table.concat(parts, ", ")
 end
 
+-- Pretty print a listing-flags table ({glow=true,hum=true}) for the prompts. Canonical keys get their
+-- reader-friendly words back.
+local FLAG_PRETTY = { glow = "glowing", hum = "humming", invis = "invisible" }
+local function flags_str(flags)
+  if not flags or not next(flags) then return nil end
+  local out = {}
+  for f in pairs(flags) do out[#out + 1] = FLAG_PRETTY[f] or f end
+  table.sort(out)
+  return table.concat(out, ", ")
+end
+
 -- One prompt line for an item, resolving its knowledge status. NEVER silently picks a variant for a
--- multi-variant name — it surfaces the ambiguity to the model instead.
-local function describe_item_for_prompt(name, char)
+-- multi-variant name — it surfaces the ambiguity to the model instead. `flags` are the listing's
+-- display markers (glowing/humming/rare/…), appended as properties.
+local function describe_item_for_prompt(name, char, flags)
+  local fs = flags_str(flags)
+  local suffix = fs and (" [" .. fs .. "]") or ""
   local r = resolve_item(name)
   if r.status == "unknown" then
-    return string.format("- %s: unidentified — cannot judge; run eq.id('%s')", name, first_kw(name))
+    return string.format("- %s%s: unidentified — cannot judge; run eq.id('%s')", name, suffix, first_kw(name))
   elseif r.status == "multi" then
-    return string.format("- %s: AMBIGUOUS — %d different '%s' variants known; re-identify the one you hold (eq.id('%s'))",
-      name, r.count, name, first_kw(name))
+    return string.format("- %s%s: AMBIGUOUS — %d different '%s' variants known; re-identify the one you hold (eq.id('%s'))",
+      name, suffix, r.count, name, first_kw(name))
   else
     local v = r.variant
     local pc = precheck_equip(v, char)
     local verdict = pc.ok and "equippable" or ("CANNOT EQUIP: " .. table.concat(pc.reasons, "; "))
     local src = (r.status == "session") and "identified this session (you're holding it)"
       or "stats from a previous identify — re-id to confirm"
-    return string.format("- %s [%s] — %s — %s", name, variant_stats_str(v), verdict, src)
+    return string.format("- %s%s [%s] — %s — %s", name, suffix, variant_stats_str(v), verdict, src)
   end
 end
 
--- Build the compare prompt. worn = {{slot, name}}, candidates = {name,...}. Pure: resolves each name from
--- the shared cache and formats. Returns system, user.
+-- Build the compare prompt. worn = {{slot, name[, flags]}}, candidates = {name-or-{name,flags}, ...}.
+-- Pure: resolves each name from the shared cache and formats. Returns system, user.
 local function build_compare_prompt(char, worn, candidates, focus)
   local u = { "=== CHARACTER ===", char_sheet_lines(char) }
   if focus and focus ~= "" then u[#u + 1] = "\n=== FOCUS ===\nAdvise specifically about: " .. focus end
   u[#u + 1] = "\n=== CURRENTLY WORN ==="
   if #worn == 0 then u[#u + 1] = "(no worn gear recorded — run eq.scan())" end
   for _, w in ipairs(worn) do
-    u[#u + 1] = (w.slot and (w.slot .. ": ") or "- ") .. (describe_item_for_prompt(w.name, char):gsub("^%- ", ""))
+    u[#u + 1] = (w.slot and (w.slot .. ": ") or "- ") .. (describe_item_for_prompt(w.name, char, w.flags):gsub("^%- ", ""))
   end
   u[#u + 1] = "\n=== CANDIDATE ITEMS (carried / in containers) ==="
   if #candidates == 0 then u[#u + 1] = "(none)" end
-  for _, name in ipairs(candidates) do u[#u + 1] = describe_item_for_prompt(name, char) end
+  for _, c in ipairs(candidates) do
+    if type(c) == "table" then u[#u + 1] = describe_item_for_prompt(c.name, char, c.flags)
+    else u[#u + 1] = describe_item_for_prompt(c, char) end
+  end
   u[#u + 1] = "\n=== TASK ==="
   u[#u + 1] = (focus and focus ~= "") and "Advise on the focus above." or "Review the whole loadout, slot by slot."
   return EQ_SYS, table.concat(u, "\n")
@@ -497,7 +562,7 @@ local function build_shop_prompt(char, worn, kept)
   local u = { "=== CHARACTER ===", char_sheet_lines(char), "\n=== CURRENTLY WORN ===" }
   if #worn == 0 then u[#u + 1] = "(no worn gear recorded)" end
   for _, w in ipairs(worn) do
-    u[#u + 1] = (w.slot and (w.slot .. ": ") or "- ") .. (describe_item_for_prompt(w.name, char):gsub("^%- ", ""))
+    u[#u + 1] = (w.slot and (w.slot .. ": ") or "- ") .. (describe_item_for_prompt(w.name, char, w.flags):gsub("^%- ", ""))
   end
   u[#u + 1] = "\n=== SHOP ITEMS FOR SALE ==="
   if #kept == 0 then u[#u + 1] = "(nothing wearable shortlisted)" end
@@ -824,6 +889,17 @@ local function looks_like_container(name)
   return false
 end
 
+-- Record a parsed item's display markers under its normalized name, so the compare/shop prompts can
+-- surface "glowing"/"humming" as item properties without them ever touching the identity key.
+local function note_flags(sc, name, flags)
+  if not flags or not next(flags) then return end
+  local k = norm_name(name)
+  if k == "" then return end
+  sc.flagmap = sc.flagmap or {}
+  sc.flagmap[k] = sc.flagmap[k] or {}
+  for f in pairs(flags) do sc.flagmap[k][f] = true end
+end
+
 -- Feed a streamed line into the active scan (mode set by the section-header triggers below).
 local function scan_feed(line)
   local sc = S.scan
@@ -834,16 +910,20 @@ local function scan_feed(line)
     sc.mode = nil; return
   end
   if sc.mode == "eq" then
-    local slot, item = parse_eq_line(L)
-    if item then sc.eq[#sc.eq + 1] = { slot = slot, item = item } end
+    local slot, item, flags = parse_eq_line(L)
+    if item then
+      sc.eq[#sc.eq + 1] = { slot = slot, item = item, flags = flags }
+      note_flags(sc, item, flags)
+    end
   elseif sc.mode == "inv" then
-    local it = parse_item_line(L)
-    if it then sc.inv[#sc.inv + 1] = it end
+    local it, flags = parse_item_line(L)
+    if it then sc.inv[#sc.inv + 1] = it; note_flags(sc, it, flags) end
   elseif sc.mode == "cont" then
-    local it = parse_item_line(L)
+    local it, flags = parse_item_line(L)
     if it and sc.curcont then
       sc.containers[sc.curcont] = sc.containers[sc.curcont] or {}
       table.insert(sc.containers[sc.curcont], it)
+      note_flags(sc, it, flags)
     end
   end
 end
@@ -914,23 +994,35 @@ end
 -- ---- current loadout (from the last scan, else the shared `state`) --------------------------------
 local function current_worn()
   if S.scan and S.scan.eq and #S.scan.eq > 0 then
-    local out = {}; for _, e in ipairs(S.scan.eq) do out[#out + 1] = { slot = e.slot, name = e.item } end; return out
+    local out = {}
+    for _, e in ipairs(S.scan.eq) do out[#out + 1] = { slot = e.slot, name = e.item, flags = e.flags } end
+    return out
   end
   local out = {}
   for _, line in ipairs((state and state.equipment) or {}) do
-    local slot, item = parse_eq_line(line)
-    if item then out[#out + 1] = { slot = slot, name = item } end
+    local slot, item, flags = parse_eq_line(line)
+    if item then out[#out + 1] = { slot = slot, name = item, flags = flags } end
   end
   return out
 end
+-- Candidate items for compare: {{name, flags}, ...}, deduped by normalized name, flags from the scan's
+-- flagmap (or parsed off the raw `state.inventory` lines on the no-scan fallback path).
 local function current_candidates()
   local seen, out = {}, {}
-  local function add(n) n = norm_name(n); if n ~= "" and not seen[n] then seen[n] = true; out[#out + 1] = n end end
-  if S.scan and ((S.scan.inv and #S.scan.inv > 0) or next(S.scan.containers or {})) then
-    for _, n in ipairs(S.scan.inv or {}) do add(n) end
-    for _, its in pairs(S.scan.containers or {}) do for _, n in ipairs(its) do add(n) end end
+  local function add(n, flags)
+    n = norm_name(n)
+    if n ~= "" and not seen[n] then seen[n] = true; out[#out + 1] = { name = n, flags = flags } end
+  end
+  local sc = S.scan
+  if sc and ((sc.inv and #sc.inv > 0) or next(sc.containers or {})) then
+    local fm = sc.flagmap or {}
+    for _, n in ipairs(sc.inv or {}) do add(n, fm[norm_name(n)]) end
+    for _, its in pairs(sc.containers or {}) do for _, n in ipairs(its) do add(n, fm[norm_name(n)]) end end
   else
-    for _, n in ipairs((state and state.inventory) or {}) do add(n) end
+    for _, line in ipairs((state and state.inventory) or {}) do
+      local n, flags = parse_item_line(line)
+      if n then add(n, flags) end
+    end
   end
   return out
 end
@@ -1082,6 +1174,21 @@ _EQ_TEST = {
   variant_stats_str = variant_stats_str,
   norm_name = norm_name,
   first_kw = first_kw,
+  split_flags = split_flags,
+  describe_item_for_prompt = describe_item_for_prompt,
+  -- scan collector: drive verbatim listing lines through the same feed the triggers use.
+  scan_feed = scan_feed,
+  scan_begin = function(mode)     -- start a scan buffer + section, as the header triggers would
+    S.scan = S.scan or { eq = {}, inv = {}, containers = {}, quick = true }
+    if mode == "eq" then S.scan.mode = "eq"; S.scan.eq = {}
+    elseif mode == "inv" then S.scan.mode = "inv"; S.scan.inv = {}
+    elseif mode then S.scan.mode = "cont"; S.scan.curcont = mode; S.scan.containers[mode] = S.scan.containers[mode] or {} end
+    return S.scan
+  end,
+  scan_state = function() return S.scan end,
+  scan_reset = function() S.scan = nil end,
+  current_worn = current_worn,
+  current_candidates = current_candidates,
   -- auto-identify: pure construction + the phase machine's signal surface (drive it with a stubbed after()).
   assign_ordinals = assign_ordinals,
   build_id_queue = build_id_queue,

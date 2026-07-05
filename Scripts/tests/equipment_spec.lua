@@ -579,3 +579,160 @@ test("QUEUE + binding: finalize binds the parsed block to the possession name th
   expect(resolve_item("horned imp-hide hood").status):eq("session")
   E.set_id_expect(nil)
 end)
+
+-- ====================================================================================================
+-- Flag markers in listings ("(glow)" et al) — the live 'glow' bug.
+--
+-- Verbatim from a raw session capture (mud_raw_glow.log): four DIFFERENT worn items carry a trailing
+-- "(glow)" display marker. The old parse_eq_line stripped only the LEADING "(rare)" column, so all four
+-- kept "(glow)" in their names; first_kw (last word) derived the keyword 'glow' for every one of them —
+-- the queue sent `identify glow` / `2.glow` / `3.glow` / `4.glow` (all failed on the wire:
+-- "You don't seem to be carrying anything named 'glow'."), the compare prompt called them 'glow', and a
+-- manual identify could never bind because the possession key ("imp eye ring (glow)") never matched the
+-- clean display name ("imp eye ring"). Markers now split into a separate flags field.
+-- ====================================================================================================
+
+local split_flags = E.split_flags
+
+-- The exact wire lines for the four items (equipment listing), plus flag-column and plain rows.
+local GLOW_EQ_LINES = {
+  "head        -              a horned imp-hide hood",
+  "neck        - (artifact)   a skull necklace",
+  "hands       - (rare)       a minstrel's glove",
+  "finger      -              a small silver ring",
+  "finger      -              an imp eye ring (glow)",
+  "on body     -              a neon blue tiara (glow)",
+  "feet        -              neon blue sweatsocks (glow)",
+  "held        -              the harp of healing (glow)",
+  "weapon      -              a blackened bronze sickle",
+}
+
+test("GLOW BUG: parse_eq_line strips a trailing '(glow)' into flags, name stays the real item", function()
+  local slot, item, flags = parse_eq_line("finger      -              an imp eye ring (glow)")
+  expect(slot):eq("finger")
+  expect(item):eq("imp eye ring")                        -- NOT "imp eye ring (glow)"
+  expect(flags.glow):eq(true)
+  slot, item, flags = parse_eq_line("held        -              the harp of healing (glow)")
+  expect(item):eq("harp of healing")
+  expect(flags.glow):eq(true)
+  -- the leading flag column still parses, and lands in flags too now
+  slot, item, flags = parse_eq_line("neck        - (artifact)   a skull necklace")
+  expect(item):eq("skull necklace")
+  expect(flags.artifact):eq(true)
+  slot, item, flags = parse_eq_line("hands       - (rare)       a minstrel's glove")
+  expect(item):eq("minstrel's glove")
+  expect(flags.rare):eq(true)
+end)
+
+test("GLOW BUG: first_kw never derives a keyword from a flag word or paren group", function()
+  expect(E.first_kw("an imp eye ring (glow)")):eq("ring")
+  expect(E.first_kw("a neon blue tiara (glow)")):eq("tiara")
+  expect(E.first_kw("neon blue sweatsocks (glow)")):eq("sweatsocks")
+  expect(E.first_kw("the harp of healing (glow)")):eq("healing")   -- last non-flag noun ('healing' is a real keyword)
+  expect(E.first_kw("imp eye ring")):eq("ring")                     -- clean names unchanged
+end)
+
+test("GLOW BUG: norm_name defensively drops trailing known markers so possession keys match bindings", function()
+  expect(E.norm_name("an imp eye ring (glow)")):eq("imp eye ring")
+  expect(E.norm_name("sleeves of the warmage (glow)")):eq("sleeves of the warmage")
+  expect(E.norm_name("a quartz-tipped wooden cane (light)")):eq("quartz-tipped wooden cane")
+  expect(E.norm_name("an obsidian doom-ring (hum)")):eq("obsidian doom-ring")
+end)
+
+test("split_flags: peels stacked markers, canonicalizes, and never eats a fully-parenthesized string", function()
+  local name, flags = split_flags("a wand of light (glowing) (humming)")
+  expect(name):eq("a wand of light")
+  expect(flags.glow):eq(true)                            -- glowing -> glow (canonical)
+  expect(flags.hum):eq(true)                             -- humming -> hum
+  local n2 = split_flags("(carried)")                    -- whole-string parens: not a trailing marker
+  expect(n2):eq("(carried)")
+end)
+
+test("GLOW BUG: parse_item_line keeps flags as metadata off the inventory name", function()
+  local name, flags = parse_item_line("sleeves of the warmage (glow)")
+  expect(name):eq("sleeves of the warmage")
+  expect(flags.glow):eq(true)
+  local n2, f2 = parse_item_line("(    1) an iridescent black sequined sash")   -- count prefix intact
+  expect(n2):eq("an iridescent black sequined sash")
+  expect(f2 == nil or next(f2) == nil):truthy()
+end)
+
+test("REGRESSION: a listing with N glowing items -> N distinct possession entries, each glowing=true", function()
+  E.reset(); E.scan_reset()
+  E.scan_begin("eq")
+  for _, l in ipairs(GLOW_EQ_LINES) do E.scan_feed(l) end
+  local sc = E.scan_state()
+  expect(#sc.eq):eq(9)
+  local glowing, names = {}, {}
+  for _, e in ipairs(sc.eq) do
+    names[e.item] = true
+    expect(e.item):ne("glow")                            -- no entry collapsed to the marker word
+    if e.flags and e.flags.glow then glowing[#glowing + 1] = e.item end
+  end
+  expect(#glowing):eq(4)                                 -- exactly the four glowing items…
+  table.sort(glowing)
+  expect(glowing[1]):eq("harp of healing")               -- …with their REAL distinct names
+  expect(glowing[2]):eq("imp eye ring")
+  expect(glowing[3]):eq("neon blue sweatsocks")
+  expect(glowing[4]):eq("neon blue tiara")
+  expect(names["skull necklace"]):eq(true)               -- flag-column items unharmed
+  E.scan_reset()
+end)
+
+test("GLOW BUG: build_id_queue targets real keywords for the four items — never 'glow' ordinals", function()
+  E.reset()
+  local worn = {}
+  -- feed the parsed (clean) names exactly as finish_scan would after the fix
+  for _, l in ipairs(GLOW_EQ_LINES) do
+    local _, item = parse_eq_line(l)
+    worn[#worn + 1] = item
+  end
+  local queue = build_id_queue(worn, {}, {})
+  for _, e in ipairs(queue) do
+    expect(e.kw:match("glow")):eq(nil)                   -- the old queue sent glow/2.glow/3.glow/4.glow
+  end
+  local kws = {}
+  for _, e in ipairs(queue) do kws[e.name] = e.kw end
+  expect(kws["imp eye ring"]):eq("2.ring")               -- 'small silver ring' is ring #1 in the scope
+  expect(kws["neon blue tiara"]):eq("tiara")
+  expect(kws["neon blue sweatsocks"]):eq("sweatsocks")
+  expect(kws["harp of healing"]):eq("healing")
+end)
+
+test("GLOW BUG: identify now BINDS — possession key from a '(glow)' listing resolves after the id block", function()
+  E.reset()
+  -- The user's manual identify of the tiara (verbatim block shape: keyword header, worn display line).
+  E.feed_id_stream({
+    "kxwt_id_start",
+    "Item: 'neon blue tiara clothing piece'  ",
+    'Weight: 1  Size: 0\'6"  Level: 11  Item Quality: WELL CRAFTED',
+    "Type: CLOTHING   Composition: TEXTILE, CLOTH",
+    "Object is:  GLOW ",
+    "Wear locations are:  BODY ",
+    "Affects:  MANA by 5",
+    "",
+    "",
+    "a neon blue tiara is WELL CRAFTED in quality.",
+    "kxwt_id_end",
+    "You are wearing a neon blue tiara.",
+  })
+  -- Possession key comes from the eq listing WITH the marker; before the fix this stayed 'unknown'
+  -- ("Even after I identified it, it told me to identify it").
+  local _, item = parse_eq_line("on body     -              a neon blue tiara (glow)")
+  expect(resolve_item(item).status):eq("session")
+end)
+
+test("GLOW BUG: the compare prompt carries the real display names (with glowing as a property)", function()
+  E.reset()
+  local worn = {}
+  for _, l in ipairs({ GLOW_EQ_LINES[5], GLOW_EQ_LINES[6] }) do   -- imp eye ring / neon blue tiara
+    local slot, item, flags = parse_eq_line(l)
+    worn[#worn + 1] = { slot = slot, name = item, flags = flags }
+  end
+  local _, user = build_compare_prompt({ classes = { Necromancer = 20 } }, worn, {}, "")
+  expect(user):contains("imp eye ring")                  -- the model sees the REAL names…
+  expect(user):contains("neon blue tiara")
+  expect(user):contains("glowing")                       -- …and the marker as a property
+  expect(user:find("- glow:", 1, true)):eq(nil)          -- never an item literally named 'glow'
+  expect(user:find("eq.id('glow')", 1, true)):eq(nil)    -- and never an identify-'glow' hint
+end)
