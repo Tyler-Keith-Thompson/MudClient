@@ -469,8 +469,8 @@ final class LuaScriptEngine: @unchecked Sendable {
         Task { [weak self] in
             guard let self else { return }
             for line in lines {
-                let gagged = self.processLine(line)          // fires triggers/gags (takes the lock itself)
-                if !quiet && !gagged { Container.terminalService().print(line, terminator: "\n") }
+                let display = self.processLine(line)         // fires triggers/gags (takes the lock itself)
+                if !quiet, let display { Container.terminalService().print(display, terminator: "\n") }
                 self.notifyUpdate()                          // panels may have changed
                 if interval > 0 {
                     try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
