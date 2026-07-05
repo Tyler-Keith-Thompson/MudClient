@@ -126,6 +126,89 @@ import Testing
     #expect(got == ["dump 5"])
 }
 
+// MARK: - echo colors & usage errors
+
+@Test func echoResolvesBrightAndModifierColorSpecs() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+
+    try engine.load(source: #"echo("a", "red")"#)
+    #expect(echoed.last == "\u{1B}[31ma\u{1B}[0m")
+
+    try engine.load(source: #"echo("b", "bright red")"#)          // spaced spelling
+    #expect(echoed.last == "\u{1B}[91mb\u{1B}[0m")
+
+    try engine.load(source: #"echo("c", "brightred")"#)           // fused spelling — same result
+    #expect(echoed.last == "\u{1B}[91mc\u{1B}[0m")
+
+    try engine.load(source: #"echo("d", "bold red underline")"#)  // modifiers + color combine
+    #expect(echoed.last == "\u{1B}[1;4;31md\u{1B}[0m")
+
+    try engine.load(source: #"echo("e", "brightmagenta")"#)       // panel-layer name, same palette
+    #expect(echoed.last == "\u{1B}[95me\u{1B}[0m")
+
+    try engine.load(source: #"echo("f", "dim")"#)                 // modifier alone (old behaviour kept)
+    #expect(echoed.last == "\u{1B}[2mf\u{1B}[0m")
+
+    try engine.load(source: #"echo("g", "reversed")"#)
+    #expect(echoed.last == "\u{1B}[7mg\u{1B}[0m")
+}
+
+@Test func echoUnknownColorPrintsTextPlusHint() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"echo("hello", "purple")"#)
+    // The text still prints (plain), and a hint names the unknown word and points at help(colors).
+    #expect(echoed.contains("hello"))
+    #expect(echoed.contains { $0.contains("unknown color 'purple'") && $0.contains("help(colors)") })
+}
+
+@Test func echoWithUnquotedGlobalsCoercesInsteadOfSilence() throws {
+    // The footgun: `#echo(test, red)` passes GLOBALS, not strings. `help` is documented, so it renders
+    // as "function: help"; an entirely-nil text arg produces the quoting hint. Never a silent no-op.
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("echo(help, red)")                 // function + nil color
+    #expect(echoed.contains { $0.contains("function: help") })
+    echoed.removeAll()
+    engine.evalREPL("echo(undefined_thing, red)")      // nil text → usage hint, not "nil"
+    #expect(echoed.contains { $0.contains("did you mean quotes") })
+    #expect(!echoed.contains("nil"))
+}
+
+@Test func sendWithNonStringIsUsageErrorNotASentLine() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    var sent: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.onSend = { sent.append($0) }
+    try engine.load(source: "send(nil) send(42) send(help)")
+    #expect(sent.isEmpty)                              // nothing coerced onto the wire
+    #expect(echoed.contains { $0.contains("send: expected a command string") })
+}
+
+@Test func triggerWithInvalidRegexReportsUsage() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"trigger("([", function() end)"#)    // unbalanced — used to no-op silently
+    #expect(echoed.contains { $0.contains("trigger: expected") })
+}
+
+@Test func colorsIsCallableAndDemosThePalette() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("colors")                          // bare word → callable table → colors()
+    let out = echoed.joined(separator: "\n")
+    #expect(out.contains("\u{1B}[91m  bright red\u{1B}[0m"))      // each name rendered in its own color
+    #expect(out.contains("\u{1B}[34m  blue\u{1B}[0m"))
+    #expect(out.contains("underline"))
+}
+
 @Test func luaTriggerCallsBackIntoHost() throws {
     let engine = LuaScriptEngine()
     var sent: [String] = []

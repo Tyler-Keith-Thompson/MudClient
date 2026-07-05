@@ -121,3 +121,106 @@ test("command registers a doc stub for the new global", function()
   local out = joined(function() help("spec_documented") end)
   expect(out:find("migrated legacy command", 1, true) ~= nil):truthy()
 end)
+
+-- ---- help() aliases, examples, and the nil-arg hint ----
+
+test("help(io) — the stdlib table, unquoted — renders the io group, not 'no documented members'", function()
+  local out = joined(function() help(io) end)
+  expect(out:find("no documented members", 1, true)):eq(nil)
+  expect(out:find("echo", 1, true) ~= nil):truthy()
+  expect(out:find("send", 1, true) ~= nil):truthy()
+  expect(out:find("bell", 1, true) ~= nil):truthy()
+end)
+
+test("help renders the example field as an e.g. line", function()
+  doc("spec_exampled", { sig = "spec_exampled(x)", text = "Has an example.", group = "spectest",
+                         example = 'spec_exampled("boo")' })
+  local out = joined(function() help("spec_exampled") end)
+  expect(out:find('e.g. spec_exampled("boo")', 1, true) ~= nil):truthy()
+end)
+
+test("help() footer hints at quoting and lists topic docs (the help(color) landing)", function()
+  -- help(color) with no `color` global IS help(nil): the listing must end with a usage hint naming
+  -- the topics (colors), so the user still lands somewhere useful.
+  local out = joined(function() help(nil) end)
+  expect(out:find("quote the name", 1, true) ~= nil):truthy()
+  expect(out:find("Topics:", 1, true) ~= nil):truthy()
+  expect(out:find("colors", 1, true) ~= nil):truthy()
+end)
+
+test("help('color') and help('colors') and help(colors) all render the palette topic", function()
+  for _, target in ipairs({ "color", "colors" }) do
+    local out = joined(function() help(target) end)
+    expect(out:find("colors()", 1, true) ~= nil):truthy()
+  end
+  local out = joined(function() help(colors) end)      -- the table value itself
+  expect(out:find("colors()", 1, true) ~= nil):truthy()
+  expect(out:find("no documented members", 1, true)):eq(nil)
+end)
+
+test("hidden doc entries resolve by name but stay out of listings", function()
+  -- "color" is hidden: help() full listing must not show it as its own line, help("color") must work.
+  local all = joined(function() help() end)
+  expect(all:find("\n  color ", 1, true)):eq(nil)
+  local entry = joined(function() help("color") end)
+  expect(entry:find("Alias of colors", 1, true) ~= nil):truthy()
+end)
+
+-- ---- colors() live demo ----
+
+test("colors lists every base color, bright variant, and modifier", function()
+  local names = {}
+  for _, n in ipairs(colors) do names[n] = true end
+  for _, c in ipairs({ "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white" }) do
+    expect(names[c]):truthy()
+    expect(names["bright " .. c]):truthy()
+  end
+  for _, m in ipairs({ "bold", "dim", "underline", "reversed" }) do expect(names[m]):truthy() end
+end)
+
+test("colors() demo prints every name (rendered in its own color)", function()
+  local out = joined(function() colors() end)
+  for _, n in ipairs(colors) do
+    expect(out:find(n, 1, true) ~= nil):truthy()
+  end
+  expect(out:find("bright red", 1, true) ~= nil):truthy()
+end)
+
+-- ---- echo() coercion wrapper ----
+
+-- Capture through the HOST sink (__host_echo), leaving the coercion wrapper — the thing under test —
+-- in place as the global `echo`.
+local function capture_host(fn)
+  local real = __host_echo
+  local out = {}
+  __host_echo = function(s) out[#out + 1] = (tostring(s):gsub("\27%[[%d;]*m", "")) end
+  local ok, err = pcall(fn)
+  __host_echo = real
+  if not ok then error(err, 2) end
+  return table.concat(out, "\n")
+end
+
+test("echo coerces a documented function to its repl-render", function()
+  function spec_echo_fn() end
+  doc("spec_echo_fn", { sig = "spec_echo_fn()", group = "spectest" })
+  local out = capture_host(function() echo(spec_echo_fn) end)
+  expect(out):eq("function: spec_echo_fn")
+end)
+
+test("echo coerces numbers and tables naturally", function()
+  expect(capture_host(function() echo(42) end)):eq("42")
+  local out = capture_host(function() echo({ a = 1 }) end)
+  expect(out:find("a=1", 1, true) ~= nil):truthy()
+end)
+
+test("echo(nil) prints a usage hint about quoting, not 'nil'", function()
+  local out = capture_host(function() echo(nil) end)
+  expect(out:find("did you mean quotes", 1, true) ~= nil):truthy()
+  expect(out):ne("nil")
+end)
+
+test("echo with a non-string color falls back to plain text", function()
+  -- e.g. `#echo("hi", red)` where `red` is an undefined global (nil) — must still print "hi".
+  expect(capture_host(function() echo("hi", nil) end)):eq("hi")
+  expect(capture_host(function() echo("hi", 7) end)):eq("hi")
+end)

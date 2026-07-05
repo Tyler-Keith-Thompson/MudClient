@@ -37,6 +37,12 @@ and run `#pilot.reload()` (or `#reload`) in the app to apply live (no rebuild). 
 in `Sources/MudClient/LuaScriptEngine.swift` (trigger/alias/command/echo/send/after/panel/ai_*/music/…);
 the `#word rest` → `word("rest")` legacy rewrite also fires for callable tables (`globalIsCallable`).
 
+**Docs are enforced.** Every new host builtin (`lua.register`), `on_*` hook (`callGlobal*` call site in
+Swift), and public script API (member of eq/pilot/kxwt/trivia/panel/music) MUST get a `doc()` entry —
+in `Scripts/bootstrap.lua` for the host surface, in the defining script for script APIs — or the suite
+fails naming the offender (`Scripts/tests/doc_coverage_spec.lua` + `DocCoverageTests.swift`). A new
+builtin also needs its stub registered in `tools/luatest/driver.lua`. `__`-prefixed names are exempt.
+
 Host hook surface (all optional Lua globals / builtins; see LuaScriptEngine.swift for signatures):
 - Rules: `trigger`/`alias`/`gag` return ids; opts `{oneshot=, class=}`; `rule_remove`/`rule_enable`/
   `class_enable`/`class_remove`. A trigger handler's return rewrites the displayed line (string),

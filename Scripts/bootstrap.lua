@@ -11,6 +11,19 @@
 --
 -- The standalone Lua test harness (tools/luatest/driver.lua) dofile()s this same file, so the doc/help
 -- and command-bridge specs run against the real implementation.
+--
+-- ============================== THE RULE ==============================
+-- EVERY new capability MUST be doc()'d, or the test suite fails:
+--   * a new host builtin (Swift `lua.register`) needs a doc() entry here — Lua.register records every
+--     registration into `__host_builtins`, and Scripts/tests/doc_coverage_spec.lua fails, BY NAME, on
+--     any recorded builtin without documentation;
+--   * a new `on_*` hook consulted from Swift (callGlobal and friends) needs a doc() entry in the
+--     "hooks" group here — the Swift test `hookDocsCoverSwiftCallSites` scans the Swift sources and
+--     fails on any hook call site this file doesn't document;
+--   * a new public script API (a member of eq/pilot/kxwt/trivia/panel/music/...) needs a doc() in its
+--     own script — the same coverage spec walks those tables.
+-- Genuinely-internal helpers use a `__` name prefix, which exempts them from coverage.
+-- ======================================================================
 
 --------------------------------------------------------------------------------
 -- Documentation registry
@@ -18,14 +31,23 @@
 
 -- by_name: name string -> entry.  by_fn: function value -> entry (so help(alias), passing the function,
 -- works).  list: insertion-ordered entries (unused by help(), which lists via by_name, but handy for
--- introspection). An entry = { name, sig, text, group, fn }.
+-- introspection). An entry = { name, sig, text, group, example, topic, hidden, fn }.
 __docs = __docs or { by_name = {}, by_fn = {}, list = {} }
+-- table value -> a doc NAME or GROUP to show instead, for tables that carry no documented function
+-- members of their own. Lets `help(io)` (the stdlib io TABLE — it shadows the "io" doc group) land on
+-- the send/echo/bell group, and `help(colors)` land on the colors topic. Weak keys: an alias must
+-- never keep a dead table alive.
+__docs.table_alias = __docs.table_alias or setmetatable({}, { __mode = "k" })
 
 -- doc(target, info): document `target` (a global-name string OR a function value). info fields:
---   sig   — a one-line signature, e.g. "alias(pattern, handler[, opts]) -> id"
---   text  — 1-3 sentence description
---   group — grouping key for help()'s listing (default "misc")
---   name  — display name when target is a bare function value
+--   sig     — a one-line signature, e.g. "alias(pattern, handler[, opts]) -> id"
+--   text    — 1-3 sentence description
+--   group   — grouping key for help()'s listing (default "misc")
+--   name    — display name when target is a bare function value
+--   example — optional one-line usage example, rendered by help() as `e.g. …` (optional; the coverage
+--             spec does not require it)
+--   topic   — optional: a how-to topic entry, surfaced by the help() footer hint
+--   hidden  — optional: resolvable via help("name") but omitted from listings (for alias entries)
 -- When target is a string naming a global function, the function value is indexed too, so help() can be
 -- called with either the name or the function.
 function doc(target, info)
@@ -42,7 +64,8 @@ function doc(target, info)
   else
     return
   end
-  local entry = { name = name, sig = info.sig, text = info.text, group = info.group or "misc", fn = fn }
+  local entry = { name = name, sig = info.sig, text = info.text, group = info.group or "misc",
+                  example = info.example, topic = info.topic, hidden = info.hidden, fn = fn }
   if entry.name then __docs.by_name[entry.name] = entry end
   if fn then __docs.by_fn[fn] = entry end
   __docs.list[#__docs.list + 1] = entry
@@ -113,6 +136,10 @@ local function render_top(v)
   return tostring(v)
 end
 
+-- The top-level renderer, exported: the echo() coercion wrapper below uses it, and anything else that
+-- wants "show me this value the way the REPL would" can too.
+__repl_render = render_top
+
 -- Called by the host REPL with an expression's result(s). Zero args (a statement or a void call) prints
 -- nothing; otherwise each result is rendered and the line echoed (tab-separated for multiple results).
 function __repl_print(...)
@@ -121,6 +148,27 @@ function __repl_print(...)
   local parts = {}
   for i = 1, n do parts[i] = render_top((select(i, ...))) end
   echo(table.concat(parts, "\t"))
+end
+
+--------------------------------------------------------------------------------
+-- echo() coercion wrapper
+--------------------------------------------------------------------------------
+
+-- Wrap the host `echo` so a wrong argument type is never a silent no-op (the classic REPL footgun:
+-- `#echo(test, red)` passes two GLOBALS — the test function and nil — not strings). Text that isn't a
+-- string is coerced through the REPL renderer, exactly like `print`-with-taste (a function shows as
+-- "function: test" when documented, numbers/booleans naturally, tables shallowly). A nil text argument
+-- gets a usage hint instead of printing "nil". A non-string color is dropped (prints plain); unknown
+-- color NAMES are reported by the host side (see LuaScriptEngine's echo builtin).
+__host_echo = echo    -- the raw host sink, kept reachable (and swappable — specs capture through it)
+function echo(text, color)
+  if text == nil then
+    return __host_echo('echo: expected text — did you mean quotes? e.g. echo("hello", "bright red")',
+                       "yellow")
+  end
+  if type(text) ~= "string" then text = __repl_render(text) end
+  if color ~= nil and type(color) ~= "string" then color = nil end
+  return __host_echo(text, color)
 end
 
 --------------------------------------------------------------------------------
@@ -146,12 +194,13 @@ local function summary(e)
   return s
 end
 
--- List every documented target, grouped; or only the given group.
+-- List every documented target, grouped; or only the given group. Hidden entries (alias names like
+-- "color" for "colors") resolve via help("name") but don't clutter listings.
 local function help_list(only_group)
   local groups = {}
   for _, e in pairs(__docs.by_name) do
     local g = e.group or "misc"
-    if only_group == nil or g == only_group then
+    if (only_group == nil or g == only_group) and not e.hidden then
       groups[g] = groups[g] or {}
       groups[g][#groups[g] + 1] = e
     end
@@ -173,6 +222,11 @@ local function help_list(only_group)
   end
 end
 
+local function has_group(name)
+  for _, e in pairs(__docs.by_name) do if (e.group or "misc") == name then return true end end
+  return false
+end
+
 -- Full doc for one entry (its function value passed for the undocumented fallback message).
 local function help_entry(e, val)
   if not e then
@@ -183,35 +237,58 @@ local function help_entry(e, val)
   echo(e.sig or e.name or "?", "cyan")
   if e.group then echo("  group: " .. e.group, "dim") end
   if e.text then echo("  " .. e.text) end
+  if e.example then echo("  e.g. " .. e.example, "dim") end
 end
 
--- Document a table by listing its documented function members (e.g. help(panel)).
-local function help_table(tb)
+local help_table   -- forward declaration (the alias fallback re-enters help machinery)
+
+-- Document a table by listing its documented function members (e.g. help(panel)). A table with no
+-- documented members of its own may still be a known alias (see __docs.table_alias): `help(io)` — the
+-- stdlib io table, passed unquoted — renders the "io" doc group; `help(colors)` renders the colors
+-- topic entry.
+help_table = function(tb)
   local items = {}
   for k, v in pairs(tb) do
     if type(v) == "function" and __docs.by_fn[v] then
       items[#items + 1] = { k = tostring(k), e = __docs.by_fn[v] }
     end
   end
-  if #items == 0 then echo("no documented members", "yellow"); return end
+  if #items == 0 then
+    local alias = __docs.table_alias[tb]
+    if alias then
+      if __docs.by_name[alias] then return help_entry(__docs.by_name[alias], tb) end
+      if has_group(alias) then return help_list(alias) end
+    end
+    echo("no documented members", "yellow")
+    return
+  end
   table.sort(items, function(a, b) return a.k < b.k end)
   for _, it in ipairs(items) do
     echo(string.format("  %-16s %s", it.k, it.e.sig or summary(it.e)))
   end
 end
 
-local function has_group(name)
-  for _, e in pairs(__docs.by_name) do if (e.group or "misc") == name then return true end end
-  return false
-end
-
--- help()            — grouped listing of everything documented.
+-- help()            — grouped listing of everything documented, plus a usage footer.
 -- help(fn)          — full doc for a function value.
 -- help("name")      — full doc for a documented name; else, if it's a group, list that group; else, if
 --                     it's an existing global, report its type; else "no documentation".
--- help(table)       — list the table's documented members (e.g. help(panel)).
+-- help(table)       — list the table's documented members (e.g. help(panel)); a memberless table known
+--                     to the alias registry renders its group/topic (e.g. help(io), help(colors)).
 function help(x)
-  if x == nil then return help_list(nil) end
+  if x == nil then
+    -- Also the landing spot for `help(color)`-style typos: an unquoted, undefined global IS nil, so
+    -- after the listing point at quoting and the topic entries (colors, …) the user probably wanted.
+    help_list(nil)
+    local topics = {}
+    for _, e in pairs(__docs.by_name) do
+      if e.topic and not e.hidden then topics[#topics + 1] = e.name end
+    end
+    table.sort(topics)
+    local hint = 'help("name") shows one entry, help("group") a group — quote the name (an unquoted name is a global).'
+    if #topics > 0 then hint = hint .. " Topics: " .. table.concat(topics, ", ") .. "." end
+    echo(hint, "dim")
+    return
+  end
   local t = type(x)
   if t == "function" then return help_entry(__docs.by_fn[x], x) end
   if t == "table" then return help_table(x) end
@@ -225,8 +302,29 @@ function help(x)
 end
 
 --------------------------------------------------------------------------------
--- Legacy command() bridge
+-- colors — the named-color help, as a live demo
 --------------------------------------------------------------------------------
+
+-- The canonical spec vocabulary. The HOST resolves these (LuaScriptEngine.sgrCodes over
+-- PanelHost.palette — the same table the panel/minimap layer uses); this list mirrors it for
+-- discovery. A spec is space-separated words: at most one base color, `bright` to brighten it
+-- ("bright red" and "brightred" are both fine), plus any modifiers.
+local BASE_COLORS = { "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white" }
+local MODIFIERS   = { "bold", "dim", "underline", "reversed" }
+
+-- `colors` is both a list (its array part holds every name, so `#colors` auto-prints them) and
+-- callable: `colors()` prints each name rendered IN that color/modifier — a live palette demo.
+colors = {}
+for _, c in ipairs(BASE_COLORS) do colors[#colors + 1] = c end
+for _, c in ipairs(BASE_COLORS) do colors[#colors + 1] = "bright " .. c end
+for _, m in ipairs(MODIFIERS) do colors[#colors + 1] = m end
+setmetatable(colors, { __call = function()
+  echo("color specs: space-separated words — one base color, 'bright' to brighten it, any modifiers.", "dim")
+  echo('e.g. echo("hello", "bright red")  echo("hi", "bold red underline")  ("brightred" works too)', "dim")
+  for _, c in ipairs(BASE_COLORS) do echo("  " .. c, c) end
+  for _, c in ipairs(BASE_COLORS) do echo("  bright " .. c, "bright " .. c) end
+  for _, m in ipairs(MODIFIERS) do echo("  " .. m, m) end
+end })
 
 -- command(name, handler): the migration bridge. Instead of a host command registry, it defines a global
 -- function <name> (name sanitized to a valid Lua identifier) that forwards its single optional string
@@ -257,18 +355,36 @@ end
 
 -- io / core
 doc("send",  { sig = "send(text)", group = "io",
-  text = "Send a command to the MUD (goes through the on_send hook and alias handling upstream)." })
+  text = "Send a command to the MUD (goes through the on_send hook and alias handling upstream).",
+  example = 'send("look")' })
 doc("echo",  { sig = "echo(text[, color])", group = "io",
-  text = "Print a line to the local display. Optional color: red/green/yellow/blue/magenta/cyan/white/dim." })
-doc("bell",  { sig = "bell()", group = "io", text = "Ring the terminal bell." })
+  text = "Print a line to the local display. Non-string text is rendered like a REPL result. color is a spec: one base color, optionally 'bright', plus modifiers bold/dim/underline/reversed — run colors() for a live palette.",
+  example = 'echo("ding!", "bright red")' })
+doc("bell",  { sig = "bell()", group = "io",
+  text = "Ring the terminal bell (an audible BEL written straight to the controlling terminal).",
+  example = "bell()" })
+
+-- colors: the palette topic. help("colors"), help("color"), and help(colors) all land here; calling
+-- colors() prints the live demo. The stdlib `io` TABLE aliases to the "io" doc group so an unquoted
+-- help(io) still works.
+doc("colors", { sig = "colors()", group = "help", topic = true,
+  text = "The named colors echo/panels accept. Call colors() to print every name rendered in its own color; #colors lists the names plainly. Specs combine: \"bright red\", \"bold red underline\", \"brightred\".",
+  example = "colors()" })
+doc("color", { sig = "colors()", group = "help", hidden = true,
+  text = "Alias of colors — see help(\"colors\") or run colors()." })
+__docs.table_alias[colors] = "colors"
+if io then __docs.table_alias[io] = "io" end
 
 -- triggers / aliases / gags / rule lifecycle
 doc("trigger", { sig = "trigger(pattern, handler[, opts]) -> id", group = "triggers",
-  text = "Register a line trigger. handler(line, cap1, …, raw) may return a string (replace the line), false/\"\" (gag), or nil (unchanged). opts = { oneshot=true, class=\"name\" }." })
+  text = "Register a line trigger. handler(line, cap1, …, raw) may return a string (replace the line), false/\"\" (gag), or nil (unchanged). opts = { oneshot=true, class=\"name\" }.",
+  example = "trigger(\"^You are hungry\", function() send(\"eat bread\") end)" })
 doc("alias", { sig = "alias(pattern, handler[, opts]) -> id", group = "triggers",
-  text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger()." })
+  text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger().",
+  example = "alias(\"^gg$\", function() send(\"get all from corpse\") end)" })
 doc("gag", { sig = "gag(pattern) -> id", group = "triggers",
-  text = "Drop every server line matching the pattern. Removable/toggleable by id like any rule." })
+  text = "Drop every server line matching the pattern. Removable/toggleable by id like any rule.",
+  example = "gag(\"^kxwt_\")" })
 doc("rule_remove", { sig = "rule_remove(id)", group = "triggers",
   text = "Remove the trigger, alias, or gag with this id." })
 doc("rule_enable", { sig = "rule_enable(id, on)", group = "triggers",
@@ -280,40 +396,51 @@ doc("class_remove", { sig = "class_remove(name)", group = "triggers",
 
 -- timers
 doc("after", { sig = "after(seconds, callback) -> id", group = "timers",
-  text = "Call callback() once after `seconds`. Returns a cancellable id." })
+  text = "Call callback() once after `seconds`. Returns a cancellable id.",
+  example = "after(2, function() echo(\"two seconds later\") end)" })
 doc("every", { sig = "every(seconds, callback) -> id", group = "timers",
-  text = "Call callback() repeatedly every `seconds`. Returns a cancellable id." })
+  text = "Call callback() repeatedly every `seconds`. Returns a cancellable id.",
+  example = "every(60, function() send(\"save\") end)" })
 doc("cancel", { sig = "cancel(id)", group = "timers",
-  text = "Cancel a pending or repeating timer started by after()/every()." })
+  text = "Cancel a pending or repeating timer started by after()/every().",
+  example = "t = after(5, f); cancel(t)" })
 
 -- connection
 doc("connect", { sig = "connect(host[, port])", group = "connection",
-  text = "Open (or re-open) the connection. port defaults to 23." })
+  text = "Open (or re-open) the connection. port defaults to 23.",
+  example = "connect(\"alteraeon.com\", 3002)" })
 doc("disconnect", { sig = "disconnect()", group = "connection", text = "Close the current connection." })
 doc("is_connected", { sig = "is_connected() -> bool", group = "connection",
   text = "Whether the socket is currently connected." })
 doc("telnet_send", { sig = "telnet_send(option, payload)", group = "connection",
-  text = "Send IAC SB <option> <payload> IAC SE, escaping IAC bytes. option is numeric; payload is a byte string." })
+  text = "Send IAC SB <option> <payload> IAC SE, escaping IAC bytes. option is numeric; payload is a byte string.",
+  example = "telnet_send(90, \"!!SOUND(ding)\")" })
 
 -- terminal / input
 doc("bind", { sig = "bind(keyname, handler) -> id", group = "terminal",
-  text = "Register a key macro; handler(keyname) runs when the key is pressed and the key is consumed. Later binds for a key win." })
+  text = "Register a key macro; handler(keyname) runs when the key is pressed and the key is consumed. Later binds for a key win.",
+  example = "bind(\"f5\", function() send(\"cast 'heal'\") end)" })
 doc("unbind", { sig = "unbind(id)", group = "terminal", text = "Remove a binding returned by bind()." })
 doc("input_get", { sig = "input_get() -> string", group = "terminal", text = "Get the current input-line text." })
-doc("input_set", { sig = "input_set(text)", group = "terminal", text = "Replace the input line and redraw it." })
+doc("input_set", { sig = "input_set(text)", group = "terminal", text = "Replace the input line and redraw it.",
+  example = "input_set(\"say hello\")" })
 doc("scrollback", { sig = "scrollback(n) -> array", group = "terminal",
-  text = "The last n displayed lines (ANSI stripped), oldest-first." })
+  text = "The last n displayed lines (ANSI stripped), oldest-first.",
+  example = "scrollback(20)" })
 doc("scrollback_find", { sig = "scrollback_find(pattern[, max]) -> array", group = "terminal",
-  text = "Up to `max` (default 100) most-recent scrollback lines matching the pattern (ANSI stripped), oldest-first." })
+  text = "Up to `max` (default 100) most-recent scrollback lines matching the pattern (ANSI stripped), oldest-first.",
+  example = "scrollback_find(\"tells you\", 10)" })
 
 -- logging / replay
 doc("log_start", { sig = "log_start(path[, opts]) -> bool", group = "logging",
-  text = "Log displayed server lines to a file (appends). opts = { timestamps=bool, ansi=bool, commands=bool }, all default false." })
+  text = "Log displayed server lines to a file (appends). opts = { timestamps=bool, ansi=bool, commands=bool }, all default false.",
+  example = "log_start(\"session.log\", { commands = true })" })
 doc("log_stop", { sig = "log_stop()", group = "logging", text = "Stop the active session log." })
 doc("log_active", { sig = "log_active() -> (bool, path|nil)", group = "logging",
   text = "Whether a log is active, and its path." })
 doc("replay", { sig = "replay(path[, opts]) -> bool", group = "logging",
-  text = "Feed a plain-text file through the normal server-line pipeline (triggers/gags fire), no network, no logging. opts = { speed=lines/sec, quiet=bool }." })
+  text = "Feed a plain-text file through the normal server-line pipeline (triggers/gags fire), no network, no logging. opts = { speed=lines/sec, quiet=bool }.",
+  example = "replay(\"session.log\", { speed = 20 })" })
 
 -- panel (bottom status HUD) / top panel
 if panel then
@@ -368,21 +495,25 @@ doc("ai_usage_reset", { sig = "ai_usage_reset()", group = "ai", text = "Reset th
 
 -- scripts / documentation
 doc("load_script", { sig = "load_script(name)", group = "scripts",
-  text = "Load (or hot-reload) Scripts/<name>.lua and remember it so reload() re-runs it. Also handles the braced `{Name}` form. `#load {Name}` rewrites to this." })
+  text = "Load (or hot-reload) Scripts/<name>.lua and remember it so reload() re-runs it. Also handles the braced `{Name}` form. `#load {Name}` rewrites to this.",
+  example = "load_script(\"HUD\")" })
 doc("reload", { sig = "reload()", group = "scripts",
   text = "Re-run every loaded script live (clears triggers/aliases/timers first). `#reload` rewrites to this." })
 doc("command", { sig = "command(name, handler)", group = "scripts",
   text = "Legacy bridge: define a global function <name> (sanitized) that forwards one string argument to handler. Prefer defining and doc()ing a real function." })
 doc("help", { sig = "help([target])", group = "help",
-  text = "Documentation. help() lists everything; help(fn|\"name\") shows one entry; help(\"group\") lists a group; help(table) lists documented members." })
+  text = "Documentation. help() lists everything; help(fn|\"name\") shows one entry; help(\"group\") lists a group; help(table) lists documented members.",
+  example = "help(\"triggers\")  help(alias)  help(panel)" })
 doc("doc", { sig = "doc(target, info)", group = "help",
-  text = "Register documentation for a global name or function value. info = { sig, text, group }." })
+  text = "Register documentation for a global name or function value. info = { sig, text, group }.",
+  example = "doc(\"f\", { sig = \"f(x)\", text = \"Does f.\", group = \"misc\", example = \"f(1)\" })" })
 
 -- Optional hook globals — define a global with the given name to receive the event.
 doc("on_connect", { sig = "on_connect()", group = "hooks", text = "hooks: define a global with this name. Fired when the socket connects." })
 doc("on_disconnect", { sig = "on_disconnect(reason)", group = "hooks", text = "hooks: define a global with this name. Fired when the socket goes down." })
 doc("on_prompt", { sig = "on_prompt(text)", group = "hooks", text = "hooks: define a global with this name. Fired at a GO-AHEAD prompt boundary with the flushed text." })
 doc("on_telnet", { sig = "on_telnet(option, payload)", group = "hooks", text = "hooks: define a global with this name. Fired for a telnet subnegotiation (numeric option, raw byte payload)." })
+doc("on_telnet_negotiate", { sig = "on_telnet_negotiate(verb, option)", group = "hooks", text = "hooks: define a global with this name. Consulted for a WILL/WONT/DO/DONT option; return \"accept\" or \"reject\" to decide the reply." })
 doc("on_send", { sig = "on_send(cmd)", group = "hooks", text = "hooks: define a global with this name. Filter an outbound command: return nil (unchanged), false (suppress), or a string (replace). send() inside is transmitted directly." })
 doc("on_resize", { sig = "on_resize(cols, rows)", group = "hooks", text = "hooks: define a global with this name. Fired after the terminal is resized." })
 doc("on_mouse", { sig = "on_mouse(event, x, y, button)", group = "hooks", text = "hooks: define a global with this name. Return truthy to consume a mouse event." })

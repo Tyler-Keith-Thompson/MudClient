@@ -9,6 +9,7 @@ swift_test(
         "//Scripts:bootstrap.lua",
         "//Scripts:AlterAeon.lua",
         "//Scripts:AIPilot.lua",
+        "//Sources/MudClient:swift_srcs",
         "fixtures/pellam_kxwt_capture.log",
     ],
     visibility = ["//visibility:public"],

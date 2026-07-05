@@ -307,6 +307,23 @@ final class Lua: @unchecked Sendable {
         lua_pushlightuserdata(state, boxed.toOpaque())
         lua_pushcclosure(state, Lua.trampoline, 1)
         name.withCString { lua_setglobal(state, $0) }
+        recordBuiltin(name)
+    }
+
+    /// Record `name` in the Lua-visible `__host_builtins` table (`__host_builtins[name] = true`).
+    /// The doc-coverage spec (Scripts/tests/doc_coverage_spec.lua) enumerates this to enforce that
+    /// every host builtin has a `doc()` entry — a builtin registered here CANNOT ship undocumented.
+    private func recordBuiltin(_ name: String) {
+        _ = "__host_builtins".withCString { lua_getglobal(state, $0) }
+        if lua_type(state, -1) != LUA_TTABLE {
+            lua_settop(state, -2)                                  // pop the non-table
+            lua_createtable(state, 0, 64)
+            lua_pushvalue(state, -1)                               // keep a copy on the stack
+            "__host_builtins".withCString { lua_setglobal(state, $0) }
+        }
+        lua_pushboolean(state, 1)
+        name.withCString { lua_setfield(state, -2, $0) }           // t[name] = true (pops the bool)
+        lua_settop(state, -2)                                      // pop the table
     }
 
     /// C entry point for every host function. Captures nothing (required for

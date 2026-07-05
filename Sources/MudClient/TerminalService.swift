@@ -875,7 +875,25 @@ final class TerminalService {
     // MARK: Output niceties
 
     /// Ring the terminal bell (exposed to Lua as `bell`).
-    func bell() { writeToStandardOut(data: Data("\u{07}".utf8)) }
+    ///
+    /// BEL goes straight to the CONTROLLING TERMINAL with a raw `write(2)` — deliberately not through
+    /// `writeToStandardOut`/FileHandle like the rest of the screen output. That path had two ways to
+    /// lose a bell silently: a FileHandle write error is swallowed (the `catch` "reports" it via this
+    /// class's own `print`, i.e. back into the same output machinery), and when stdout is wrapped or
+    /// redirected by a launcher the byte never reaches a terminal at all. `/dev/tty` is the process's
+    /// terminal regardless of where stdout points, and `write(2)` is unbuffered, so the BEL is on the
+    /// wire the moment this returns. Falls back to STDOUT_FILENO if `/dev/tty` won't open (e.g. no
+    /// controlling terminal), matching the previous best case.
+    func bell() {
+        var bel: UInt8 = 0x07
+        let fd = open("/dev/tty", O_WRONLY)
+        if fd >= 0 {
+            _ = withUnsafePointer(to: &bel) { write(fd, $0, 1) }
+            close(fd)
+        } else {
+            _ = withUnsafePointer(to: &bel) { write(STDOUT_FILENO, $0, 1) }
+        }
+    }
 
     // MARK: Key decoding (TinTin++ #macro)
 

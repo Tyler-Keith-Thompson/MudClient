@@ -244,7 +244,10 @@ final class PanelHost: @unchecked Sendable {
              underline: truthy(dict["underline"]))
     }
 
-    private static let palette: [String: Int] = [
+    /// THE named-color table for the whole host: panel/minimap span colors AND `echo(text, color)`
+    /// (LuaScriptEngine.sgrCodes) resolve names here, so the palette can never drift between the two.
+    /// Indexes are the standard 16-color slots (0-7 normal, 8-15 bright).
+    static let palette: [String: Int] = [
         "black": 0, "red": 1, "green": 2, "yellow": 3, "blue": 4, "magenta": 5, "cyan": 6, "white": 7,
         "brightblack": 8, "gray": 8, "grey": 8, "brightred": 9, "brightgreen": 10, "brightyellow": 11,
         "brightblue": 12, "brightmagenta": 13, "brightcyan": 14, "brightwhite": 15,

@@ -392,39 +392,63 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     private func installBuiltins() {
         lua.register("send") { [weak self] args in
-            guard let self, case .string(let s)? = args.first else { return [] }
+            guard let self else { return [] }
+            // NEVER coerce here: send("function: 0x…") reaching the MUD would be far worse than an
+            // error line. A wrong type gets a usage hint instead of a silent no-op.
+            guard case .string(let s)? = args.first else {
+                self.usage(#"send: expected a command string — e.g. send("look")"#)
+                return []
+            }
             // A send() issued from within on_send is diverted (see `hookSends`), so it reaches the MUD
             // directly without being fed back through the hook. Every other send takes the normal sink.
             if self.hookSends != nil { self.hookSends?.append(s) } else { self.onSend(s) }
             return []
         }
-        // echo(text) — print a line unchanged. echo(text, color) — wrap it in an ANSI colour from a
-        // small named set (red/green/yellow/blue/magenta/cyan/white/dim) before printing; an unknown
-        // colour is ignored (prints plain).
+        // echo(text[, color]) — print a line, optionally styled. `color` is a spec like "red",
+        // "bright red" (or "brightred"), "bold red underline" — resolved by sgrCodes against the shared
+        // palette. Unknown words print the text anyway (with whatever DID resolve) plus a hint, so a
+        // typo'd color is never a silent no-op. Non-string text is coerced by the bootstrap's echo
+        // wrapper before it gets here (see Scripts/bootstrap.lua).
         lua.register("echo") { [weak self] args in
-            guard case .string(let s)? = args.first else { return [] }
-            if args.count > 1, case .string(let color) = args[1], let code = Self.ansiColorCode(color) {
-                self?.onEcho("\u{1B}[\(code)m\(s)\u{1B}[0m")
-            } else {
-                self?.onEcho(s)
+            guard let self, case .string(let s)? = args.first else { return [] }
+            var text = s
+            if args.count > 1, case .string(let colorSpec) = args[1] {
+                let (codes, unknown) = Self.sgrCodes(colorSpec)
+                if !codes.isEmpty { text = "\u{1B}[\(codes.joined(separator: ";"))m\(s)\u{1B}[0m" }
+                for word in unknown {
+                    self.usage("echo: unknown color '\(word)' — try help(colors)")
+                }
             }
+            self.onEcho(text)
             return []
         }
         // trigger(pattern, handler [, opts]) -> id. opts = { oneshot = true, class = "combat" }.
         lua.register("trigger") { [weak self] args in
-            guard let self, let rule = self.makeRule(args) else { return [] }
+            guard let self else { return [] }
+            guard let rule = self.makeRule(args) else {
+                self.usage(#"trigger: expected (pattern, handler[, opts]) with a valid regex — e.g. trigger("^You hit", function(line) end)"#)
+                return []
+            }
             self.lineRules.append(rule)
             return [.int(Int64(rule.id))]
         }
         // alias(pattern, handler [, opts]) -> id. Same options as trigger().
         lua.register("alias") { [weak self] args in
-            guard let self, let rule = self.makeRule(args) else { return [] }
+            guard let self else { return [] }
+            guard let rule = self.makeRule(args) else {
+                self.usage(#"alias: expected (pattern, handler[, opts]) with a valid regex — e.g. alias("^gold$", function() send("score gold") end)"#)
+                return []
+            }
             self.aliasRules.append(rule)
             return [.int(Int64(rule.id))]
         }
         // gag(pattern) -> id. Drops matching lines; removable/toggleable by id like any rule.
         lua.register("gag") { [weak self] args in
-            guard let self, case .string(let pat)? = args.first, let rx = try? Regex(pat) else { return [] }
+            guard let self else { return [] }
+            guard case .string(let pat)? = args.first, let rx = try? Regex(pat) else {
+                self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
+                return []
+            }
             let rule = Rule(id: self.nextId(), regex: rx, handler: nil)
             self.gags.append(rule)
             return [.int(Int64(rule.id))]
@@ -463,8 +487,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // load_script(name) — load (or hot-reload) Scripts/<name>.lua and remember it so reload()
         // re-runs it. Tolerates the legacy braced form (`{Name}`) the REPL rewrites `#load {Name}` to.
-        lua.register("load_script") { args in
-            guard case .string(let raw)? = args.first else { return [] }
+        lua.register("load_script") { [weak self] args in
+            guard case .string(let raw)? = args.first else {
+                self?.usage(#"load_script: expected a script name — e.g. load_script("HUD")"#)
+                return []
+            }
             var name = raw.trimmingCharacters(in: .whitespaces)
             if name.hasPrefix("{"), name.hasSuffix("}"), name.count >= 2 {
                 name = String(name.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
@@ -479,8 +506,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // ---- Connection lifecycle control (host-generic; the default startup connection is unchanged) ----
         // connect(host, port) — open (or re-open) the connection. `port` defaults to 23 if omitted.
-        lua.register("connect") { args in
-            guard case .string(let host)? = args.first else { return [] }
+        lua.register("connect") { [weak self] args in
+            guard case .string(let host)? = args.first else {
+                self?.usage(#"connect: expected (host[, port]) — e.g. connect("alteraeon.com", 3002)"#)
+                return []
+            }
             let port = UInt16(args.count > 1 ? (Self.intArg(args[1]) ?? 23) : 23)
             Container.connectionManager().connect(host: host, port: port)
             return []
@@ -496,8 +526,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // telnet_send(option, payload) — send `IAC SB <option> <payload> IAC SE`, escaping IAC bytes in
         // the payload. `option` is numeric; `payload` is a (byte) string.
-        lua.register("telnet_send") { args in
-            guard let option = args.first.flatMap(Self.intArg), option >= 0, option <= 255 else { return [] }
+        lua.register("telnet_send") { [weak self] args in
+            guard let option = args.first.flatMap(Self.intArg), option >= 0, option <= 255 else {
+                self?.usage(#"telnet_send: expected (option 0-255[, payload]) — e.g. telnet_send(90, "!!SOUND(ding)")"#)
+                return []
+            }
             let payload: [UInt8] = {
                 if args.count > 1, case .string(let s) = args[1] { return Array(s.utf8) }
                 return []
@@ -520,8 +553,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         // log_start(path, opts?) -> bool. opts = { timestamps=bool, ansi=bool, commands=bool }. Writes
         // each displayed server line (and, with commands=true, each sent command) as plain text; ansi
         // defaults false (escapes stripped), timestamps defaults false. Appends if the file exists.
-        lua.register("log_start") { args in
-            guard case .string(let path)? = args.first else { return [.bool(false)] }
+        lua.register("log_start") { [weak self] args in
+            guard case .string(let path)? = args.first else {
+                self?.usage(#"log_start: expected a file path — e.g. log_start("session.log", { commands = true })"#)
+                return [.bool(false)]
+            }
             var timestamps = false, ansi = false, commands = false
             if args.count > 1, case .table(_, let opts) = args[1] {
                 if case .bool(let b)? = opts["timestamps"] { timestamps = b }
@@ -544,7 +580,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         // session logging. opts = { speed=N lines/sec (default: as-fast-as-possible, yielding),
         // quiet=bool (fire triggers without printing) }.
         lua.register("replay") { [weak self] args in
-            guard let self, case .string(let path)? = args.first else { return [.bool(false)] }
+            guard let self else { return [.bool(false)] }
+            guard case .string(let path)? = args.first else {
+                self.usage(#"replay: expected a log-file path — e.g. replay("session.log", { speed = 20 })"#)
+                return [.bool(false)]
+            }
             var speed = 0.0, quiet = false
             if args.count > 1, case .table(_, let opts) = args[1] {
                 if case .some(let v) = opts["speed"], let s = Self.doubleArg(v) { speed = s }
@@ -622,10 +662,12 @@ final class LuaScriptEngine: @unchecked Sendable {
         // Generic layered audio player — scripts just say `music.play("channel", "track")` /
         // `music.stop("channel")`. Swift knows nothing about the MUD; it plays a named file from the
         // configured sound dir (see MusicService), so any protocol parsing stays in Lua.
-        lua.register("music_play") { args in
-            if case .string(let ch)? = args.first, args.count > 1, case .string(let track) = args[1] {
-                Container.musicService().play(channel: ch, track: track)
+        lua.register("music_play") { [weak self] args in
+            guard case .string(let ch)? = args.first, args.count > 1, case .string(let track) = args[1] else {
+                self?.usage(#"music.play: expected (channel, track) strings — e.g. music.play("ambient", "forest")"#)
+                return []
             }
+            Container.musicService().play(channel: ch, track: track)
             return []
         }
         lua.register("music_stop") { args in
@@ -647,8 +689,12 @@ final class LuaScriptEngine: @unchecked Sendable {
         // bind(keyname, handler) -> id. Registers a key macro; the handler is called with the key
         // name when that key is pressed (and the key is then consumed, not line-edited).
         lua.register("bind") { [weak self] args in
-            guard let self, case .string(let key)? = args.first,
-                  args.count > 1, case .function(let handler) = args[1] else { return [.nil] }
+            guard let self else { return [.nil] }
+            guard case .string(let key)? = args.first,
+                  args.count > 1, case .function(let handler) = args[1] else {
+                self.usage(#"bind: expected (keyname, handler) — e.g. bind("f5", function() send("look") end)"#)
+                return [.nil]
+            }
             let id = self.nextBindId
             self.nextBindId += 1
             self.keyBindings[id] = (Self.normalizeKeyName(key), handler)
@@ -662,8 +708,15 @@ final class LuaScriptEngine: @unchecked Sendable {
         // input_get() -> the current input-line text.
         lua.register("input_get") { _ in [.string(Container.terminalService().currentInput())] }
         // input_set(text) — replace the input line and redraw it.
-        lua.register("input_set") { args in
-            if case .string(let t)? = args.first { Container.terminalService().setInput(t) }
+        lua.register("input_set") { [weak self] args in
+            switch args.first {
+            case .string(let t)?: Container.terminalService().setInput(t)
+            // Text-ish arg: coerce scalars the way Lua's tostring would (input_set(2) is unambiguous).
+            case .int(let i)?: Container.terminalService().setInput(String(i))
+            case .number(let d)?: Container.terminalService().setInput(String(d))
+            default:
+                self?.usage(#"input_set: expected text — e.g. input_set("say hello")"#)
+            }
             return []
         }
         // scrollback(n) -> array of the last n display lines (ANSI stripped), oldest-first.
@@ -684,19 +737,43 @@ final class LuaScriptEngine: @unchecked Sendable {
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
     }
 
-    /// Map a named colour to its ANSI SGR code. Small fixed set; unknown names return nil.
-    private static func ansiColorCode(_ name: String) -> String? {
-        switch name.lowercased() {
-        case "red": return "31"
-        case "green": return "32"
-        case "yellow": return "33"
-        case "blue": return "34"
-        case "magenta": return "35"
-        case "cyan": return "36"
-        case "white": return "37"
-        case "dim": return "2"
-        default: return nil
+    /// Parse an `echo` colour spec into SGR codes. A spec is space-separated words: at most one base
+    /// colour (the 16-colour names from `PanelHost.palette` — the SAME table the panel/minimap layer
+    /// uses, so the two surfaces can never disagree) plus any of the modifiers bold/dim/underline/
+    /// reversed. `bright` (as its own word) brightens the colour, so `"bright red"` and `"brightred"`
+    /// are equivalent; a lone `bright` with no colour falls back to bold. Returns the SGR codes to
+    /// apply and any words that resolved to nothing (so the caller can hint at `help(colors)`).
+    static func sgrCodes(_ spec: String) -> (codes: [String], unknown: [String]) {
+        var codes: [String] = []
+        var colorIndex: Int?
+        var bright = false
+        var unknown: [String] = []
+        for word in spec.lowercased().split(separator: " ") {
+            switch word {
+            case "bold": codes.append("1")
+            case "dim": codes.append("2")
+            case "underline", "underlined": codes.append("4")
+            case "reversed", "reverse", "inverse": codes.append("7")
+            case "bright": bright = true
+            default:
+                if let idx = PanelHost.palette[String(word)] { colorIndex = idx }
+                else { unknown.append(String(word)) }
+            }
         }
+        if var i = colorIndex {
+            if bright, i < 8 { i += 8 }
+            codes.append(String(i < 8 ? 30 + i : 90 + (i - 8)))
+        } else if bright {
+            codes.append("1")     // "bright" alone: nothing to brighten — bold is the nearest intent
+        }
+        return (codes, unknown)
+    }
+
+    /// One-line usage/typo feedback for a builtin called with the wrong argument types (in yellow, so
+    /// it can't be mistaken for game output). The alternative — silently doing nothing — turned out to
+    /// be a footgun once `#…` became a REPL (`#echo(test, red)` passing two globals, for example).
+    private func usage(_ message: String) {
+        onEcho("\u{1B}[33m\(message)\u{1B}[0m")
     }
 
     // MARK: - REPL (`#…` input)
@@ -836,16 +913,22 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // after(seconds, callback) -> id — fire callback() once, later. Returns a cancellable id.
         lua.register("after") { [weak self] args in
-            guard let self,
-                  args.count > 1, case .function(let callback) = args[1] else { return [] }
+            guard let self else { return [] }
+            guard args.count > 1, case .function(let callback) = args[1] else {
+                self.usage(#"after: expected (seconds, callback) — e.g. after(2, function() echo("later") end)"#)
+                return []
+            }
             let seconds = Self.doubleArg(args[0]) ?? 0
             return [.int(Int64(self.scheduleTimer(delay: seconds, repeating: nil, callback)))]
         }
         // every(seconds, callback) -> id — fire callback() repeatedly, every `seconds`. Returns a
         // cancellable id.
         lua.register("every") { [weak self] args in
-            guard let self,
-                  args.count > 1, case .function(let callback) = args[1] else { return [] }
+            guard let self else { return [] }
+            guard args.count > 1, case .function(let callback) = args[1] else {
+                self.usage(#"every: expected (seconds, callback) — e.g. every(60, function() send("save") end)"#)
+                return []
+            }
             let seconds = Self.doubleArg(args[0]) ?? 0
             return [.int(Int64(self.scheduleTimer(delay: seconds, repeating: seconds, callback)))]
         }
