@@ -30,6 +30,21 @@ against, but it needs the embedding model and isn't queryable from a shell — u
 Edit any of them and run `#ai reload` in the app to apply live (no rebuild). Host builtins are registered
 in `Sources/MudClient/LuaScriptEngine.swift` (trigger/alias/command/echo/send/after/panel/ai_*/music/…).
 
+Host hook surface (all optional Lua globals / builtins; see LuaScriptEngine.swift for signatures):
+- Rules: `trigger`/`alias`/`gag` return ids; opts `{oneshot=, class=}`; `rule_remove`/`rule_enable`/
+  `class_enable`/`class_remove`. A trigger handler's return rewrites the displayed line (string),
+  gags it (`false`/`""`), or leaves it (nil); the raw ANSI line is passed as the last handler arg.
+- Timers: `after`/`every` return cancellable ids, `cancel(id)`; all timers auto-cancel on reload.
+- Lifecycle/telnet: `on_connect`, `on_disconnect(reason)`, `on_prompt(text)` (GA boundary),
+  `on_telnet(option, payload)`, `on_telnet_negotiate(verb, option)`, `connect`/`disconnect`/
+  `is_connected`, `telnet_send`. MCCP (85/86) is deliberately not negotiable.
+- Terminal: `bind`/`unbind` key macros, `input_get`/`input_set`, `on_resize(cols, rows)`,
+  `on_mouse(event, x, y, button)` (return true to consume), `scrollback(n)`/`scrollback_find`,
+  `bell()`, `echo(text, color)`.
+- I/O: `log_start`/`log_stop`/`log_active` session logging; `replay(path, {speed=, quiet=})` feeds a
+  saved log through the live trigger pipeline (offline parser regression tests); `on_send(cmd)`
+  rewrites/suppresses outbound commands.
+
 ## Testing the scripts
 
 Pure Lua logic is unit-tested. Specs live in `Scripts/tests/*_spec.lua`; exposed seams are `_HUD_TEST`,
