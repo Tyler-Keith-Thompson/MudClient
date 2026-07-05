@@ -34,6 +34,7 @@ struct Connect: ParsableCommand {
         try Container.scriptInterpreter().parser.parse("#load {AlterAeon}")
         try Container.scriptInterpreter().parser.parse("#load {AIPilot}")
         try Container.scriptInterpreter().parser.parse("#load {HUD}")
+        try Container.scriptInterpreter().parser.parse("#load {Trivia}")
         
         Task {
 //            let connection = Connection(host: "godwars2.org", port: 3000)

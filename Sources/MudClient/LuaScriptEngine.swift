@@ -26,6 +26,11 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// hosted Claude via Anthropic's OpenAI-compatible endpoint) that maintains structured world
     /// state, leaving the local `llm` to make decisions. Configured by the script via ai_set_memory_*.
     private let memLLM = LLMClient()
+    /// A THIRD client pinned to the LOCAL model (defaults to LM Studio at localhost:1234). It is never
+    /// pointed at a paid API, so cheap always-on features (e.g. the trivia auto-answerer) get a model
+    /// that works even when the decision brain is a hosted API that's down or unconfigured — and using
+    /// it never disturbs the pilot's `llm`/`memLLM` config. Exposed via `ai_local_request`.
+    private let localLLM = LLMClient()
     /// Retrieval over the prebuilt doc index — gives the decision model relevant game documentation
     /// on demand (see RAGRetriever / tools/finetune/build_rag_index.py).
     private let rag = RAGRetriever()
@@ -290,6 +295,38 @@ final class LuaScriptEngine: @unchecked Sendable {
                     self.fire(callback, [.nil, .nil, .string(error.localizedDescription)])
                 }
             }
+            return []
+        }
+        // ai_local_request(system, user, max_tokens, prefix, callback). callback(reply, err) — a plain
+        // completion against the LOCAL model client (never a paid API), for cheap always-on features that
+        // must keep working regardless of what brain the pilot selected. No tools; prefix is an optional
+        // assistant prefill (e.g. a closed <think> block for Qwen3.x).
+        lua.register("ai_local_request") { [weak self] args in
+            guard let self,
+                  case .string(let system)? = args.first,
+                  args.count > 4, case .function(let callback) = args[4] else { return [] }
+            let user: String = { if case .string(let u) = args[1] { return u }; return "" }()
+            let maxTokens = Self.intArg(args[2]) ?? 64
+            let prefix: String? = { if case .string(let p) = args[3], !p.isEmpty { return p }; return nil }()
+            Task {
+                do {
+                    let result = try await self.localLLM.complete(system: system, user: user,
+                                                                  maxTokens: maxTokens, assistantPrefix: prefix)
+                    self.fire(callback, [.string(result.content), .nil])
+                } catch {
+                    self.fire(callback, [.nil, .string(error.localizedDescription)])
+                }
+            }
+            return []
+        }
+        // ai_set_local_endpoint(url) / ai_set_local_model(id) — override the local client's target
+        // (defaults to LM Studio at http://localhost:1234/v1). For pointing at ollama, a remote box, etc.
+        lua.register("ai_set_local_endpoint") { [weak self] args in
+            if case .string(let u)? = args.first { self?.localLLM.setEndpoint(u) }
+            return []
+        }
+        lua.register("ai_set_local_model") { [weak self] args in
+            if case .string(let m)? = args.first { self?.localLLM.setModel(m) }
             return []
         }
         // after(seconds, callback) — fire callback() once, later.

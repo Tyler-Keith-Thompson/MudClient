@@ -144,12 +144,87 @@ private actor RecordedWrites {
     }
     let chunks = content.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
-    let buffer = MSPLineBuffer()
-    var terminal = "", directives = 0
-    for try await text in stream.handleIACCommunication(writeToStream: { _ in }) {
-        let r = buffer.process(text); terminal += r.output; directives += r.directives.count
+    // Mirror the REAL display pipeline end to end.
+    var terminal = ""
+    for try await text in stream.handleIACCommunication(writeToStream: { _ in })
+        .normalizeLineEndings().assembleLines().processMSP() {
+        terminal += text
     }
-    print("REPLAY chunks=\(chunks.count) directives=\(directives) leakedSOUND=\(terminal.contains("!!SOUND"))")
+    // Apply the AlterAeon gag the way the display consumer does, then hunt for leaked protocol tails.
+    let engine = LuaScriptEngine()
+    let scriptDir = URL(fileURLWithPath: "\(#filePath)")
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    try? engine.load(path: scriptDir.appendingPathComponent("Scripts/AlterAeon.lua").path)
+    let display = terminal.components(separatedBy: "\n")
+        .filter { !engine.processLine($0) }.joined(separator: "\n")
+    let leakedTails = display.components(separatedBy: "\n")
+        .filter { $0.contains("track_") || $0.contains(".wav") || $0.hasPrefix("ground_") }
+    print("REPLAY chunks=\(chunks.count) leakedSOUND=\(display.contains("!!SOUND")) "
+        + "markerLeak=\(display.contains(promptGoAheadMarker)) leakedTails=\(leakedTails)")
+}
+
+@Test func splitProtocolLineDoesNotLeakTailToDisplay() async throws {
+    // Regression: a `kxwt_` protocol line split across a TCP read leaks its orphaned tail. The head
+    // fragment still matches the `^kxwt_` gag and is hidden, but the tail (here "ground_01") matches
+    // nothing and leaks to the terminal — the reported "last bit of the sound path" after a move.
+    // The real capture split `...track_explore_under` | `ground_01`.
+    func ga(_ s: String) -> Data { Data(s.utf8) + Data([255, 249]) }   // text + IAC GO-AHEAD
+    let chunks: [Data] = [
+        Data("kxwt_music channel_play music soundtrack/track_explore_under".utf8),  // head, no newline
+        Data("ground_01\r\n".utf8),                                                  // tail completes it
+        ga("Password: "),   // a genuine no-newline prompt, GA-terminated — must still display
+    ]
+    let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+
+    let engine = LuaScriptEngine()
+    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
+        URL(fileURLWithPath: "\(file)")
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(rel).path
+    }
+    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag + music trigger
+
+    var text = ""
+    for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
+        .normalizeLineEndings()
+        .assembleLines()
+        .processMSP() {
+        text += piece
+    }
+    let lines = text.components(separatedBy: "\n")
+    let display = lines.enumerated().filter { !engine.processLine($0.element) }.map(\.element).joined(separator: "\n")
+
+    #expect(!display.contains("ground_01"))        // the tail no longer leaks
+    #expect(!display.contains("kxwt_"))            // head still gagged
+    #expect(!display.contains(promptGoAheadMarker)) // the GO-AHEAD marker is consumed, never shown
+    #expect(display.contains("Password: "))        // the real prompt still reaches the display
+}
+
+@Test func goAheadFlushesPromptOnlyWhileNotSuppressed() async throws {
+    // GA is a prompt boundary by the telnet NVT default, so `Password: ` + IAC GA flushes the held
+    // partial line to the display (the injected marker is consumed by the assembler, not shown).
+    func run(_ chunks: [Data]) async throws -> String {
+        let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+        var text = ""
+        for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
+            .normalizeLineEndings().assembleLines() {
+            text += piece
+        }
+        return text
+    }
+    // Default (no SGA): GA flushes the no-newline prompt.
+    let shown = try await run([Data("Password: ".utf8) + Data([255, 249])])
+    #expect(shown == "Password: ")
+    #expect(!shown.contains(promptGoAheadMarker))
+
+    // After the server negotiates SUPPRESS-GO-AHEAD (IAC WILL SGA, 255 251 3), GA is no longer a
+    // prompt boundary: a stray GA must NOT flush, so the partial stays held (nothing emitted yet).
+    let suppressed = try await run([
+        Data([255, 251, 3]),                                   // IAC WILL SGA
+        Data("Password: ".utf8) + Data([255, 249]),            // prompt + (now-meaningless) GA
+    ])
+    #expect(suppressed.isEmpty)
+    #expect(!suppressed.contains(promptGoAheadMarker))
 }
 
 @Test func gaggedKxwtBatchesRenderNothing() async throws {
@@ -182,7 +257,7 @@ private actor RecordedWrites {
     var leaks = [String]()
     var kept = [String]()
     for try await output in stream.handleIACCommunication(writeToStream: { _ in })
-        .normalizeLineEndings().processMSP() {
+        .normalizeLineEndings().assembleLines().processMSP() {
         let lines = output.replacingOccurrences(of: "\r", with: "").components(separatedBy: CharacterSet.newlines)
         let gagged = lines.map { interp.engine.processLine($0) }
         var out = [String]()
@@ -391,6 +466,7 @@ private actor RecordedWrites {
     var text = ""
     for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
         .normalizeLineEndings()
+        .assembleLines()
         .processMSP() {
         text += piece
     }

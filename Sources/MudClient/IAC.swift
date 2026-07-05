@@ -40,6 +40,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
     case send // msdp_var, echo
     case echo // msdp_var, send
     case go_ahead
+    case sga // SUPPRESS-GO-AHEAD (option 3)
     case unknown(UInt8)
     
     var asciiChar: String {
@@ -70,6 +71,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         case .msdp_val: return String(UnicodeScalar(2))
         case .msdp_var, .send, .echo: return String(UnicodeScalar(1))
         case .go_ahead: return String(UnicodeScalar(249))
+        case .sga: return String(UnicodeScalar(3))
         case .unknown(let byte): return String(UnicodeScalar(byte))
         }
     }
@@ -102,6 +104,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         case .msdp_val: return Data([2])
         case .msdp_var, .send, .echo: return Data([1])
         case .go_ahead: return Data([249])
+        case .sga: return Data([3])
         case .unknown(let byte): return Data([byte])
         }
     }
@@ -137,6 +140,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         case .send: return "SEND"
         case .echo: return "ECHO"
         case .go_ahead: return "GO_AHEAD"
+        case .sga: return "SGA"
         case .unknown: return "UNKNOWN"
         }
     }
@@ -170,6 +174,7 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
         Self.send,
         Self.echo,
         Self.go_ahead,
+        Self.sga,
     ]
     
     static func negotiationParser() -> some Parser<Substring, (IAC, IAC, IAC)> {
@@ -182,6 +187,9 @@ enum IAC: CustomDebugStringConvertible, CaseIterable, Equatable {
                 Parse { Self.will.asciiChar }.map { _ in Self.will }
             }
             OneOf {
+                // SGA (option 3) must precede msdp_table_open, which aliases the same byte value: in a
+                // WILL/WONT/DO/DONT negotiation, byte 3 is SUPPRESS-GO-AHEAD, not an MSDP in-band marker.
+                Parse { Self.sga.asciiChar }.map { _ in Self.sga }
                 Parse { Self.sb.asciiChar }.map { _ in Self.sb }
                 Parse { Self.se.asciiChar }.map { _ in Self.se }
                 Parse { Self.ttype.asciiChar }.map { _ in Self.ttype }
@@ -246,6 +254,12 @@ extension IAC {
         case respond(Data)
         case passthrough(Substring)
         case ignore
+        /// Telnet GO-AHEAD: the server has finished a (typically no-newline) prompt. Surfaced so the
+        /// line assembler can flush its held partial line. See ``promptGoAheadMarker``.
+        case promptEnd
+        /// The server negotiated SUPPRESS-GO-AHEAD for its own transmissions: GA is no longer sent, so
+        /// it must stop being treated as a prompt boundary. Carries our agreement to send.
+        case suppressGoAhead(Data)
     }
 
     /// Builds a `Data` value out of a sequence of telnet control codes.
@@ -268,6 +282,11 @@ extension IAC {
                 case (.iac, .will, .msdp): return .respond(bytes(.iac, .do, .msdp))
                 case (.iac, .will, .mccp): return .respond(bytes(.iac, .dont, .mccp))
                 case (.iac, .will, .msp): return .respond(bytes(.iac, .do, .msp))
+                // SUPPRESS-GO-AHEAD. `WILL SGA` = the server will stop sending GA; accept (DO SGA) and
+                // record that GA is no longer a prompt boundary. `DO SGA` only asks us to suppress the
+                // GA we never send, so just agree (WILL SGA) without touching GA-reception state.
+                case (.iac, .will, .sga): return .suppressGoAhead(bytes(.iac, .do, .sga))
+                case (.iac, .do, .sga): return .respond(bytes(.iac, .will, .sga))
                 case (.iac, .will, .zmp): return .respond(bytes(.iac, .dont, .zmp))
                 case (.iac, .do, .mxp): return .respond(bytes(.iac, .dont, .mxp))
                 case (.iac, .do, .line_mode): return .respond(bytes(.iac, .do, .line_mode))
@@ -284,7 +303,7 @@ extension IAC {
                 default: return .ignore
                 }
             }
-            IAC.commandParser().map { _ in StreamToken.ignore }
+            IAC.commandParser().map { _ in StreamToken.promptEnd } // currently only IAC GA
             Prefix(1).map { StreamToken.passthrough($0) }
         }
     }
@@ -296,6 +315,10 @@ extension IAC {
 private final class IACStreamState<P: Parser>: @unchecked Sendable
 where P.Input == Substring, P.Output == IAC.StreamToken {
     var driver: StreamingParser<P>
+    /// Whether telnet GO-AHEAD is in effect for the server→client direction. True by the NVT default;
+    /// set false once the server negotiates SUPPRESS-GO-AHEAD, after which GA is no longer treated as
+    /// a prompt boundary. See ``promptGoAheadMarker``.
+    var goAheadInEffect = true
 
     init(_ parser: P) {
         self.driver = StreamingParser(parser)
@@ -319,6 +342,12 @@ extension AsyncSequence where Self: Sendable, Element == Data {
                     try await writeToStream(data)
                 case .ignore:
                     break
+                case .promptEnd:
+                    // Only trust GA as a prompt boundary while it is actually in effect (not suppressed).
+                    if state.goAheadInEffect { output.append(promptGoAheadMarker) }
+                case .suppressGoAhead(let data):
+                    try await writeToStream(data)
+                    state.goAheadInEffect = false
                 }
             }
             return output

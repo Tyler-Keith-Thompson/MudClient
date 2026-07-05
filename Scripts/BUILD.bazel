@@ -1,5 +1,5 @@
 # Exposes the ported Lua scripts as build inputs (e.g. test `data`).
-exports_files(["AlterAeon.lua", "AIPilot.lua", "HUD.lua"])
+exports_files(["AlterAeon.lua", "AIPilot.lua", "HUD.lua", "Trivia.lua"])
 
 # Every runtime script plus the test harness + specs, consumed as `data` by the Lua script test
 # (//tools/luatest:lua_scripts_test) so it loads exactly what the app loads.
@@ -9,6 +9,7 @@ filegroup(
         "AlterAeon.lua",
         "AIPilot.lua",
         "HUD.lua",
+        "Trivia.lua",
         "testing.lua",
     ] + glob(["tests/*.lua"]),
     visibility = ["//visibility:public"],

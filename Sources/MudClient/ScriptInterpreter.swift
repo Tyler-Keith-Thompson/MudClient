@@ -17,6 +17,11 @@ import Parsing
 final class ScriptInterpreter {
     let engine = LuaScriptEngine()
 
+    /// Scripts loaded via `#load {Name}`, in load order (deduped). `reload()` re-runs exactly this
+    /// set, so any newly `#load`ed script is automatically picked up by future hot-reloads — there is
+    /// no hardcoded script list to keep in sync. Mutated and read only on the input-processing task.
+    private(set) var loadedScripts: [String] = []
+
     init() {
         engine.onSend = { message in try? Container.inputService().send(verbatim: message) }
         engine.onEcho = { message in Container.terminalService().print(message) }
@@ -56,13 +61,31 @@ final class ScriptInterpreter {
         parameter
     }
     .map { (scriptName: String) in
+        Container.scriptInterpreter().loadScript(named: scriptName)
+    }
+
+    /// Load (or re-load) a script by bare name and remember it so `reload()` includes it. The single
+    /// entry point for `#load {Name}` and startup — keeping the tracked set and the on-disk load in
+    /// one place.
+    func loadScript(named scriptName: String) {
         let path = "Scripts/\(scriptName).lua"
         do {
-            try Container.scriptInterpreter().engine.load(path: path)
+            try engine.load(path: path)
+            if !loadedScripts.contains(scriptName) { loadedScripts.append(scriptName) }
             Container.terminalService().print("Loaded script \(path)")
         } catch {
             Container.terminalService().print("Failed to load script \(path): \(error)")
         }
+    }
+
+    /// `#reload` — re-run every `#load`ed script (same as `#ai reload`, but not buried under `#ai`).
+    /// Trailing text is ignored so `#reload` and `#reload please` both work.
+    lazy var reloadCommand = Parse {
+        "reload"
+        Rest()
+    }
+    .map { (_: Substring) in
+        Container.scriptInterpreter().reload()
     }
 
     /// `#ai ...` — control surface for the Lua AI pilot. `#ai reload` re-runs the scripts (host
@@ -88,6 +111,7 @@ final class ScriptInterpreter {
             String.scriptIndicator
             OneOf {
                 echo
+                reloadCommand
                 load
                 ai
             }
@@ -98,7 +122,7 @@ final class ScriptInterpreter {
     /// duplicated. This is how `#ai reload` applies edits without a relaunch.
     func reload() {
         engine.clearRules()
-        for name in ["AlterAeon", "AIPilot", "HUD"] {
+        for name in loadedScripts {
             let path = "Scripts/\(name).lua"
             do {
                 try engine.load(path: path)

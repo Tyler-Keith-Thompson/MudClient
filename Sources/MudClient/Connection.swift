@@ -38,6 +38,7 @@ actor Connection: AsyncSequence {
         stream.captureRaw()
             .handleIACCommunication(writeToStream: send)
             .normalizeLineEndings()
+            .assembleLines()
             .processMSP()
             .processServerOutputForScripts()
             .eraseToAnyAsyncSequence()
