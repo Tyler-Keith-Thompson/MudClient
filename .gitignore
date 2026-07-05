@@ -19,3 +19,6 @@ ai-traces.jsonl
 
 # raw capture (debug, ring-buffered)
 mud_raw.log
+
+# Finetune model checkpoints — training outputs, multi-GB. Keep adapter_config.json, ignore weights.
+*.safetensors
