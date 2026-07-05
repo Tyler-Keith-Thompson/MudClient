@@ -60,6 +60,75 @@ import Testing
     #expect(kxwtPayloads.contains("prompt 100 100 50 50 75 75"))
 }
 
+@Test func onSendHookPassesReplacesAndSuppresses() throws {
+    let engine = LuaScriptEngine()
+
+    // No hook defined → command passes through unchanged.
+    #expect(engine.filterOutbound("look") == ["look"])
+
+    try engine.load(source: #"""
+        function on_send(cmd)
+            if cmd == "drop" then return false end         -- suppress
+            if cmd == "n" then return "north" end          -- replace
+            return nil                                      -- send unchanged
+        end
+    """#)
+
+    #expect(engine.filterOutbound("look") == ["look"])   // nil → unchanged
+    #expect(engine.filterOutbound("drop") == [])         // false → suppressed
+    #expect(engine.filterOutbound("n") == ["north"])     // string → replacement
+}
+
+@Test func onSendHookInjectedSendsBypassTheHook() throws {
+    // A hook that expands one command into several via send(), suppressing the original. The injected
+    // sends must be transmitted (in order) but NOT re-consulted by on_send — no recursion — and they
+    // must not leak to the normal `onSend` sink (they ride back in filterOutbound's return value).
+    let engine = LuaScriptEngine()
+    var sunk: [String] = []
+    engine.onSend = { sunk.append($0) }
+
+    try engine.load(source: #"""
+        function on_send(cmd)
+            if cmd == "combo" then
+                send("one")
+                send("two")
+                return false
+            end
+            -- Every command reaches the hook, incl. the injected ones if the guard were broken:
+            if cmd == "one" or cmd == "two" then send("RECURSED") end
+            return nil
+        end
+    """#)
+
+    #expect(engine.filterOutbound("combo") == ["one", "two"])
+    #expect(sunk.isEmpty)   // injected sends returned to the caller, never routed through onSend
+}
+
+@Test func sessionLogWritesPlainTextAndAppends() throws {
+    let path = NSTemporaryDirectory() + "mudclient-sessionlog-\(UUID().uuidString).log"
+    defer { try? FileManager.default.removeItem(atPath: path) }
+    let log = SessionLog()
+
+    #expect(log.start(path: path, timestamps: false, ansi: false, commands: true))
+    #expect(log.status().0 == true)
+    #expect(log.status().1 == path)
+
+    log.logServer("\u{1B}[37mhello\u{1B}[0m\nworld")   // ANSI stripped; two lines
+    log.logCommand("north")                             // commands=true → recorded
+    log.stop()
+    #expect(log.status().0 == false)
+
+    // A command sent while stopped is dropped; a fresh start appends rather than truncating.
+    log.logCommand("ignored")
+    #expect(log.start(path: path, timestamps: false, ansi: false, commands: false))
+    log.logServer("again")
+    log.logCommand("suppressed")                        // commands=false → not recorded
+    log.stop()
+
+    let written = try String(contentsOfFile: path, encoding: .utf8)
+    #expect(written == "hello\nworld\nnorth\nagain\n")
+}
+
 @Test func luaAliasSwallowsMatchingInput() throws {
     let engine = LuaScriptEngine()
     var sent: [String] = []

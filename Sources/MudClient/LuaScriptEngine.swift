@@ -77,6 +77,13 @@ final class LuaScriptEngine: @unchecked Sendable {
     var onSend: (String) -> Void = { _ in }
     var onEcho: (String) -> Void = { _ in }
 
+    /// While the `on_send` hook is being consulted this is non-nil; any `send()` the hook itself calls
+    /// is diverted here (instead of the normal `onSend` sink) so those commands go straight to the MUD
+    /// without re-entering the hook — that's the "no recursion" guarantee. nil at all other times, so
+    /// ordinary sends take the normal path. Only touched under `lock` (the send builtin and the hook
+    /// call both run on the locked Lua thread).
+    private var hookSends: [String]?
+
     init() {
         lua.errorHandler = { [weak self] msg in self?.onEcho(msg) }
         // Default the memory head to Anthropic's OpenAI-compatible endpoint; the script picks the
@@ -105,6 +112,31 @@ final class LuaScriptEngine: @unchecked Sendable {
     func notifyUserInput(_ command: String) {
         lock.lock(); defer { lock.unlock() }
         try? lua.callGlobal("on_user_input", [.string(command)])
+    }
+
+    /// Consult the optional Lua `on_send(cmd)` hook for one final, atomic outbound command (already
+    /// past alias handling and `;` splitting) and return the commands that should actually be
+    /// transmitted, in order. No hook defined → `[command]` unchanged. The hook's return value governs
+    /// the ORIGINAL command: nil → unchanged; `false` → suppressed; a string → replacement. Any
+    /// `send()` the hook itself calls is transmitted directly (never re-consulted — no recursion) and
+    /// precedes the original's disposition.
+    func filterOutbound(_ command: String) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let previous = hookSends
+        hookSends = []                                  // arm the recursion guard for the hook's own send()s
+        defer { hookSends = previous }
+        let result: LuaValue?
+        do { result = try lua.callGlobalReturning("on_send", [.string(command)]) }
+        catch { result = nil }                          // errorHandler already reported; send unchanged
+        let collected = hookSends ?? []
+        switch result {
+        case .some(.bool(false)):
+            return collected                            // suppress the original
+        case .some(.string(let replacement)):
+            return collected + [replacement]            // send the replacement instead
+        default:
+            return collected + [command]                // no hook / nil / any truthy → send unchanged
+        }
     }
 
     /// Call a global Lua function with a single string argument (no-op if undefined). Used to route
@@ -302,7 +334,10 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     private func installBuiltins() {
         lua.register("send") { [weak self] args in
-            if case .string(let s)? = args.first { self?.onSend(s) }
+            guard let self, case .string(let s)? = args.first else { return [] }
+            // A send() issued from within on_send is diverted (see `hookSends`), so it reaches the MUD
+            // directly without being fed back through the hook. Every other send takes the normal sink.
+            if self.hookSends != nil { self.hookSends?.append(s) } else { self.onSend(s) }
             return []
         }
         // echo(text) — print a line unchanged. echo(text, color) — wrap it in an ANSI colour from a
@@ -375,6 +410,75 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self?.commands[name.lowercased()] = handler
             }
             return []
+        }
+        installLogReplay()
+    }
+
+    // MARK: - Session logging & log replay (TinTin++ #log / #textin)
+
+    private func installLogReplay() {
+        // log_start(path, opts?) -> bool. opts = { timestamps=bool, ansi=bool, commands=bool }. Writes
+        // each displayed server line (and, with commands=true, each sent command) as plain text; ansi
+        // defaults false (escapes stripped), timestamps defaults false. Appends if the file exists.
+        lua.register("log_start") { args in
+            guard case .string(let path)? = args.first else { return [.bool(false)] }
+            var timestamps = false, ansi = false, commands = false
+            if args.count > 1, case .table(_, let opts) = args[1] {
+                if case .bool(let b)? = opts["timestamps"] { timestamps = b }
+                if case .bool(let b)? = opts["ansi"] { ansi = b }
+                if case .bool(let b)? = opts["commands"] { commands = b }
+            }
+            let ok = Container.sessionLog().start(path: path, timestamps: timestamps,
+                                                  ansi: ansi, commands: commands)
+            return [.bool(ok)]
+        }
+        lua.register("log_stop") { _ in Container.sessionLog().stop(); return [] }
+        // log_active() -> (bool, path|nil).
+        lua.register("log_active") { _ in
+            let (active, path) = Container.sessionLog().status()
+            return [.bool(active), path.map(LuaValue.string) ?? .nil]
+        }
+
+        // replay(path, opts?) -> bool. Feeds each line of a plain-text file through the SAME server-line
+        // pipeline scripts see (triggers/gags fire; non-gagged lines display) with NO network and NO
+        // session logging. opts = { speed=N lines/sec (default: as-fast-as-possible, yielding),
+        // quiet=bool (fire triggers without printing) }.
+        lua.register("replay") { [weak self] args in
+            guard let self, case .string(let path)? = args.first else { return [.bool(false)] }
+            var speed = 0.0, quiet = false
+            if args.count > 1, case .table(_, let opts) = args[1] {
+                if case .some(let v) = opts["speed"], let s = Self.doubleArg(v) { speed = s }
+                if case .bool(let b)? = opts["quiet"] { quiet = b }
+            }
+            guard let content = try? String(contentsOfFile: path, encoding: .utf8) else {
+                self.onEcho("[replay] cannot read \(path)")
+                return [.bool(false)]
+            }
+            let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            self.startReplay(lines: lines, speed: speed, quiet: quiet)
+            return [.bool(true)]
+        }
+    }
+
+    /// Drive a replay off the Lua thread: for each line, fire triggers/gags via `processLine` and (unless
+    /// quiet or gagged) print it, refreshing the panel between lines. Paced at `speed` lines/sec, or —
+    /// when speed <= 0 — as fast as possible while yielding so the UI stays responsive. Runs on its own
+    /// Task so a long file doesn't block the `replay()` call (which holds the Lua lock).
+    private func startReplay(lines: [String], speed: Double, quiet: Bool) {
+        let interval: Double = speed > 0 ? 1.0 / speed : 0
+        Task { [weak self] in
+            guard let self else { return }
+            for line in lines {
+                let gagged = self.processLine(line)          // fires triggers/gags (takes the lock itself)
+                if !quiet && !gagged { Container.terminalService().print(line, terminator: "\n") }
+                self.notifyUpdate()                          // panels may have changed
+                if interval > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } else {
+                    await Task.yield()
+                }
+            }
+            if !quiet { self.onEcho("[replay] done (\(lines.count) lines)") }
         }
     }
 

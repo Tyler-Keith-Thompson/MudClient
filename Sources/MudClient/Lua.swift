@@ -173,6 +173,25 @@ final class Lua: @unchecked Sendable {
         return result
     }
 
+    /// Call a global function and return its first result, or `.nil` if it returned nothing. Returns
+    /// Swift `nil` when the global is undefined or not a function — lets the host consult an optional
+    /// hook that yields a value (e.g. `on_send`) while distinguishing "no hook" from "hook returned nil".
+    func callGlobalReturning(_ name: String, _ args: [LuaValue]) throws -> LuaValue? {
+        drainUnrefs()
+        name.withCString { _ = lua_getglobal(state, $0) }
+        guard lua_type(state, -1) == LUA_TFUNCTION else {
+            lua_settop(state, -2) // pop the non-function (nil) value
+            return nil
+        }
+        for a in args { push(a) }
+        guard lua_pcallk(state, Int32(args.count), 1, 0, 0, nil) == LUA_OK else {
+            throw LuaError.runtime(popError())
+        }
+        let result = decode(at: -1)
+        lua_settop(state, -2) // pop the result
+        return result
+    }
+
     // MARK: - Registering host functions
 
     func register(_ name: String, _ fn: @escaping LuaHostFunction) {

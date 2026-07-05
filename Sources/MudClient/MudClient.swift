@@ -47,13 +47,19 @@ struct Connect: ParsableCommand {
                     // render() draws output for a real chunk, or just refreshes the furniture for an
                     // empty (fully-gagged kxwt status) batch — which is exactly when hp/mana/room change.
                     Container.scriptInterpreter().engine.notifyUpdate()
+                    Container.sessionLog().logServer(string)   // TinTin #log: record live server output
                     Container.terminalService().render(string)
                 }
             }
             Task {
                 let stream = Container.inputService().commandStream.processScriptInput()
                 for try await command in stream {
-                    try await connection.send(command)
+                    // Consult the optional Lua `on_send` hook per final atomic command (may drop it,
+                    // replace it, or inject additional commands), then transmit and log what's sent.
+                    for outbound in Container.scriptInterpreter().engine.filterOutbound(command) {
+                        Container.sessionLog().logCommand(outbound)
+                        try await connection.send(outbound)
+                    }
                 }
             }
         }
