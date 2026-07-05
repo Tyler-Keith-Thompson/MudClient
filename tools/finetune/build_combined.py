@@ -29,6 +29,79 @@ from collections import defaultdict
 
 HERE = os.path.dirname(__file__)
 
+# Templated-length budget. mlx_lm.lora truncates the TAIL of any sequence over --max-seq-length,
+# and in a chat row the tail is the assistant reply — the label. The combat rows carry a ~1540-token
+# system prompt, so at the old 2048 limit ~55% of train rows lost their labels. run_train_35b.sh now
+# trains with --max-seq-length 2304; we trim the USER content (the game-output window) so every row
+# fits under that intact. Keep the two in sync.
+MAX_TOKENS = 2304
+TEMPLATE_OVERHEAD = 60      # chat-template scaffolding (im_start/end, role tags, tool wrapper)
+PER_MESSAGE_OVERHEAD = 8
+
+_tokenizer = None
+
+
+def _toklen(text):
+    """Token count via the actual Qwen tokenizer when available (the training venv has
+    `tokenizers`), else a conservative chars/3 estimate."""
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            from tokenizers import Tokenizer
+            path = os.path.expanduser(
+                "~/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit/tokenizer.json")
+            _tokenizer = Tokenizer.from_file(path)
+        except Exception:
+            _tokenizer = False
+    if _tokenizer:
+        return len(_tokenizer.encode(text).ids)
+    return len(text) // 3 + 1
+
+
+def row_tokens(row):
+    n = TEMPLATE_OVERHEAD
+    for m in row["messages"]:
+        c = m.get("content") or ""
+        if m.get("tool_calls"):
+            c += json.dumps(m["tool_calls"])
+        n += _toklen(c) + PER_MESSAGE_OVERHEAD
+    return n
+
+
+def trim_to_budget(row, budget=MAX_TOKENS):
+    """Shrink the user message so the whole templated row fits in `budget` tokens, by dropping
+    lines from the MIDDLE of the user content: the head keeps the character-state/map header, the
+    tail keeps the most recent game output and the final instruction line (the parts the decision
+    actually hangs on). System prompt and assistant label are never touched. Returns the row
+    (mutated) and whether it was trimmed."""
+    if row_tokens(row) <= budget:
+        return row, False
+    user = next((m for m in row["messages"] if m.get("role") == "user"), None)
+    if user is None:
+        return row, False
+    # Protect a head (state + map header) and tail (freshest output + instruction) and drop the
+    # OLDEST middle lines until the row fits. If the middle runs out before we're under budget,
+    # retry with smaller protected regions rather than leave the label to be truncated off.
+    for head_keep, tail_keep in ((25, 15), (15, 10), (8, 6), (4, 3)):
+        lines = (user.get("content") or "").split("\n")
+        excess = row_tokens(row) - budget
+        if excess <= 0:
+            break
+        head_keep, tail_keep = min(head_keep, len(lines) // 3), min(tail_keep, len(lines) // 3)
+        cut_from, cut_to = head_keep, len(lines) - tail_keep
+        saved, dropped, kept_mid = 0, 0, []
+        for i in range(cut_from, cut_to):           # oldest middle lines go first (+48 covers the
+            if saved < excess + 48:                 # trim marker and template-estimate slack)
+                saved += _toklen(lines[i]) + 1
+                dropped += 1
+            else:
+                kept_mid.append(lines[i])
+        if dropped:
+            user["content"] = "\n".join(
+                lines[:cut_from] + [f"[... {dropped} older output lines trimmed ...]"]
+                + kept_mid + lines[cut_to:])
+    return row, True
+
 
 def fix_tool_args(row):
     """The Qwen chat template does `tool_call.arguments|items`, so arguments must be a
@@ -96,12 +169,19 @@ def main():
     valid.sort(key=lambda r: hash(json.dumps(r, sort_keys=True)) & 0xFFFFFFFF)
 
     os.makedirs(args.out, exist_ok=True)
+    trimmed = {"train": 0, "valid": 0}
+    overs = {"train": 0, "valid": 0}
     for name, data in (("train", train), ("valid", valid)):
         with open(os.path.join(args.out, name + ".jsonl"), "w") as f:
             for r in data:
                 fix_tool_args(r)
+                r, was_trimmed = trim_to_budget(r)
+                trimmed[name] += was_trimmed
+                overs[name] += row_tokens(r) > MAX_TOKENS
                 f.write(json.dumps({"messages": r["messages"]}) + "\n")
 
+    print(f"trim:    budget {MAX_TOKENS} toks -> {trimmed['train']} train + {trimmed['valid']} valid rows "
+          f"trimmed; still over budget after trim: {overs['train']} train + {overs['valid']} valid")
     print(f"general: {len(gen_train)} train + {len(gen_valid)} valid (non-combat kept)")
     print(f"combat:  {len(fights)} fights -> {len(valid_fights)} held out; "
           f"{len(c_train)} train rows (weighted) + {len(c_valid)} valid rows (unique)")

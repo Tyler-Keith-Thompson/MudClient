@@ -70,11 +70,16 @@ echo "snapshot: $(cat "$SNAP")"
 sleep 3
 
 echo "---- training on $DATA : $(date) ----"
+# num-layers 8 (not 16): the MoE's first backward pass dequantizes expert weights for every
+# LoRA-carrying layer at once — 16 layers blew past the Metal wired limit on 2026-07-05.
+# max-seq 2304 (not 2048): the combat rows are ~2100-2800 tokens TEMPLATED (1541-token system
+# prompt); at 2048 the assistant tool-call at the tail — the LABEL — was being truncated off.
+# build_combined.py now trims the user context so every row fits under 2304 intact.
 rm -rf "$ADAPTERS"; mkdir -p "$ADAPTERS"
 "$VENV/mlx_lm.lora" \
   --model "$BASE" --train --data "$DATA" \
-  --batch-size 1 --num-layers 16 --iters 600 \
-  --max-seq-length 2048 --grad-checkpoint \
+  --batch-size 1 --num-layers 8 --iters 600 \
+  --max-seq-length 2304 --grad-checkpoint \
   --steps-per-report 10 --steps-per-eval 200 --save-every 100 \
   --adapter-path "$ADAPTERS"
 rc=$?
