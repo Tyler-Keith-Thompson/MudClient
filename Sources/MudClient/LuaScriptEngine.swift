@@ -706,10 +706,12 @@ final class LuaScriptEngine: @unchecked Sendable {
             }
             return []
         }
-        // ai_local_request(system, user, max_tokens, prefix, callback). callback(reply, err) — a plain
-        // completion against the LOCAL model client (never a paid API), for cheap always-on features that
-        // must keep working regardless of what brain the pilot selected. No tools; prefix is an optional
-        // assistant prefill (e.g. a closed <think> block for Qwen3.x).
+        // ai_local_request(system, user, max_tokens, prefix, callback [, model]). callback(reply, err) —
+        // a plain completion against the LOCAL model client (never a paid API), for cheap always-on
+        // features that must keep working regardless of what brain the pilot selected. No tools; prefix
+        // is an optional assistant prefill (e.g. a closed <think> block for Qwen3.x). The optional 6th
+        // `model` arg overrides the pinned local model for THIS call only (e.g. a bigger dense model for
+        // gear comparison) without touching the client's configured default other callers rely on.
         lua.register("ai_local_request") { [weak self] args in
             guard let self,
                   case .string(let system)? = args.first,
@@ -717,10 +719,14 @@ final class LuaScriptEngine: @unchecked Sendable {
             let user: String = { if case .string(let u) = args[1] { return u }; return "" }()
             let maxTokens = Self.intArg(args[2]) ?? 64
             let prefix: String? = { if case .string(let p) = args[3], !p.isEmpty { return p }; return nil }()
+            let modelOverride: String? = {
+                if args.count > 5, case .string(let m) = args[5], !m.isEmpty { return m }; return nil
+            }()
             Task {
                 do {
                     let result = try await self.localLLM.complete(system: system, user: user,
-                                                                  maxTokens: maxTokens, assistantPrefix: prefix)
+                                                                  maxTokens: maxTokens, assistantPrefix: prefix,
+                                                                  modelOverride: modelOverride)
                     self.fire(callback, [.string(result.content), .nil])
                 } catch {
                     self.fire(callback, [.nil, .string(error.localizedDescription)])

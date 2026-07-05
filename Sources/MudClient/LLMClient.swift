@@ -60,9 +60,13 @@ final class LLMClient: @unchecked Sendable {
     /// a trailing partial assistant turn the model continues from — a generic mechanism the caller
     /// uses for model-specific prefills (e.g. a closed reasoning block to suppress thinking). This
     /// client attaches no meaning to it.
+    /// `modelOverride`, when non-empty, names the model to use for THIS request only — it neither
+    /// consults nor caches the client's configured/resolved model, so a per-call override (e.g. the
+    /// equipment adviser asking for a bigger dense model) never disturbs the pinned default other
+    /// callers rely on (e.g. Trivia's pinned chat model).
     func complete(system: String, user: String, maxTokens: Int, tools: String? = nil,
-                  assistantPrefix: String? = nil) async throws -> Completion {
-        let model = try await resolveModel()
+                  assistantPrefix: String? = nil, modelOverride: String? = nil) async throws -> Completion {
+        let model = try await resolveModel(override: modelOverride)
         lock.lock(); let base = baseURL; let temp = temperature; let provider = authKeyProvider; let native = useAnthropic; lock.unlock()
         let key = provider()   // resolve the key now, at request time (may read the keychain)
         if native {
@@ -235,7 +239,10 @@ final class LLMClient: @unchecked Sendable {
     }
     func resetUsage() { lock.lock(); accIn = 0; accOut = 0; accCacheRead = 0; accCacheWrite = 0; lock.unlock() }
 
-    private func resolveModel() async throws -> String {
+    private func resolveModel(override: String? = nil) async throws -> String {
+        // A per-request override wins outright and is never cached — the client's configured/resolved
+        // model is left untouched for every other caller.
+        if let override, !override.isEmpty { return override }
         lock.lock()
         if let m = resolvedModel { lock.unlock(); return m }
         if let m = configuredModel { resolvedModel = m; lock.unlock(); return m }

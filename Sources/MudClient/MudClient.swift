@@ -35,6 +35,7 @@ struct Connect: ParsableCommand {
         try Container.scriptInterpreter().parser.parse("#load {AIPilot}")
         try Container.scriptInterpreter().parser.parse("#load {HUD}")
         try Container.scriptInterpreter().parser.parse("#load {Trivia}")
+        try Container.scriptInterpreter().parser.parse("#load {Equipment}")
         
         // The connection lifecycle now lives in ConnectionManager, which owns the current connection,
         // pumps its output to the terminal/HUD, and can be re-driven at runtime (by the Lua

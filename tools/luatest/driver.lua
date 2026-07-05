@@ -48,7 +48,7 @@ music = { play = noop, stop = noop, volume = noop }
 
 -- Load the real scripts in the same order the client does, so their globals (state, on_update,
 -- run_test_suite, _HUD_TEST, _AIP_TEST, …) are all present.
-for _, f in ipairs({ "Scripts/AlterAeon.lua", "Scripts/AIPilot.lua", "Scripts/HUD.lua", "Scripts/Trivia.lua" }) do
+for _, f in ipairs({ "Scripts/AlterAeon.lua", "Scripts/AIPilot.lua", "Scripts/HUD.lua", "Scripts/Trivia.lua", "Scripts/Equipment.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end
