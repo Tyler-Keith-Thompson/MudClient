@@ -156,7 +156,7 @@ private actor RecordedWrites {
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     try? engine.load(path: scriptDir.appendingPathComponent("Scripts/AlterAeon.lua").path)
     let display = terminal.components(separatedBy: "\n")
-        .filter { !engine.processLine($0) }.joined(separator: "\n")
+        .compactMap { engine.processLine($0) }.joined(separator: "\n")
     let leakedTails = display.components(separatedBy: "\n")
         .filter { $0.contains("track_") || $0.contains(".wav") || $0.hasPrefix("ground_") }
     print("REPLAY chunks=\(chunks.count) leakedSOUND=\(display.contains("!!SOUND")) "
@@ -192,7 +192,7 @@ private actor RecordedWrites {
         text += piece
     }
     let lines = text.components(separatedBy: "\n")
-    let display = lines.enumerated().filter { !engine.processLine($0.element) }.map(\.element).joined(separator: "\n")
+    let display = lines.compactMap { engine.processLine($0) }.joined(separator: "\n")
 
     #expect(!display.contains("ground_01"))        // the tail no longer leaks
     #expect(!display.contains("kxwt_"))            // head still gagged
@@ -259,7 +259,7 @@ private actor RecordedWrites {
     for try await output in stream.handleIACCommunication(writeToStream: { _ in })
         .normalizeLineEndings().assembleLines().processMSP() {
         let lines = output.replacingOccurrences(of: "\r", with: "").components(separatedBy: CharacterSet.newlines)
-        let gagged = lines.map { interp.engine.processLine($0) }
+        let gagged = lines.map { interp.engine.processLine($0) == nil }
         var out = [String]()
         for (i, line) in lines.enumerated() {
             if gagged[i] { continue }
@@ -479,7 +479,7 @@ private actor RecordedWrites {
     let engine = LuaScriptEngine()
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let lines = text.components(separatedBy: "\n")
-    let gagged = lines.map { engine.processLine($0) }
+    let gagged = lines.map { engine.processLine($0) == nil }
     var out = [String]()
     for (i, line) in lines.enumerated() {
         if gagged[i] { continue }

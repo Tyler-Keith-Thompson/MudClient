@@ -14,9 +14,25 @@ import DependencyInjection
 import Foundation
 
 final class LuaScriptEngine: @unchecked Sendable {
-    struct Rule {
+    /// A registered line-trigger, alias, or gag. A reference type so `rule_enable`/`class_enable`
+    /// can flip `enabled` in place. `handler` is nil for gags (they only decide whether a line is
+    /// dropped); `oneshot` rules auto-remove after their first fire; `ruleClass` tags a rule so a
+    /// whole class can be enabled/removed at once.
+    final class Rule {
+        let id: Int
         let regex: Regex<AnyRegexOutput>
-        let handler: LuaFunctionRef
+        let handler: LuaFunctionRef?
+        let oneshot: Bool
+        let ruleClass: String?
+        var enabled: Bool = true
+        init(id: Int, regex: Regex<AnyRegexOutput>, handler: LuaFunctionRef?,
+             oneshot: Bool = false, ruleClass: String? = nil) {
+            self.id = id
+            self.regex = regex
+            self.handler = handler
+            self.oneshot = oneshot
+            self.ruleClass = ruleClass
+        }
     }
 
     private let lua = Lua()
@@ -38,7 +54,14 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     private(set) var lineRules: [Rule] = []
     private(set) var aliasRules: [Rule] = []
-    private(set) var gags: [Regex<AnyRegexOutput>] = []
+    private(set) var gags: [Rule] = []
+    /// Monotonic id source for rules AND timers (one namespace keeps every handle unique). Guarded
+    /// by `lock`.
+    private var lastId: Int = 0
+    /// Outstanding timers by id (both one-shot `after` and repeating `every`). Presence == armed;
+    /// cancel/reload removes the entry, and the fire path checks membership before invoking the
+    /// callback so a cancelled timer can't fire into fresh state. Guarded by `lock`.
+    private var timers: [Int: DispatchWorkItem] = [:]
     /// Script-registered `#<name>` command handlers (via the `command` builtin). Called with the
     /// text after the command word. Lets game scripts own their own `#` commands host-agnostically.
     private(set) var commands: [String: LuaFunctionRef] = [:]
@@ -120,6 +143,17 @@ final class LuaScriptEngine: @unchecked Sendable {
         aliasRules.removeAll()
         gags.removeAll()
         commands.removeAll()
+        // Cancel every outstanding timer too, so a hot-reload (`#ai reload`) can't strand ghost
+        // `after`/`every` callbacks firing into freshly-loaded state.
+        for item in timers.values { item.cancel() }
+        timers.removeAll()
+    }
+
+    /// Next unique handle for a rule or timer. Safe to call with `lock` already held (recursive).
+    private func nextId() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        lastId += 1
+        return lastId
     }
 
     // MARK: - Dispatch
@@ -130,17 +164,44 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// only the copy used for matching is cleaned.
     private let ansiSequence = try! Regex("\u{1B}\\[[0-9;?]*[ -/]*[@-~]")
 
-    /// Fire any matching line triggers, then report whether the line should be gagged. Triggers and
-    /// gags see the ANSI-stripped line (and capture groups from it); the caller still displays the
-    /// original, coloured line.
-    func processLine(_ line: String) -> Bool {
+    /// Fire matching line triggers (the rewrite stage), then apply the separate gag list. Returns the
+    /// line to display, or `nil` if it should be dropped (gagged).
+    ///
+    /// Each trigger handler runs against the CURRENT line (a previous trigger may have rewritten it)
+    /// and is called as `handler(cleanLine, cap1, ..., rawLine)` — the ANSI-stripped text plus its
+    /// capture groups, followed by the current raw (coloured) line so scripts can do colour-preserving
+    /// rewrites. Its return value controls the displayed line:
+    ///   * nil / no return   → unchanged
+    ///   * `false` or `""`   → gag the line
+    ///   * a string          → replace the displayed line with it (may contain ANSI escapes)
+    /// Disabled rules are skipped; `oneshot` rules are removed after they fire.
+    func processLine(_ line: String) -> String? {
         lock.lock(); defer { lock.unlock() }
-        let clean = line.replacing(ansiSequence, with: "")
+        var current = line
+        var gagged = false
+        var firedOneshots: [Int] = []
         for rule in lineRules {
+            guard rule.enabled, let handler = rule.handler else { continue }
+            let clean = current.replacing(ansiSequence, with: "")
             guard let match = try? rule.regex.firstMatch(in: clean) else { continue }
-            try? lua.call(rule.handler, callArgs(line: clean, match: match))
+            let result = try? lua.callReturning(handler, callArgs(line: clean, match: match, raw: current))
+            if rule.oneshot { firedOneshots.append(rule.id) }
+            switch result {
+            case .string(let s):
+                if s.isEmpty { gagged = true } else { current = s }
+            case .bool(false):
+                gagged = true
+            default:
+                break // nil / no-return / any other value → line unchanged
+            }
+            if gagged { break }
         }
-        return gags.contains { (try? $0.firstMatch(in: clean)) != nil }
+        if !firedOneshots.isEmpty { lineRules.removeAll { firedOneshots.contains($0.id) } }
+        if gagged { return nil }
+        // The standalone gag list still applies to whatever the line now is.
+        let clean = current.replacing(ansiSequence, with: "")
+        if gags.contains(where: { $0.enabled && (try? $0.regex.firstMatch(in: clean)) != nil }) { return nil }
+        return current
     }
 
     /// Fire the first matching alias for user input. Returns true if one matched
@@ -148,15 +209,18 @@ final class LuaScriptEngine: @unchecked Sendable {
     func processAlias(_ input: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         for rule in aliasRules {
+            guard rule.enabled, let handler = rule.handler else { continue }
             guard let match = try? rule.regex.firstMatch(in: input) else { continue }
-            try? lua.call(rule.handler, callArgs(line: input, match: match))
+            try? lua.call(handler, callArgs(line: input, match: match, raw: input))
+            if rule.oneshot { aliasRules.removeAll { $0.id == rule.id } }
             return true
         }
         return false
     }
 
-    /// Handler is called as `handler(wholeLine, capture1, capture2, ...)`.
-    private func callArgs(line: String, match: Regex<AnyRegexOutput>.Match) -> [LuaValue] {
+    /// Handler is called as `handler(wholeLine, capture1, capture2, ..., rawLine)`. `rawLine` is the
+    /// original (still-coloured) line, appended after the captures for colour-preserving rewrites.
+    private func callArgs(line: String, match: Regex<AnyRegexOutput>.Match, raw: String) -> [LuaValue] {
         let output = match.output
         var args: [LuaValue] = [.string(line)]
         if output.count > 1 {
@@ -164,6 +228,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                 args.append(output[i].substring.map { LuaValue.string(String($0)) } ?? .nil)
             }
         }
+        args.append(.string(raw))
         return args
     }
 
@@ -178,18 +243,55 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let s)? = args.first { self?.onEcho(s) }
             return []
         }
+        // trigger(pattern, handler [, opts]) -> id. opts = { oneshot = true, class = "combat" }.
         lua.register("trigger") { [weak self] args in
-            if let rule = self?.makeRule(args) { self?.lineRules.append(rule) }
-            return []
+            guard let self, let rule = self.makeRule(args) else { return [] }
+            self.lineRules.append(rule)
+            return [.int(Int64(rule.id))]
         }
+        // alias(pattern, handler [, opts]) -> id. Same options as trigger().
         lua.register("alias") { [weak self] args in
-            if let rule = self?.makeRule(args) { self?.aliasRules.append(rule) }
+            guard let self, let rule = self.makeRule(args) else { return [] }
+            self.aliasRules.append(rule)
+            return [.int(Int64(rule.id))]
+        }
+        // gag(pattern) -> id. Drops matching lines; removable/toggleable by id like any rule.
+        lua.register("gag") { [weak self] args in
+            guard let self, case .string(let pat)? = args.first, let rx = try? Regex(pat) else { return [] }
+            let rule = Rule(id: self.nextId(), regex: rx, handler: nil)
+            self.gags.append(rule)
+            return [.int(Int64(rule.id))]
+        }
+        // rule_remove(id) — drop the trigger/alias/gag with this id (from wherever it lives).
+        lua.register("rule_remove") { [weak self] args in
+            guard let self, let id = args.first.flatMap(Self.intArg) else { return [] }
+            self.lineRules.removeAll { $0.id == id }
+            self.aliasRules.removeAll { $0.id == id }
+            self.gags.removeAll { $0.id == id }
             return []
         }
-        lua.register("gag") { [weak self] args in
-            if case .string(let pat)? = args.first, let rx = try? Regex(pat) {
-                self?.gags.append(rx)
-            }
+        // rule_enable(id, on) — enable/disable a single rule (disabled rules don't match).
+        lua.register("rule_enable") { [weak self] args in
+            guard let self, let id = args.first.flatMap(Self.intArg) else { return [] }
+            let on = Self.boolArg(args.count > 1 ? args[1] : nil)
+            for r in self.lineRules where r.id == id { r.enabled = on }
+            for r in self.aliasRules where r.id == id { r.enabled = on }
+            for r in self.gags where r.id == id { r.enabled = on }
+            return []
+        }
+        // class_enable(name, on) — enable/disable every trigger/alias tagged with this class.
+        lua.register("class_enable") { [weak self] args in
+            guard let self, case .string(let name)? = args.first else { return [] }
+            let on = Self.boolArg(args.count > 1 ? args[1] : nil)
+            for r in self.lineRules where r.ruleClass == name { r.enabled = on }
+            for r in self.aliasRules where r.ruleClass == name { r.enabled = on }
+            return []
+        }
+        // class_remove(name) — remove every trigger/alias tagged with this class.
+        lua.register("class_remove") { [weak self] args in
+            guard let self, case .string(let name)? = args.first else { return [] }
+            self.lineRules.removeAll { $0.ruleClass == name }
+            self.aliasRules.removeAll { $0.ruleClass == name }
             return []
         }
         // command(name, handler) — register a `#<name>` command. The handler is called with the text
@@ -329,14 +431,26 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let m)? = args.first { self?.localLLM.setModel(m) }
             return []
         }
-        // after(seconds, callback) — fire callback() once, later.
+        // after(seconds, callback) -> id — fire callback() once, later. Returns a cancellable id.
         lua.register("after") { [weak self] args in
             guard let self,
                   args.count > 1, case .function(let callback) = args[1] else { return [] }
             let seconds = Self.doubleArg(args[0]) ?? 0
-            self.timerQueue.asyncAfter(deadline: .now() + seconds) { [weak self] in
-                self?.fire(callback, [])
-            }
+            return [.int(Int64(self.scheduleTimer(delay: seconds, repeating: nil, callback)))]
+        }
+        // every(seconds, callback) -> id — fire callback() repeatedly, every `seconds`. Returns a
+        // cancellable id.
+        lua.register("every") { [weak self] args in
+            guard let self,
+                  args.count > 1, case .function(let callback) = args[1] else { return [] }
+            let seconds = Self.doubleArg(args[0]) ?? 0
+            return [.int(Int64(self.scheduleTimer(delay: seconds, repeating: seconds, callback)))]
+        }
+        // cancel(id) — cancel a pending/repeating timer started by after()/every().
+        lua.register("cancel") { [weak self] args in
+            guard let self, let id = args.first.flatMap(Self.intArg) else { return [] }
+            self.lock.lock(); let item = self.timers.removeValue(forKey: id); self.lock.unlock()
+            item?.cancel()
             return []
         }
         // ai_set_endpoint(url) / ai_set_model(id) — let a script implement runtime overrides.
@@ -435,12 +549,52 @@ final class LuaScriptEngine: @unchecked Sendable {
     private static func doubleArg(_ v: LuaValue) -> Double? {
         switch v { case .number(let d): return d; case .int(let i): return Double(i); default: return nil }
     }
+    private static func boolArg(_ v: LuaValue?) -> Bool {
+        switch v { case .bool(let b)?: return b; case .int(let i)?: return i != 0; default: return false }
+    }
 
-    /// `trigger(pattern, handler)` / `alias(pattern, handler)`.
+    // MARK: - Timers
+
+    /// Register a timer and arm it. `repeating` nil = one-shot; otherwise the re-arm interval.
+    /// Returns the cancellable id.
+    private func scheduleTimer(delay: Double, repeating: Double?, _ callback: LuaFunctionRef) -> Int {
+        let id = nextId()
+        arm(id: id, delay: delay, repeating: repeating, callback)
+        return id
+    }
+
+    /// Schedule one firing of timer `id` on `timerQueue`. On fire it re-checks that the timer is still
+    /// armed (not cancelled/reloaded) before calling into Lua, and re-arms itself when repeating.
+    private func arm(id: Int, delay: Double, repeating: Double?, _ callback: LuaFunctionRef) {
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let armed = self.timers[id] != nil; self.lock.unlock()
+            guard armed else { return }
+            self.fire(callback, [])
+            if let interval = repeating {
+                // fire() may have cancelled this timer; only re-arm if it's still live.
+                self.lock.lock(); let live = self.timers[id] != nil; self.lock.unlock()
+                if live { self.arm(id: id, delay: interval, repeating: interval, callback) }
+            } else {
+                self.lock.lock(); self.timers[id] = nil; self.lock.unlock()
+            }
+        }
+        lock.lock(); timers[id] = item; lock.unlock()
+        timerQueue.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// `trigger(pattern, handler [, opts])` / `alias(pattern, handler [, opts])`. `opts` is an optional
+    /// trailing table: `{ oneshot = true, class = "combat" }`.
     private func makeRule(_ args: [LuaValue]) -> Rule? {
         guard case .string(let pattern)? = args.first,
               args.count > 1, case .function(let handler) = args[1],
               let regex = try? Regex(pattern) else { return nil }
-        return Rule(regex: regex, handler: handler)
+        var oneshot = false
+        var ruleClass: String? = nil
+        if args.count > 2, case .table(_, let opts) = args[2] {
+            if case .bool(let b)? = opts["oneshot"] { oneshot = b }
+            if case .string(let c)? = opts["class"] { ruleClass = c }
+        }
+        return Rule(id: nextId(), regex: regex, handler: handler, oneshot: oneshot, ruleClass: ruleClass)
     }
 }

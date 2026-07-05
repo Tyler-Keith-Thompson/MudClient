@@ -124,6 +124,21 @@ final class Lua: @unchecked Sendable {
         }
     }
 
+    /// Like `call`, but keeps the function's FIRST return value and decodes it (any further results
+    /// are discarded). Used by the line-rewrite stage, where a trigger handler's return controls the
+    /// displayed line (nil/no-return leaves it unchanged, `false`/`""` gags it, a string replaces it).
+    func callReturning(_ ref: LuaFunctionRef, _ args: [LuaValue]) throws -> LuaValue {
+        drainUnrefs()
+        lua_rawgeti(state, clua_registryindex(), lua_Integer(ref.ref)) // push the function
+        for a in args { push(a) }
+        guard lua_pcallk(state, Int32(args.count), 1, 0, 0, nil) == LUA_OK else {
+            throw LuaError.runtime(popError())
+        }
+        let value = decode(at: -1)
+        lua_settop(state, -2) // pop the (single) result
+        return value
+    }
+
     /// Call a global Lua function by name if it is defined; a no-op if the global is absent or not
     /// a function (lets the host notify scripts about optional hooks like `on_user_input`).
     func callGlobal(_ name: String, _ args: [LuaValue]) throws {

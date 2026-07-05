@@ -185,13 +185,13 @@ extension AsyncSequence where Self: Sendable, Element == String {
                 .components(separatedBy: CharacterSet.newlines)
             let engine = Container.scriptInterpreter().engine
             // Fire triggers (and gags) for every line, in order — scripts (incl. the AI pilot's
-            // catch-all) observe here. Record which lines were gagged for the blank-framing pass.
-            let gagged = lines.map { engine.processLine($0) }
-
-            // Keep every non-gagged line verbatim — including blanks, which are the MUD's own spacing.
+            // catch-all) observe here. Each line is passed through the rewrite stage: `processLine`
+            // returns the line to display (possibly rewritten by a trigger), or nil if it was gagged.
+            //
+            // Keep every surviving line verbatim — including blanks, which are the MUD's own spacing.
             // (We used to drop blanks adjacent to a gagged kxwt_ batch as "framing", but that ate real
             // spacing between content during combat's group-status bursts, and isn't needed.)
-            let out = lines.enumerated().filter { !gagged[$0.offset] }.map(\.element)
+            let out = lines.compactMap { engine.processLine($0) }
             return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()
