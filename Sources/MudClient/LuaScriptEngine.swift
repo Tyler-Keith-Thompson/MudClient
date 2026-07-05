@@ -66,6 +66,13 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// text after the command word. Lets game scripts own their own `#` commands host-agnostically.
     private(set) var commands: [String: LuaFunctionRef] = [:]
 
+    /// Script-registered key macros (via the `bind` builtin), keyed by an auto-incrementing id so
+    /// `unbind(id)` can remove exactly one. The stored `key` is the canonical key name (see
+    /// `normalizeKeyName`) the terminal decoder produces. Cleared on reload (same path as triggers).
+    private var keyBindings: [Int: (key: String, handler: LuaFunctionRef)] = [:]
+    /// Monotonic id source for `bind`; never reset so a stale id from before a reload can't collide.
+    private var nextBindId = 1
+
     /// Host sinks. The integration layer wires these to the real services.
     var onSend: (String) -> Void = { _ in }
     var onEcho: (String) -> Void = { _ in }
@@ -81,6 +88,7 @@ final class LuaScriptEngine: @unchecked Sendable {
         installBuiltins()
         installPrimitives()
         installPanel()
+        installTerminal()
     }
 
     // MARK: - Async callbacks into Lua
@@ -115,6 +123,63 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("on_update", [])
     }
 
+    /// Notify the script that the terminal was resized (after the host has relaid out the screen).
+    /// No-op unless the script defines a global `on_resize(cols, rows)`.
+    func notifyResize(cols: Int, rows: Int) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_resize", [.int(Int64(cols)), .int(Int64(rows))])
+    }
+
+    /// Offer a mouse event to the script's optional global `on_mouse(event, x, y, button)`. Returns
+    /// true iff the handler returned a truthy value (i.e. it consumed the event). No handler → false,
+    /// so the host falls through to its default behaviour.
+    func notifyMouse(event: String, x: Int, y: Int, button: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let args: [LuaValue] = [.string(event), .int(Int64(x)), .int(Int64(y)), .int(Int64(button))]
+        return (try? lua.callGlobalBool("on_mouse", args)) ?? false
+    }
+
+    /// Fire the most recently registered `bind` handler for `name` (a canonical key name). Returns
+    /// true iff a binding existed (so the host consumes the key instead of line-editing it). The
+    /// handler is called with the key name, so one function bound to several keys can tell them apart.
+    func handleKey(_ name: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        // Highest id wins → last `bind` for a key takes precedence (TinTin `#macro` semantics).
+        guard let handler = keyBindings.filter({ $0.value.key == name })
+            .max(by: { $0.key < $1.key })?.value.handler else { return false }
+        try? lua.call(handler, [.string(name)])
+        return true
+    }
+
+    /// Canonicalise a user-supplied key name so `bind("F5")`, `bind("f5")` etc. all match what the
+    /// terminal decoder emits. Lowercases, normalises modifier order to ctrl-alt-shift-meta, and maps
+    /// a few common aliases (pgup/pgdn/ins/del). Must stay in sync with TerminalService's decoder.
+    static func normalizeKeyName(_ name: String) -> String {
+        var parts = name.lowercased().split(separator: "-").map(String.init)
+        guard var base = parts.popLast() else { return name.lowercased() }
+        switch base {
+        case "pgup": base = "pageup"
+        case "pgdn", "pgdown": base = "pagedown"
+        case "ins": base = "insert"
+        case "del": base = "delete"
+        default: break
+        }
+        let mods = Set(parts.map { m -> String in
+            switch m {
+            case "control", "ctl": return "ctrl"
+            case "option", "opt": return "alt"
+            case "cmd", "command", "super": return "meta"
+            default: return m
+            }
+        })
+        var out = ""
+        if mods.contains("ctrl") { out += "ctrl-" }
+        if mods.contains("alt") { out += "alt-" }
+        if mods.contains("shift") { out += "shift-" }
+        if mods.contains("meta") { out += "meta-" }
+        return out + base
+    }
+
     // MARK: - Loading scripts
 
     /// Register an extra game-specific builtin (e.g. `kxwt`, `recover`). Call
@@ -143,6 +208,7 @@ final class LuaScriptEngine: @unchecked Sendable {
         aliasRules.removeAll()
         gags.removeAll()
         commands.removeAll()
+        keyBindings.removeAll()
         // Cancel every outstanding timer too, so a hot-reload (`#ai reload`) can't strand ghost
         // `after`/`every` callbacks firing into freshly-loaded state.
         for item in timers.values { item.cancel() }
@@ -239,8 +305,16 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let s)? = args.first { self?.onSend(s) }
             return []
         }
+        // echo(text) — print a line unchanged. echo(text, color) — wrap it in an ANSI colour from a
+        // small named set (red/green/yellow/blue/magenta/cyan/white/dim) before printing; an unknown
+        // colour is ignored (prints plain).
         lua.register("echo") { [weak self] args in
-            if case .string(let s)? = args.first { self?.onEcho(s) }
+            guard case .string(let s)? = args.first else { return [] }
+            if args.count > 1, case .string(let color) = args[1], let code = Self.ansiColorCode(color) {
+                self?.onEcho("\u{1B}[\(code)m\(s)\u{1B}[0m")
+            } else {
+                self?.onEcho(s)
+            }
             return []
         }
         // trigger(pattern, handler [, opts]) -> id. opts = { oneshot = true, class = "combat" }.
@@ -360,6 +434,65 @@ final class LuaScriptEngine: @unchecked Sendable {
             return []
         }
         try? lua.run("music = { play = music_play, stop = music_stop, volume = music_volume }")
+    }
+
+    /// Terminal/input capabilities (TinTin++-style): key macros, input-line access, scrollback reads,
+    /// and small output niceties. All delegate to the screen owner (TerminalService); none are
+    /// game-specific.
+    private func installTerminal() {
+        // bind(keyname, handler) -> id. Registers a key macro; the handler is called with the key
+        // name when that key is pressed (and the key is then consumed, not line-edited).
+        lua.register("bind") { [weak self] args in
+            guard let self, case .string(let key)? = args.first,
+                  args.count > 1, case .function(let handler) = args[1] else { return [.nil] }
+            let id = self.nextBindId
+            self.nextBindId += 1
+            self.keyBindings[id] = (Self.normalizeKeyName(key), handler)
+            return [.int(Int64(id))]
+        }
+        // unbind(id) — remove a binding previously returned by bind().
+        lua.register("unbind") { [weak self] args in
+            if let id = args.first.flatMap(Self.intArg) { self?.keyBindings.removeValue(forKey: id) }
+            return []
+        }
+        // input_get() -> the current input-line text.
+        lua.register("input_get") { _ in [.string(Container.terminalService().currentInput())] }
+        // input_set(text) — replace the input line and redraw it.
+        lua.register("input_set") { args in
+            if case .string(let t)? = args.first { Container.terminalService().setInput(t) }
+            return []
+        }
+        // scrollback(n) -> array of the last n display lines (ANSI stripped), oldest-first.
+        lua.register("scrollback") { args in
+            let n = args.first.flatMap(Self.intArg) ?? 0
+            let lines = Container.terminalService().scrollbackTail(count: n)
+            return [.table(lines.map(LuaValue.string), [:])]
+        }
+        // scrollback_find(pattern, max) -> array of up-to-max most-recent matching lines (ANSI
+        // stripped), oldest-first. `pattern` is a Swift Regex over the stripped text.
+        lua.register("scrollback_find") { args in
+            guard case .string(let pat)? = args.first else { return [.table([], [:])] }
+            let max = args.count > 1 ? (Self.intArg(args[1]) ?? 100) : 100
+            let lines = Container.terminalService().scrollbackFind(pattern: pat, max: max)
+            return [.table(lines.map(LuaValue.string), [:])]
+        }
+        // bell() — ring the terminal bell.
+        lua.register("bell") { _ in Container.terminalService().bell(); return [] }
+    }
+
+    /// Map a named colour to its ANSI SGR code. Small fixed set; unknown names return nil.
+    private static func ansiColorCode(_ name: String) -> String? {
+        switch name.lowercased() {
+        case "red": return "31"
+        case "green": return "32"
+        case "yellow": return "33"
+        case "blue": return "34"
+        case "magenta": return "35"
+        case "cyan": return "36"
+        case "white": return "37"
+        case "dim": return "2"
+        default: return nil
+        }
     }
 
     /// Dispatch a `#<name> <rest>` command to a script-registered handler. Returns whether one claimed it.

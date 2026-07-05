@@ -154,6 +154,25 @@ final class Lua: @unchecked Sendable {
         }
     }
 
+    /// Call a global Lua function by name and return its first result coerced to a boolean (Lua
+    /// truthiness). A no-op returning `false` if the global is absent or not a function. Used by the
+    /// host to let an optional hook (e.g. `on_mouse`) signal that it consumed an event.
+    func callGlobalBool(_ name: String, _ args: [LuaValue]) throws -> Bool {
+        drainUnrefs()
+        name.withCString { _ = lua_getglobal(state, $0) }
+        guard lua_type(state, -1) == LUA_TFUNCTION else {
+            lua_settop(state, -2) // pop the non-function (nil) value
+            return false
+        }
+        for a in args { push(a) }
+        guard lua_pcallk(state, Int32(args.count), 1, 0, 0, nil) == LUA_OK else {
+            throw LuaError.runtime(popError())
+        }
+        let result = lua_toboolean(state, -1) != 0
+        lua_settop(state, -2) // pop the result
+        return result
+    }
+
     // MARK: - Registering host functions
 
     func register(_ name: String, _ fn: @escaping LuaHostFunction) {

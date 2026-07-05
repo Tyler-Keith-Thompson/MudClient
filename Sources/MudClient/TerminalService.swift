@@ -121,6 +121,14 @@ final class TerminalService {
         guard !keyInput.isEmpty else { return }
         partialInput.append(keyInput)
 
+        // Consume any leading key the script has a macro for (TinTin++ #macro). A recognised-but-
+        // unbound special key (e.g. an arrow) leaves the loop and falls through to the line editor,
+        // so unbound keys behave exactly as before.
+        while let (name, length) = decodeKey(partialInput), engine.handleKey(name) {
+            partialInput.removeFirst(length)
+        }
+        guard !partialInput.isEmpty else { return }
+
         switch Result(catching: { try lineParser.parse(partialInput) }) {
         case .success(let command):
             switch command {
@@ -338,6 +346,8 @@ final class TerminalService {
         lastOutputBottom = -1
         scrollOffset = 0   // wrapping changes with width → snap to the live tail and rebuild
         setupScreen()
+        // Let scripts react to the new geometry after the layout has settled.
+        engine.notifyResize(cols: getTerminalWidth() ?? 80, rows: getTerminalHeight() ?? 24)
     }
 
     /// Reset the scroll region and drop to the bottom of the screen so we don't leave the terminal in
@@ -669,14 +679,25 @@ final class TerminalService {
     /// A partial mouse report held between reads (`ESC[<…` with no terminator yet).
     private var mousePartial = ""
 
-    /// Act on one SGR mouse report. We only care about the wheel on press; modifier bits (shift/meta/
-    /// ctrl) are masked off so a modified wheel still scrolls. Clicks/drags/releases are swallowed.
+    /// Act on one SGR mouse report. The wheel keeps its existing behaviour (drives in-app scrollback,
+    /// never routed through Lua); modifier bits (shift/meta/ctrl) are masked off so a modified wheel
+    /// still scrolls. Clicks/drags are offered to the script's optional `on_mouse(event, x, y, button)`
+    /// — if it returns true the event is consumed, otherwise we fall through to today's behaviour
+    /// (which is to swallow it).
     private func handleMouse(_ body: String, press: Bool) {
-        guard press, let button = Int(body.split(separator: ";").first ?? "") else { return }
-        switch button & ~0b0001_1100 {                        // strip shift(4)/meta(8)/ctrl(16) bits
-        case 64: adjustScroll(by: wheelStep)                  // wheel up → older history
-        case 65: adjustScroll(by: -wheelStep)                 // wheel down → toward the live tail
-        default: break
+        let fields = body.split(separator: ";").map { Int($0) ?? 0 }
+        guard fields.count >= 3 else { return }
+        let stripped = fields[0] & ~0b0001_1100               // strip shift(4)/meta(8)/ctrl(16) bits
+        let x = fields[1], y = fields[2]
+        switch stripped {
+        case 64:
+            if press { adjustScroll(by: wheelStep) }          // wheel up → older history
+        case 65:
+            if press { adjustScroll(by: -wheelStep) }         // wheel down → toward the live tail
+        default:
+            // A button click/drag/release. Low two bits: 0=left, 1=middle, 2=right (3 = no-button/move).
+            let button = stripped & 0b11
+            _ = engine.notifyMouse(event: press ? "press" : "release", x: x, y: y, button: button)
         }
     }
 
@@ -796,6 +817,160 @@ final class TerminalService {
         }
         lastEmptySigInt = now
         print("(input empty — press Ctrl+C again to exit)")
+    }
+
+    // MARK: - Lua terminal/input bridge
+
+    /// The scripting engine, resolved lazily so there's no init-time dependency cycle.
+    private var engine: LuaScriptEngine { Container.scriptInterpreter().engine }
+
+    // MARK: Input line access (TinTin++ #cursor)
+
+    /// The current input-buffer text (exposed to Lua as `input_get`).
+    func currentInput() -> String { lineBuffer }
+
+    /// Replace the input buffer with `text`, move the cursor to the end, and redraw the input line
+    /// (exposed to Lua as `input_set`). Mirrors how history recall (up-arrow) swaps the line in.
+    func setInput(_ text: String) {
+        partialInput = ""
+        lineBuffer = text
+        visibleStartColumn = 0
+        cursor.moveToEndOf(line: lineBuffer)
+        refreshDisplay(cursorColumn: cursor.column)
+    }
+
+    // MARK: Scrollback read API (TinTin++ #buffer / #grep)
+
+    /// Strip ANSI/VT control sequences so the scrollback read API returns plain text.
+    private static let ansiSequence = try! Regex("\u{1B}\\[[0-9;?]*[ -/]*[@-~]")
+    private func stripAnsi(_ s: String) -> String { s.replacing(Self.ansiSequence, with: "") }
+
+    /// Every logical output line seen so far (including the live tail), ANSI-stripped, oldest-first.
+    private func strippedHistory() -> [String] {
+        var lines = scrollbackLines
+        if !pendingLine.isEmpty { lines.append(pendingLine) }
+        return lines.map { stripAnsi($0) }
+    }
+
+    /// The last `count` display lines, ANSI-stripped, oldest-first (exposed as `scrollback`).
+    func scrollbackTail(count: Int) -> [String] {
+        guard count > 0 else { return [] }
+        return Array(strippedHistory().suffix(count))
+    }
+
+    /// Up to `max` most-recent lines matching `pattern` (a Swift Regex over the stripped text),
+    /// returned oldest-first (exposed as `scrollback_find`).
+    func scrollbackFind(pattern: String, max: Int) -> [String] {
+        guard max > 0, let rx = try? Regex(pattern) else { return [] }
+        var out: [String] = []
+        for line in strippedHistory().reversed() {           // walk newest→oldest, cap at `max`
+            if (try? rx.firstMatch(in: line)) != nil {
+                out.append(line)
+                if out.count >= max { break }
+            }
+        }
+        return out.reversed()                                // hand back oldest-first
+    }
+
+    // MARK: Output niceties
+
+    /// Ring the terminal bell (exposed to Lua as `bell`).
+    func bell() { writeToStandardOut(data: Data("\u{07}".utf8)) }
+
+    // MARK: Key decoding (TinTin++ #macro)
+
+    /// If `s` begins with a recognised special key, return its canonical name and the number of
+    /// characters it occupies; otherwise nil. Only FULLY-formed sequences match — a lone/partial
+    /// escape returns nil so the existing line-editor path handles it exactly as before.
+    private func decodeKey(_ s: String) -> (name: String, length: Int)? {
+        let c = Array(s)
+        guard let first = c.first else { return nil }
+        if first == "\u{1B}" { return decodeEscape(c) }
+        // Control letters, excluding those the line editor / enter / backspace / tab already own.
+        if let a = first.asciiValue, (0x01...0x1A).contains(a) {
+            let reserved: Set<UInt8> = [0x01, 0x05, 0x08, 0x09, 0x0A, 0x0D] // ctrl-a, ctrl-e, BS, tab, LF, CR
+            guard !reserved.contains(a) else { return nil }
+            return ("ctrl-\(Character(UnicodeScalar(a + 0x60)))", 1)        // 0x01 -> 'a'
+        }
+        return nil
+    }
+
+    /// Decode an escape-introduced key (`c[0] == ESC`): alt-<letter>, or a CSI/SS3 sequence.
+    private func decodeEscape(_ c: [Character]) -> (name: String, length: Int)? {
+        guard c.count >= 2 else { return nil }                // lone ESC → not yet a complete key
+        let second = c[1]
+        if second == "[" || second == "O" { return decodeCSI(c) }
+        // alt-<letter>: ESC then a plain ASCII letter.
+        if let a = second.asciiValue, (0x41...0x5A).contains(a) || (0x61...0x7A).contains(a) {
+            return ("alt-\(Character(UnicodeScalar(a)).lowercased())", 2)
+        }
+        return nil
+    }
+
+    /// Decode a CSI (`ESC[…`) or SS3 (`ESC O…`) key sequence into a canonical name. Handles arrows
+    /// (with xterm modifiers), Home/End/Insert/Delete/PageUp/PageDown, and F1–F12.
+    private func decodeCSI(_ c: [Character]) -> (name: String, length: Int)? {
+        var i = 2
+        var paramChars = ""
+        while i < c.count, let a = c[i].asciiValue, (0x30...0x3F).contains(a) {  // digits, ';', etc.
+            paramChars.append(c[i]); i += 1
+        }
+        guard i < c.count else { return nil }                 // no final byte yet → incomplete
+        let final = c[i]
+        let length = i + 1
+        let params = paramChars.split(separator: ";").map { Int($0) ?? 0 }
+        let base: String?
+        switch final {
+        case "A": base = "up"
+        case "B": base = "down"
+        case "C": base = "right"
+        case "D": base = "left"
+        case "H": base = "home"
+        case "F": base = "end"
+        case "P": base = "f1"
+        case "Q": base = "f2"
+        case "R": base = "f3"                                  // SS3 R (ESC O R); ESC[…R reports are pre-stripped
+        case "S": base = "f4"
+        case "~":
+            switch params.first ?? 0 {
+            case 1, 7: base = "home"
+            case 4, 8: base = "end"
+            case 2: base = "insert"
+            case 3: base = "delete"
+            case 5: base = "pageup"
+            case 6: base = "pagedown"
+            case 11: base = "f1"
+            case 12: base = "f2"
+            case 13: base = "f3"
+            case 14: base = "f4"
+            case 15: base = "f5"
+            case 17: base = "f6"
+            case 18: base = "f7"
+            case 19: base = "f8"
+            case 20: base = "f9"
+            case 21: base = "f10"
+            case 23: base = "f11"
+            case 24: base = "f12"
+            default: base = nil
+            }
+        default: base = nil
+        }
+        guard let base else { return nil }
+        let modifier = params.count >= 2 ? params[1] : 1      // xterm "1;<mod>" or "<n>;<mod>~"
+        return (modifierPrefix(modifier) + base, length)
+    }
+
+    /// Turn an xterm modifier code (2…16) into a canonical prefix ("ctrl-", "alt-", "shift-", "meta-"
+    /// in that order). 1 (or absent) → no modifiers. Must match LuaScriptEngine.normalizeKeyName.
+    private func modifierPrefix(_ m: Int) -> String {
+        guard m >= 2 else { return "" }
+        let bits = m - 1
+        var p = ""
+        if bits & 4 != 0 { p += "ctrl-" }
+        if bits & 2 != 0 { p += "alt-" }
+        if bits & 1 != 0 { p += "shift-" }
+        if bits & 8 != 0 { p += "meta-" }
+        return p
     }
 }
 

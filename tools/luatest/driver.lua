@@ -14,11 +14,18 @@ for _, n in ipairs({
   "ai_memory_request", "ai_retrieve", "ai_rag_load",
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
+  "unbind", "input_set", "bell",
 }) do _G[n] = noop end
 function ai_rag_count() return 0 end
 function ai_usage() return 0, 0, 0, 0 end
 function ai_mem_usage() return 0, 0 end
 function echo(s) print((tostring(s):gsub("\27%[[%d;]*m", ""))) end  -- strip colour for clean CI output
+-- Terminal/input bridge stubs (bind returns an id; the reads return empty).
+local _bindid = 0
+function bind() _bindid = _bindid + 1; return _bindid end
+function input_get() return "" end
+function scrollback() return {} end
+function scrollback_find() return {} end
 
 local commands = {}
 function command(name, fn) commands[name] = fn end                 -- capture (unused; we call directly)
