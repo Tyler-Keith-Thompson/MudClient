@@ -35,7 +35,7 @@ cfg.dir = cfg.home .. "/Documents/MudClient"
 cfg.map_file = cfg.dir .. "/explored.lua"
 cfg.trace_file = cfg.dir .. "/ai-traces.jsonl"
 cfg.human_trace_file = cfg.dir .. "/human-traces.jsonl"   -- demonstrations from YOUR play (gold examples)
-cfg.rag_index = cfg.dir .. "/rag_index.json"              -- prebuilt doc embeddings (build_rag_index.py)
+cfg.rag_index = cfg.dir .. "/rag_index.json"              -- doc embeddings; loader prefers the .bin sibling
 os.execute("mkdir -p '" .. cfg.dir .. "' 2>/dev/null")
 
 -- Runtime state that should survive `#ai reload` (globals persist in the lua state across the
@@ -2030,8 +2030,14 @@ function ai_command(args)
   elseif verb == "rag" then
     local m = rest:lower()
     if m == "off" then cfg.use_rag = false elseif m == "on" then cfg.use_rag = true; ai_rag_load(cfg.rag_index) end
-    echo("[ai] manual (RAG): " .. (cfg.use_rag and ("on — " .. ai_rag_count() .. " passages indexed") or "off")
-      .. (ai_rag_count() == 0 and "  (run tools/finetune/build_rag_index.py to build the index)" or ""))
+    -- The index loads off-thread, so ai_rag_count() reads 0 for a beat after `on`; report it a moment later.
+    if cfg.use_rag then
+      after(0.5, function()
+        local n = ai_rag_count()
+        echo("[ai] manual (RAG): on — " .. n .. " passages indexed"
+          .. (n == 0 and "  (run tools/finetune/build_rag_index.py to build the index)" or ""))
+      end)
+    else echo("[ai] manual (RAG): off") end
   elseif verb == "trace" then
     if rest:lower() == "off" then P.trace = false elseif rest:lower() == "on" then P.trace = true end
     echo("[ai] trace: " .. (P.trace and cfg.trace_file or "off"))
