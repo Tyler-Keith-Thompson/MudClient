@@ -143,6 +143,88 @@ final class Lua: @unchecked Sendable {
         return value
     }
 
+    /// The outcome of evaluating a REPL chunk (see `evalChunk`).
+    enum REPLResult {
+        /// The chunk ran. `values` are the results to auto-print (empty for a statement or a
+        /// side-effect-only expression — the caller prints nothing then).
+        case values([LuaValue])
+        /// The chunk failed to compile as either an expression or a statement.
+        case compileError(String)
+        /// The chunk compiled but raised at runtime.
+        case runtimeError(String)
+    }
+
+    /// Evaluate `chunk` REPL-style. First tries to compile `return (<chunk>)` — a successful compile
+    /// means it's an expression, so it's run and every result decoded for auto-printing. If that fails
+    /// to COMPILE, the chunk is run as a statement (no results). Compile/runtime errors are captured as
+    /// concise strings. The chunk name is `=repl`, so error messages read `repl:1: ...` (no source
+    /// echo). Caller must hold the engine lock (single-threaded lua_State).
+    func evalChunk(_ chunk: String) -> REPLResult {
+        drainUnrefs()
+        // Newlines around the chunk so a trailing comment can't swallow the closing paren.
+        // Detection uses the parenthesized form (per the REPL contract); when it's an expression we
+        // actually run the paren-FREE `return <chunk>` so all results survive and a void call (e.g.
+        // `send("x")`) yields zero results — printing nothing rather than a spurious `nil`.
+        if compiles("return (\n" + chunk + "\n)") {
+            if !loadBuffer("return \n" + chunk + "\n", name: "=repl") {
+                lua_settop(state, -2)                  // pop that error; fall back to the paren form
+                _ = loadBuffer("return (\n" + chunk + "\n)", name: "=repl")
+            }
+            let baseTop = lua_gettop(state) - 1        // stack depth below the loaded function
+            guard lua_pcallk(state, 0, -1 /* LUA_MULTRET */, 0, 0, nil) == LUA_OK else {
+                return .runtimeError(popError())
+            }
+            let n = Int(lua_gettop(state) - baseTop)
+            var vals: [LuaValue] = []
+            if n > 0 {
+                vals.reserveCapacity(n)
+                for i in 0..<n { vals.append(decode(at: baseTop + Int32(i) + 1)) }
+            }
+            lua_settop(state, baseTop)                 // clear the results
+            return .values(vals)
+        }
+        if loadBuffer(chunk, name: "=repl") {
+            guard lua_pcallk(state, 0, 0, 0, 0, nil) == LUA_OK else {
+                return .runtimeError(popError())
+            }
+            return .values([])
+        }
+        return .compileError(popError())               // couldn't compile either way
+    }
+
+    /// Does `source` compile (as a complete chunk)? Loads and immediately discards it; runs nothing.
+    /// Used by the REPL's legacy-command detector to tell a real Lua expression apart from a bare
+    /// `#word rest` typed-command form. Caller holds the lock.
+    func compiles(_ source: String) -> Bool {
+        drainUnrefs()
+        let ok = loadBuffer(source, name: "=repl")
+        lua_settop(state, -2)   // pop the compiled function (on success) or the error (on failure)
+        return ok
+    }
+
+    /// Is the global `name` currently a Lua function? Used by the REPL to decide whether a typed
+    /// `#word ...` should be rewritten to a call. Caller holds the lock.
+    func globalIsFunction(_ name: String) -> Bool {
+        drainUnrefs()
+        name.withCString { _ = lua_getglobal(state, $0) }
+        let isFn = lua_type(state, -1) == LUA_TFUNCTION
+        lua_settop(state, -2)
+        return isFn
+    }
+
+    /// Load `src` under chunk name `name`, leaving the compiled function on the stack on success (and
+    /// an error object on failure). Returns whether it compiled.
+    private func loadBuffer(_ src: String, name: String) -> Bool {
+        var ok = false
+        src.withCString { s in
+            let len = strlen(s)
+            name.withCString { n in
+                ok = luaL_loadbufferx(state, s, len, n, nil) == LUA_OK
+            }
+        }
+        return ok
+    }
+
     /// Call a global Lua function by name if it is defined; a no-op if the global is absent or not
     /// a function (lets the host notify scripts about optional hooks like `on_user_input`).
     func callGlobal(_ name: String, _ args: [LuaValue]) throws {

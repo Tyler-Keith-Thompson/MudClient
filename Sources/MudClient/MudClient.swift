@@ -31,11 +31,9 @@ struct Connect: ParsableCommand {
 
         Container.terminalService().setup()
 
-        try Container.scriptInterpreter().parser.parse("#load {AlterAeon}")
-        try Container.scriptInterpreter().parser.parse("#load {AIPilot}")
-        try Container.scriptInterpreter().parser.parse("#load {HUD}")
-        try Container.scriptInterpreter().parser.parse("#load {Trivia}")
-        try Container.scriptInterpreter().parser.parse("#load {Equipment}")
+        for script in ["AlterAeon", "AIPilot", "HUD", "Trivia", "Equipment"] {
+            Container.scriptInterpreter().loadScript(named: script)
+        }
         
         // The connection lifecycle now lives in ConnectionManager, which owns the current connection,
         // pumps its output to the terminal/HUD, and can be re-driven at runtime (by the Lua

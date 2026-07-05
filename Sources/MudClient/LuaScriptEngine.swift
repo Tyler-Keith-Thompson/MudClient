@@ -62,9 +62,6 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// cancel/reload removes the entry, and the fire path checks membership before invoking the
     /// callback so a cancelled timer can't fire into fresh state. Guarded by `lock`.
     private var timers: [Int: DispatchWorkItem] = [:]
-    /// Script-registered `#<name>` command handlers (via the `command` builtin). Called with the
-    /// text after the command word. Lets game scripts own their own `#` commands host-agnostically.
-    private(set) var commands: [String: LuaFunctionRef] = [:]
 
     /// Script-registered key macros (via the `bind` builtin), keyed by an auto-incrementing id so
     /// `unbind(id)` can remove exactly one. The stored `key` is the canonical key name (see
@@ -96,6 +93,32 @@ final class LuaScriptEngine: @unchecked Sendable {
         installPrimitives()
         installPanel()
         installTerminal()
+        installBootstrap()
+    }
+
+    /// Load the Lua bootstrap (`Scripts/bootstrap.lua`): the REPL pretty-printer, the `doc`/`help`
+    /// documentation registry, docs for every host builtin, the legacy `command()` bridge, and the
+    /// `ai` command router. Runs AFTER every host builtin is registered so its `doc()` calls and the
+    /// `panel`/`music` tables it documents already exist. Resolved CWD-relative (the app runs from the
+    /// repo root) with a source-relative fallback so unit tests find it regardless of their CWD.
+    private func installBootstrap() {
+        guard let path = Self.bootstrapPath() else {
+            onEcho("[bootstrap] Scripts/bootstrap.lua not found")
+            return
+        }
+        do { try lua.runFile(path) }
+        catch { onEcho("[bootstrap] failed: \(error)") }
+    }
+
+    private static func bootstrapPath() -> String? {
+        let fm = FileManager.default
+        let cwd = fm.currentDirectoryPath + "/Scripts/bootstrap.lua"
+        if fm.fileExists(atPath: cwd) { return cwd }
+        // Fallback: relative to this source file (Sources/MudClient/…) → repo root.
+        let fromSource = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Scripts/bootstrap.lua").path
+        return fm.fileExists(atPath: fromSource) ? fromSource : nil
     }
 
     // MARK: - Async callbacks into Lua
@@ -275,7 +298,6 @@ final class LuaScriptEngine: @unchecked Sendable {
         lineRules.removeAll()
         aliasRules.removeAll()
         gags.removeAll()
-        commands.removeAll()
         keyBindings.removeAll()
         // Cancel every outstanding timer too, so a hot-reload (`#ai reload`) can't strand ghost
         // `after`/`every` callbacks firing into freshly-loaded state.
@@ -439,12 +461,20 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.aliasRules.removeAll { $0.ruleClass == name }
             return []
         }
-        // command(name, handler) — register a `#<name>` command. The handler is called with the text
-        // following the command word (e.g. `#kxwt dump 20` -> handler("dump 20")).
-        lua.register("command") { [weak self] args in
-            if case .string(let name)? = args.first, args.count > 1, case .function(let handler) = args[1] {
-                self?.commands[name.lowercased()] = handler
+        // load_script(name) — load (or hot-reload) Scripts/<name>.lua and remember it so reload()
+        // re-runs it. Tolerates the legacy braced form (`{Name}`) the REPL rewrites `#load {Name}` to.
+        lua.register("load_script") { args in
+            guard case .string(let raw)? = args.first else { return [] }
+            var name = raw.trimmingCharacters(in: .whitespaces)
+            if name.hasPrefix("{"), name.hasSuffix("}"), name.count >= 2 {
+                name = String(name.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
             }
+            Container.scriptInterpreter().loadScript(named: name)
+            return []
+        }
+        // reload() — re-run every loaded script live (clears rules first). Same as the old `#reload`.
+        lua.register("reload") { _ in
+            Container.scriptInterpreter().reload()
             return []
         }
         // ---- Connection lifecycle control (host-generic; the default startup connection is unchanged) ----
@@ -669,12 +699,70 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
     }
 
-    /// Dispatch a `#<name> <rest>` command to a script-registered handler. Returns whether one claimed it.
-    func dispatchCommand(_ name: String, _ rest: String) -> Bool {
-        lock.lock(); let handler = commands[name.lowercased()]; lock.unlock()
-        guard let handler else { return false }
-        fire(handler, [.string(rest)])
-        return true
+    // MARK: - REPL (`#…` input)
+
+    /// Evaluate one line of `#`-prefixed REPL input (the `#` already stripped by the caller). The line
+    /// is Lua run in the live script state; an expression's results are pretty-printed, a statement's
+    /// aren't, and errors echo in red. Two conveniences preserve old habits during the command-language
+    /// migration: an empty line means `help()`, and a bare `#word …` whose `word` names a global
+    /// function (and whose remainder isn't a valid Lua expression) is rewritten to `word("…")` — so
+    /// legacy typed commands like `#eq scan`, `#load {HUD}`, and `#reload` keep working.
+    func evalREPL(_ raw: String) {
+        lock.lock(); defer { lock.unlock() }
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        let chunk = trimmed.isEmpty ? "help()" : legacyRewrite(raw)
+        switch lua.evalChunk(chunk) {
+        case .values(let vals):
+            if !vals.isEmpty { try? lua.callGlobal("__repl_print", vals) }
+        case .compileError(let msg), .runtimeError(let msg):
+            onEcho("\u{1B}[31m\(Self.cleanLuaError(msg))\u{1B}[0m")
+        }
+    }
+
+    /// Rewrite legacy typed-command shapes into Lua calls, or return `raw` unchanged for real Lua.
+    /// `#reload` / `#load X` map to the `reload()` / `load_script("X")` builtins; a bare `#word` naming
+    /// a global function becomes `word()`; `#word rest` becomes `word("rest")` — but only when the whole
+    /// line doesn't already parse as a Lua expression (so `#panel.height(2)` or `#foo(1, 2)` are left
+    /// alone). Must be called with the lock held.
+    private func legacyRewrite(_ raw: String) -> String {
+        let line = raw.trimmingCharacters(in: .whitespaces)
+        // Split into leading identifier `word` and the remainder (after the first whitespace run).
+        guard let m = try? Self.wordRest.wholeMatch(in: line) else { return raw }
+        let word = String(m.1)
+        let rest = m.2.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
+        // Host command words first (stdlib `load` would otherwise shadow the `#load {X}` habit).
+        if word == "reload" { return "reload()" }
+        if word == "load", !rest.isEmpty { return "load_script(\(Self.luaQuote(rest)))" }
+        guard lua.globalIsFunction(word) else { return raw }
+        if rest.isEmpty { return "\(word)()" }
+        // `word rest` — only rewrite if it isn't already a valid Lua expression on its own.
+        if lua.compiles("return (\(line))") { return raw }
+        return "\(word)(\(Self.luaQuote(rest)))"
+    }
+
+    /// `word` = a leading Lua identifier; optional group 2 = the rest of the line after whitespace.
+    private static let wordRest = try! Regex<(Substring, Substring, Substring?)>(
+        #"^([A-Za-z_][A-Za-z0-9_]*)(?:[ \t]+(.*))?$"#)
+
+    /// Quote an arbitrary string as a Lua double-quoted literal (escaping `\`, `"`, and newlines).
+    private static func luaQuote(_ s: String) -> String {
+        var out = "\""
+        for ch in s {
+            switch ch {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            default: out.append(ch)
+            }
+        }
+        return out + "\""
+    }
+
+    /// Strip the `repl:<line>: ` chunk-name prefix Lua prepends to compile/runtime errors, leaving just
+    /// the message.
+    private static func cleanLuaError(_ msg: String) -> String {
+        (try? Regex(#"^repl:\d+:\s*"#)).map { msg.replacing($0, with: "") } ?? msg
     }
 
     // MARK: - Generic primitives (the LLM bridge + a timer)

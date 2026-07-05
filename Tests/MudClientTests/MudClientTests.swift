@@ -349,8 +349,8 @@ private actor RecordedWrites {
 }
 
 @Test func scriptRegisteredCommandsDispatch() throws {
-    // `#` commands are owned by scripts (via the `command` builtin), not hardcoded in the Swift client.
-    // The host forwards `#<word> <rest>` to whatever script claimed <word>.
+    // `#` commands are owned by scripts via the `command` BRIDGE: command("kxwt", h) defines a global
+    // `kxwt`, and the REPL's legacy rewrite turns typed `#kxwt dump 5` into `kxwt("dump 5")`.
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
         URL(fileURLWithPath: "\(file)")
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -361,24 +361,21 @@ private actor RecordedWrites {
     var echoed = [String]()
     engine.onEcho = { echoed.append($0) }
 
-    #expect(engine.dispatchCommand("nope", "") == false)   // nobody claimed it
-    #expect(engine.dispatchCommand("kxwt", "dump") == true) // AlterAeon.lua registered `#kxwt`
-
     // `#kxwt dump N` shows the last N gagged kxwt lines the ring buffer captured.
     _ = engine.processLine("kxwt_mdeath A grey scaled imp")
     _ = engine.processLine("kxwt_prompt 1 2 3 4 5 6")
     echoed.removeAll()
-    _ = engine.dispatchCommand("kxwt", "dump 5")
+    engine.evalREPL("kxwt dump 5")
     let dump = echoed.joined(separator: "\n")
     #expect(dump.contains("kxwt_mdeath A grey scaled imp"))
     #expect(dump.contains("kxwt_prompt 1 2 3 4 5 6"))
 
     // `#kxwt corpse on` toggles the harvest→bsac→sac automation.
     echoed.removeAll()
-    _ = engine.dispatchCommand("kxwt", "corpse on")
+    engine.evalREPL("kxwt corpse on")
     #expect(echoed.contains { $0.lowercased().contains("corpse automation on") })
     echoed.removeAll()
-    _ = engine.dispatchCommand("kxwt", "corpse status")
+    engine.evalREPL("kxwt corpse status")
     #expect(echoed.contains { $0.contains("corpse ON") })
 }
 

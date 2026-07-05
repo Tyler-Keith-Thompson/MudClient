@@ -3,6 +3,129 @@ import Testing
 
 @testable import MudClient
 
+// MARK: - REPL (`#…` input)
+
+@Test func replExpressionAutoPrints() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("1 + 1")               // an expression → its result is pretty-printed
+    #expect(echoed == ["2"])
+}
+
+@Test func replStatementPrintsNothingButTakesEffect() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("repl_x = 41")         // a statement → no auto-print
+    #expect(echoed.isEmpty)
+    engine.evalREPL("repl_x + 1")          // …but it took effect in the live state
+    #expect(echoed == ["42"])
+}
+
+@Test func replVoidCallPrintsNothing() throws {
+    // A side-effecting call returns no values, so the REPL prints nothing (not `nil`).
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.register("noteVoid") { _ in [] }
+    engine.evalREPL("noteVoid()")
+    #expect(echoed.isEmpty)
+}
+
+@Test func replCompileErrorEchoesInRed() throws {
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    engine.evalREPL("1 +")                 // neither a valid expression nor statement
+    #expect(echoed.count == 1)
+    #expect(echoed[0].contains("\u{1B}[31m"))          // red
+    #expect(!echoed[0].contains("repl:"))              // chunk-name noise stripped
+}
+
+@Test func replLegacyWordRestRewritesToCall() throws {
+    // `#word rest` where `word` is a global function and the rest isn't a Lua expression → word("rest").
+    let engine = LuaScriptEngine()
+    var got: [String] = []
+    engine.register("recordArg") { args in
+        if case .string(let s)? = args.first { got.append(s) }
+        return []
+    }
+    // A global function named `eqcmd`; `#eqcmd scan gear` must call it with "scan gear".
+    try engine.load(source: #"function eqcmd(a) recordArg(a) end"#)
+    engine.evalREPL("eqcmd scan gear")
+    #expect(got == ["scan gear"])
+}
+
+@Test func replBareFunctionWordIsCalled() throws {
+    // A bare `#word` naming a global function calls it (preserving `#reload`/`#test`-style habits),
+    // rather than auto-printing the function value.
+    let engine = LuaScriptEngine()
+    var fired = 0
+    engine.register("bumpCounter") { _ in fired += 1; return [] }
+    try engine.load(source: #"function doThing() bumpCounter() end"#)
+    engine.evalREPL("doThing")
+    #expect(fired == 1)
+}
+
+@Test func replRealExpressionCallIsNotRewritten() throws {
+    // `#word(args)` is already valid Lua and must be left alone (not treated as legacy `word("(args)")`).
+    let engine = LuaScriptEngine()
+    var got: [String] = []
+    engine.register("recordArg") { args in
+        if case .string(let s)? = args.first { got.append(s) }
+        return []
+    }
+    try engine.load(source: #"function callme(a) recordArg(a) end"#)
+    engine.evalREPL(#"callme("direct")"#)
+    #expect(got == ["direct"])                         // not "(\"direct\")"
+}
+
+@Test func replLoadBracedFormRewritesToLoadScript() throws {
+    // `#load {Name}` must rewrite to load_script("{Name}") even though stdlib `load` is a function.
+    let engine = LuaScriptEngine()
+    var loaded: [String] = []
+    // Shadow the load_script builtin with a recorder for this test.
+    engine.register("load_script") { args in
+        if case .string(let s)? = args.first { loaded.append(s) }
+        return []
+    }
+    engine.evalREPL("load {HUD}")
+    #expect(loaded == ["{HUD}"])
+}
+
+@Test func replBareReloadCallsReload() throws {
+    let engine = LuaScriptEngine()
+    var reloaded = 0
+    engine.register("reload") { _ in reloaded += 1; return [] }
+    engine.evalREPL("reload")
+    #expect(reloaded == 1)
+}
+
+@Test func replEmptyInputShowsHelp() throws {
+    // An empty `#` means help(); observe by shadowing the bootstrap's help with a recorder.
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: #"function help(x) echo("HELP:" .. tostring(x)) end"#)
+    engine.evalREPL("   ")                 // whitespace-only → help()
+    #expect(echoed == ["HELP:nil"])
+}
+
+@Test func replCommandBridgeDefinesGlobalAndLegacyCallWorks() throws {
+    // The `command` bridge (bootstrap Lua) defines a real global; the legacy `#name rest` shape then
+    // routes through the REPL rewrite to that global.
+    let engine = LuaScriptEngine()
+    var got: [String] = []
+    engine.register("recordArg") { args in
+        if case .string(let s)? = args.first { got.append(s) }
+        return []
+    }
+    try engine.load(source: #"command("kx", function(rest) recordArg(rest) end)"#)
+    engine.evalREPL("kx dump 5")
+    #expect(got == ["dump 5"])
+}
+
 @Test func luaTriggerCallsBackIntoHost() throws {
     let engine = LuaScriptEngine()
     var sent: [String] = []

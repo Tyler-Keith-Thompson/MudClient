@@ -38,13 +38,19 @@ function after(_delay, cb) _timer_id = _timer_id + 1; _timers[_timer_id] = { cb 
 function every(_delay, cb) _timer_id = _timer_id + 1; _timers[_timer_id] = { cb = cb, repeating = true }; return _timer_id end
 function cancel(id) if id ~= nil then _timers[id] = nil end end
 
-local commands = {}
-function command(name, fn) commands[name] = fn end                 -- capture (unused; we call directly)
-
 -- Tables the Swift side normally assembles from the registered functions.
 panel = { render = panel_render, top = panel_top,
           height = function() return 0 end, top_height = function() return 0 end }
 music = { play = noop, stop = noop, volume = noop }
+
+-- Load the SAME host bootstrap the engine loads (doc/help registry, the __repl_* pretty-printer, and
+-- the legacy command() bridge), so the doc/help and command-bridge specs exercise the real code. Must
+-- run after the builtin stubs and the panel/music tables above, and before the game scripts (so their
+-- command(...) calls hit the bridge).
+do
+  local ok, err = pcall(dofile, "Scripts/bootstrap.lua")
+  if not ok then io.stderr:write("BOOTSTRAP LOAD ERROR: " .. tostring(err) .. "\n"); os.exit(1) end
+end
 
 -- Load the real scripts in the same order the client does, so their globals (state, on_update,
 -- run_test_suite, _HUD_TEST, _AIP_TEST, …) are all present.
