@@ -96,7 +96,7 @@ local function vital_cells()
   }
 end
 
--- Active spells (buffs) — what's currently up on you.
+-- Active spells (buffs) — what's currently up on you. Membership is the point; no timing is tracked.
 local function spells_row()
   local spans = {}
   -- Can't-cast warning first (kxwt_action >= 50 blocks spellcasting — butchering, turning, etc.).
@@ -116,6 +116,47 @@ local function spells_row()
     end
   end
   return { spans = spans }
+end
+
+-- Inferred bars for the OTHER mobs you're fighting (the current target has its own EXACT bar on the
+-- stats line). The protocol only reports one target, so these healths are ESTIMATED from AlterAeon's
+-- condition ladder (see AlterAeon.lua) — rendered dim, with a hollow ▓ fill and the condition WORD, so
+-- they read plainly as guesses rather than exact readings. A tilde marks the estimate.
+local OPP_CAP = 4
+local COND_WORD = { [3] = "near death", [8] = "mortally wounded", [15] = "awful", [28] = "pretty hurt",
+                    [42] = "nasty wounds", [55] = "many wounds", [68] = "small wounds",
+                    [82] = "scratches", [95] = "healthy" }
+-- A dim, hollow gauge to visually separate an ESTIMATE from the solid exact vital/target bars.
+local function est_gauge(p100, width)
+  local w = width or 8
+  local full = math.floor(math.max(0, math.min(1, (p100 or 0) / 100)) * w + 0.5)
+  return {
+    { text = string.rep("▓", full), fg = "brightblack", dim = true },
+    { text = string.rep("░", math.max(0, w - full)), fg = "brightblack", dim = true },
+  }
+end
+
+-- One row per other opponent (capped; a "+N more" tail on overflow). `list` is active_opponents()'s
+-- output: { {name, pct, est}, ... }, already newest-first.
+local function opponent_bars(list, cap)
+  cap = cap or OPP_CAP
+  local rows, n = {}, #list
+  local shown = math.min(n, cap)
+  for i = 1, shown do
+    local o = list[i]
+    local word = COND_WORD[o.pct] or (tostring(o.pct) .. "%")
+    rows[#rows + 1] = { spans = cat(
+      { { text = "⚔ ", fg = "brightblack", dim = true },
+        { text = (o.name or "?") .. " ", fg = "brightred", dim = true } },
+      est_gauge(o.pct, 8),
+      { { text = "  ~" .. word, fg = "brightblack", dim = true } }
+    ) }
+  end
+  if n > cap then
+    rows[#rows + 1] = { spans = { { text = string.format("  +%d more engaged", n - cap),
+                                    fg = "brightblack", dim = true } } }
+  end
+  return rows
 end
 
 -- Exits compass rose (three lines) + the room name — kept at the BOTTOM, next to where you act, so
@@ -152,6 +193,10 @@ local function update_bottom()
   stats[#stats + 1] = fighting and target_cell() or compass(1)   -- 4th slot: target, or rose row 1
   local rows = { { cols = stats } }
   if fighting then
+    -- Inferred bars for any OTHER mobs you're engaged with, between the target line and your buffs.
+    if active_opponents then
+      for _, r in ipairs(opponent_bars(active_opponents(os.time()))) do rows[#rows + 1] = r end
+    end
     rows[#rows + 1] = spells_row()
     rows[#rows + 1] = room_name_cell()
   else
@@ -206,28 +251,42 @@ local function env_spans()
 end
 
 -- Given the live exp POOL and the per-class costs scraped from the `level` table, return the cheapest
--- class to level next and how much more experience it needs (need <= 0 means you can level it now), or
--- nil when we have no class data yet. The game itself advises levelling your cheapest class.
+-- class(es) to level next and how much more experience it needs (need <= 0 means you can level it now),
+-- or nil when we have no class data yet. The game itself advises levelling your cheapest class.
+-- When SEVERAL classes tie for the minimum cost, ALL of them are returned in `names`, sorted by name so
+-- the pick is deterministic across repaints — pairs() order is unstable, and without the sort a tie
+-- would flap between class names between paints. `name`/`level` mirror names[1] for the single case.
 local function next_level(exp, classes)
-  local best
-  for name, c in pairs(classes or {}) do
-    if c.cost and (not best or c.cost < best.cost) then best = { name = name, level = c.level, cost = c.cost } end
+  local min_cost
+  for _, c in pairs(classes or {}) do
+    if c.cost and (not min_cost or c.cost < min_cost) then min_cost = c.cost end
   end
-  if not best then return nil end
-  return { name = best.name, level = best.level, need = best.cost - (exp or 0) }
+  if not min_cost then return nil end
+  local names, level_of = {}, {}
+  for name, c in pairs(classes or {}) do
+    if c.cost == min_cost then names[#names + 1] = name; level_of[name] = c.level end
+  end
+  table.sort(names)
+  return { names = names, name = names[1], level = level_of[names[1]],
+           cost = min_cost, need = min_cost - (exp or 0) }
 end
 
 local function exp_spans()
   if not state.exp then return {} end
   local b = { { text = "exp ", dim = true }, { text = tostring(state.exp), fg = "brightmagenta" } }
   -- Experience to level the cheapest class (the actually-useful number). Uses live exp + cached costs.
+  -- On a tie for cheapest, name EVERY tied class ("warrior/thief") so the pick reads as deliberate
+  -- rather than an arbitrary winner. The per-class next-level number is only shown for a single class
+  -- (in a tie the levels differ and the point is the shared cost/need, so it's dropped to stay compact).
   local nl = next_level(state.exp, state.classes)
   if nl then
+    local label = table.concat(nl.names, "/")
     if nl.need <= 0 then
-      b[#b + 1] = { text = string.format("  ▲ level %s now", nl.name), fg = "brightgreen", bold = true }
+      b[#b + 1] = { text = "  ▲ level " .. label .. " now", fg = "brightgreen", bold = true }
+    elseif #nl.names == 1 and nl.level then
+      b[#b + 1] = { text = string.format("  ▲ %s %d in %d", label, nl.level + 1, nl.need), fg = "magenta" }
     else
-      b[#b + 1] = { text = string.format("  ▲ %s %s in %d", nl.name, nl.level and (nl.level + 1) or "", nl.need),
-                    fg = "magenta" }
+      b[#b + 1] = { text = string.format("  ▲ %s in %d", label, nl.need), fg = "magenta" }
     end
   end
   -- The per-kill cap, labelled honestly (it's a ceiling on one kill's exp, not progress to a level).
@@ -235,25 +294,15 @@ local function exp_spans()
   return b
 end
 
-local function effects_spans()
-  local names = {}
-  for k in pairs(state.effects or {}) do names[#names + 1] = k end
-  table.sort(names)
-  if #names == 0 then return {} end
-  local b = { { text = "effects: ", dim = true } }
-  for i, n in ipairs(names) do
-    b[#b + 1] = { text = n, fg = "brightcyan" }
-    if i < #names then b[#b + 1] = { text = ", ", dim = true } end
-  end
-  return b
-end
-
--- Reference block: area + position/gold, then time/weather + progress/effects. (Room name and the
--- exits compass live at the bottom now; area name stays up here.)
+-- Reference block: area + position/gold, then time/weather + progress. (Room name and the exits
+-- compass live at the bottom now; area name stays up here.) Active buffs are shown by the single
+-- `spells` widget on the bottom panel (state.spells, kept live by kxwt_spellup/spelldown) — there is
+-- deliberately no separate "effects" widget: state.effects (kxwt_spst) has no expiry signal, so it
+-- accumulates stale entries and would show buffs that already dropped.
 local function reference_rows()
   local sep = { { text = "   " } }
   local area_place = { spans = cat({ { text = state.area or "", dim = true } }, sep, place_spans()) }
-  local env_prog = { spans = cat(env_spans(), sep, exp_spans(), sep, effects_spans()) }
+  local env_prog = { spans = cat(env_spans(), sep, exp_spans()) }
   return { area_place, env_prog }
 end
 
@@ -364,4 +413,5 @@ end
 -- Pure, side-effect-free helpers exposed for the test harness (see Scripts/tests/hud_spec.lua). Not
 -- used by the live client — kept in one place so the split-out of this file stays honest about seams.
 _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next_level,
-              compass = compass, group_member_row = group_member_row, append_col = append_col }
+              exp_spans = exp_spans, compass = compass, group_member_row = group_member_row,
+              append_col = append_col, opponent_bars = opponent_bars }

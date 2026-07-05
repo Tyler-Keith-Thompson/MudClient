@@ -13,6 +13,7 @@ state = state or {
   hp = nil, maxhp = nil, mana = nil, maxmana = nil, stam = nil, maxstam = nil,
   position = nil, room_id = nil, room_name = nil, room_coord = nil, area = nil, terrain = nil,
   fighting = false, fight_name = nil, fight_pct = nil,
+  opponents = {},                      -- inferred multi-opponent tracker (name -> {pct,exact,t})
   walkdir = nil, spells = {}, recover = false,
   inventory = {}, inv_known = false,   -- kxwt does NOT report inventory; we parse it from `inventory` output
   equipment = {}, eq_known = false,    -- nor what's worn/wielded; parsed from `equipment` output
@@ -301,12 +302,203 @@ function volume_command(args)
 end
 
 -- Timed self-effects (spell/skill durations), e.g. "kxwt_spst mana shield, two hours, 20 minutes".
--- We keep the latest reported one keyed by name so a small "effects" widget can show remaining time.
+-- kxwt_spst is sent once per tick per active effect and has NO expiry/down signal, so this table can
+-- only accumulate — a dropped buff is never removed. It is therefore NOT shown by the HUD (the live
+-- `spells` widget, driven by kxwt_spellup/spelldown, is the authoritative "what's up on you" display);
+-- we still capture the duration text here for scripting/AI use, and clear it on reconnect (on_connect).
 state.effects = state.effects or {}
 trigger([[^kxwt_spst (.+)$]], function(_, s)
   local name, rest = s:match("^(.-),%s*(.+)$")
   if name then state.effects[name] = rest else state.effects[s] = "" end
 end)
+
+-- Session-scoped buff state must not survive a reconnect. The Lua globals (state) persist across a
+-- disconnect and across pilot.reload(), so on a fresh connection the previous session's spells and
+-- timed effects would linger until new kxwt lines happen to overwrite them — and neither kxwt_spelldown
+-- nor kxwt_spst carries a "reset" event to clear the stragglers. So wipe them here; the server re-pushes
+-- the current spellups / spst on connect and they repopulate from scratch. (Music is left alone: it is
+-- persistent server-side and isn't necessarily re-pushed on a brief reconnect.)
+function on_connect()
+  state.spells = {}
+  state.effects = {}
+  state.opponents = {}
+end
+
+-- ===== Inferred multi-opponent tracking =========================================================
+-- The kxwt protocol reports exactly ONE health bar — kxwt_fighting, the CURRENT target (or -1 when
+-- combat ends); the raw logs show one line per update, no multi-mob enumeration. To show bars for the
+-- OTHER mobs you're engaged with, we INFER their health from the textual condition ladder AlterAeon
+-- prints after hits ("X is near death!", "X has quite a few wounds.") — see 'help injury injuries damage
+-- descriptions'. These are ESTIMATES (flagged as such in the HUD). state.opponents: name ->
+-- { pct = 0..100, exact = <bool>, t = <os.time last seen> }. The current target also lands here (exact),
+-- so switching targets leaves its last bar behind as an "other".
+state.opponents = state.opponents or {}
+
+-- Condition phrase -> representative % (band midpoint of the 8-rung injury ladder, plus the even-lower
+-- combat "near death"). Substring match, case-insensitive; ordered lowest-first, and longer phrases that
+-- contain a shorter one resolve to their own rung because we return the FIRST hit and the specific
+-- phrases are listed ahead of any bare word that could shadow them.
+local CONDITION_LADDER = {
+  { "near death",                 3 },
+  { "mortally wounded",           8 },
+  { "big nasty wounds",          42 },   -- before any bare "wounds"; distinct band
+  { "quite a few wounds",        55 },
+  { "small wounds and bruises",  68 },
+  { "a few scratches",           82 },
+  { "pretty hurt",               28 },
+  { "awful",                     15 },
+  { "excellent",                 95 },
+}
+-- Estimated health % for a line of game text carrying a condition phrase, or nil if it carries none.
+local function condition_pct(text)
+  local low = (text or ""):lower()
+  for _, e in ipairs(CONDITION_LADDER) do
+    if low:find(e[1], 1, true) then return e[2] end
+  end
+  return nil
+end
+
+-- Parse a condition-report line into (mob-name, estimated-%), or nil. The subject is the noun phrase
+-- before the "is/has/looks" clause; we reject yourself and your own minions ("You…"/"Your…") and reject
+-- over-long or multi-sentence subjects (a stray phrase match inside a longer combat line).
+local function parse_opponent(line)
+  local pct = condition_pct(line)
+  if not pct then return nil end
+  local subj = line:match("^(.-)%s+[Ii]s%s") or line:match("^(.-)%s+[Hh]as%s")
+             or line:match("^(.-)%s+[Ll]ooks?%s")
+  if not subj then return nil end
+  subj = subj:gsub("^%s+", ""):gsub("%s+$", "")
+  if subj == "" or #subj > 40 or subj:find("[%.!%?]") then return nil end
+  local lw = subj:lower()
+  if lw:find("^your?%f[%A]") then return nil end   -- "you"/"your <minion>"
+  return subj, pct
+end
+
+-- Record (or refresh) an opponent's reading. `exact` true only for the kxwt_fighting target.
+local function opponent_note(tbl, name, pct, now, exact)
+  if not name then return end
+  tbl[name] = { pct = pct, exact = exact == true, t = now }
+end
+
+-- Live opponents as an array, sorted most-recently-seen first (name breaks ties deterministically),
+-- excluding `exclude` (the current target, shown by its own exact bar) and dropping entries not seen
+-- within `ttl` seconds. Prunes the expired entries from `tbl` in place.
+local function opponents_active(tbl, now, ttl, exclude)
+  local out = {}
+  for name, o in pairs(tbl or {}) do
+    if now - (o.t or 0) > ttl then
+      tbl[name] = nil
+    elseif name ~= exclude then
+      out[#out + 1] = { name = name, pct = o.pct, est = not o.exact, t = o.t }
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.t ~= b.t then return a.t > b.t end
+    return a.name < b.name
+  end)
+  return out
+end
+
+local OPP_TTL = 30
+-- Public: the HUD's inferred-opponent bars read this. Returns the pruned, sorted "other opponents" list
+-- (excludes the current kxwt_fighting target) as { {name, pct, est}, ... }, newest-first.
+function active_opponents(now)
+  return opponents_active(state.opponents, now or os.time(), OPP_TTL, state.fight_name)
+end
+doc(active_opponents, { name = "active_opponents", sig = "active_opponents([now])", group = "combat",
+  text = "Inferred list of the OTHER mobs you're fighting (not the current kxwt_fighting target), health estimated from the condition ladder. Returns an array of {name, pct, est} newest-first; prunes entries older than 30s." })
+
+-- Is `name` one of your groupmates/minions (so a condition line about them is NOT an enemy)?
+local function is_ally(name)
+  for _, m in ipairs(state.group or {}) do if m.name == name then return true end end
+  return false
+end
+
+-- Feed the tracker. The current target's EXACT reading (kxwt_fighting) and every textual condition line
+-- update the table; combat end / room change / mob death clear or remove entries. The condition trigger
+-- only runs mid-combat, so equipment "in excellent condition" lines can't spawn phantom opponents.
+trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, p, name)
+  opponent_note(state.opponents, name, tonumber(p), os.time(), true)
+end)
+trigger([[^kxwt_fighting -1$]], function() state.opponents = {} end)
+trigger([[(near death|mortally wounded|awful|pretty hurt|nasty wounds|a few wounds|small wounds|few scratches|excellent)]],
+  function(line)
+    if not state.fighting then return end
+    local name, pct = parse_opponent(line)
+    if name and not is_ally(name) then opponent_note(state.opponents, name, pct, os.time(), false) end
+  end)
+trigger([[^kxwt_rvnum ]], function() state.opponents = {} end)   -- room change abandons the engagement
+trigger([[^kxwt_mdeath (.+)$]], function(_, name)               -- a mob died -> drop its bar immediately
+  if state.opponents[name] then state.opponents[name] = nil
+  else                                                          -- kxwt name may differ in case from text
+    local low = name:lower()
+    for k in pairs(state.opponents) do if k:lower() == low then state.opponents[k] = nil end end
+  end
+end)
+
+_AA_TEST.condition_pct = condition_pct
+_AA_TEST.parse_opponent = parse_opponent
+_AA_TEST.opponent_note = opponent_note
+_AA_TEST.opponents_active = opponents_active
+
+-- ===== Authoritative spell membership from the `score`/affects block =============================
+-- kxwt_spellup/spelldown keep state.spells live between sightings, but they only carry names and a
+-- silently-expired spell can linger. The "You are affected by:" block (printed by `score`) lists EVERY
+-- active spell, so whenever we see it we RECONCILE WHOLESALE — replace state.spells, not merge — which
+-- drops the stragglers. MEMBERSHIP ONLY: we extract the spell NAME (and level, which is free in the same
+-- row); the "<duration> remaining" middle is deliberately treated as an opaque blob and NOT parsed or
+-- stored — no timing data is tracked. Values become { level = n }; the widget only needs the keys.
+-- Parse one "Spell '<name>', <anything> remaining, level <n>" row -> { name, level } or nil.
+local function parse_affect_row(line)
+  local name, lvl = (line or ""):match("^Spell '(.-)', .- remaining, level (%d+)")
+  if not name then return nil end
+  return { name = name, level = tonumber(lvl) }
+end
+
+-- Build the wholesale-replacement spell set from a list of parsed affect rows.
+local function affects_to_spells(rows)
+  local fresh = {}
+  for _, e in ipairs(rows or {}) do fresh[e.name] = { level = e.level } end
+  return fresh
+end
+
+local affects_capturing, affects_buf = false, nil
+trigger([[^You are affected by:]], function() affects_capturing = true; affects_buf = {} end)
+trigger([[^Spell '.+', .+ remaining, level \d+]], function(line)
+  if affects_capturing then
+    local r = parse_affect_row(line)
+    if r then affects_buf[#affects_buf + 1] = r end
+  end
+end)
+trigger([[.*]], function(line)
+  if not affects_capturing then return end
+  if line:match("^Spell '") or line:match("^You are affected by") then return end   -- header / rows
+  affects_capturing = false                                                          -- any other line ends it
+  state.spells = affects_to_spells(affects_buf)                                       -- reconcile wholesale
+end)
+
+-- Authoritative per-class LEVELS from the score line "Your levels are:  Ma 12  Cl 6  Th 0 ...". These
+-- refresh state.classes[<full name>].level (levels in the cached cost table go stale after you level),
+-- which the HUD's next-level tie-break cross-checks. Cost is filled separately by the `level` scrape;
+-- a level-only (cost-less) entry is simply ignored by next_level until its cost is known.
+local LVL_ABBR = { Ma = "Mage", Cl = "Cleric", Th = "Thief", Wa = "Warrior", Nc = "Necromancer", Dr = "Druid" }
+local function parse_levels(rest)
+  local out = {}
+  for ab, lv in (rest or ""):gmatch("(%a%a)%s+(%d+)") do
+    if LVL_ABBR[ab] then out[LVL_ABBR[ab]] = tonumber(lv) end
+  end
+  return out
+end
+trigger([[^Your levels are: (.+)$]], function(_, rest)
+  for full, lv in pairs(parse_levels(rest)) do
+    state.classes[full] = state.classes[full] or {}
+    state.classes[full].level = lv
+  end
+end)
+
+_AA_TEST.parse_affect_row = parse_affect_row
+_AA_TEST.affects_to_spells = affects_to_spells
+_AA_TEST.parse_levels = parse_levels
 
 -- Inventory tracking. kxwt never reports what you carry, so parse the `inventory` output: capture the
 -- lines between "You are carrying:" and the next prompt/section. Until that first capture, inventory

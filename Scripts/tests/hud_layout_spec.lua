@@ -99,6 +99,65 @@ test("in-combat bottom panel: target rides the stats line; spells + room name go
   expect(compass_rows >= 3):truthy()
 end)
 
+-- Collect every text fragment painted into a panel spec (rows -> cols/spans -> text).
+local function all_text(rows)
+  local out = {}
+  local function walk(node)
+    if type(node) ~= "table" then return end
+    if node.text then out[#out + 1] = node.text end
+    for _, key in ipairs({ "cols", "spans" }) do
+      if node[key] then for _, c in ipairs(node[key]) do walk(c) end end
+    end
+    if node[1] then for _, c in ipairs(node) do walk(c) end end
+  end
+  for _, r in ipairs(rows) do walk(r) end
+  return table.concat(out, "\1")
+end
+
+test("buffs are shown by exactly ONE widget: the bottom 'spells' row, never a separate 'effects' one", function()
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = false
+  st.spells = { ["mana shield"] = true }        -- live buff (kxwt_spellup)
+  st.effects = { blur = "one hour" }            -- stale kxwt_spst data must NOT surface anywhere
+  local top, bottom = paint(st)
+  -- Present: the single spells widget on the bottom panel.
+  expect(all_text(bottom)):contains("spells:")
+  expect(all_text(bottom)):contains("mana shield")
+  -- Absent: no "effects:" widget on either panel (state.effects is not rendered at all now).
+  expect(all_text(bottom):find("effects:", 1, true)):eq(nil)
+  expect(all_text(top):find("effects:", 1, true)):eq(nil)
+  expect(all_text(top):find("blur", 1, true)):eq(nil)
+end)
+
+test("on_connect wipes session-scoped buff state so a reconnect never shows stale spells/effects", function()
+  local saved = state
+  state = { spells = { fly = true, haste = true }, effects = { blur = "one hour" } }
+  on_connect()
+  expect(next(state.spells)):eq(nil)            -- spells cleared for the fresh connection
+  expect(next(state.effects)):eq(nil)           -- timed effects cleared too
+  state = saved
+end)
+
+test("in-combat bottom panel grows an inferred bar row per OTHER opponent, between target and spells", function()
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = true; st.fight_name = "a goblin"; st.fight_pct = 50
+  -- Two OTHER engaged mobs, seen just now (fresh timestamps so they survive the 30s prune).
+  local now = os.time()
+  st.opponents = {
+    ["a goblin"] = { pct = 50, exact = true,  t = now },   -- current target: excluded (own exact bar)
+    ["a rat"]    = { pct = 3,  exact = false, t = now },
+    ["an orc"]   = { pct = 55, exact = false, t = now },
+  }
+  local _, bottom = paint(st)
+  -- Baseline in-combat block is 3 rows (stats+target, spells, room); +2 inferred opponent rows here.
+  expect(#bottom):eq(5)
+  expect(all_text(bottom)):contains("a rat")
+  expect(all_text(bottom)):contains("an orc")
+  expect(all_text(bottom):find("a goblin", 1, true)):ne(nil)   -- target still shown (on the stats line)
+end)
+
 test("top panel shows the group roster header only once you have 2+ members", function()
   local st = {}
   for k, v in pairs(BASE) do st[k] = v end
