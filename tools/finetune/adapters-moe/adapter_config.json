@@ -3,7 +3,7 @@
     "batch_size": 1,
     "clear_cache_threshold": 0,
     "config": null,
-    "data": "/Users/tylerthompson/workspace/MudClient/tools/finetune/data",
+    "data": "/Users/tylerthompson/workspace/MudClient/tools/finetune/data-combined",
     "fine_tune_type": "lora",
     "grad_accumulation_steps": 1,
     "grad_checkpoint": true,

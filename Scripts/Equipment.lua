@@ -38,6 +38,9 @@ local cfg = {
   model = os.getenv("EQ_MODEL") or "qwen3.6-27b-mlx@8bit",
   look_wait = 1.0,   -- seconds to let a collector's rows arrive before the next step
   shortlist_cap = 8, -- most shop rows we'll pull `list <item>` detail for
+  id_gap = 0.4,      -- pause between auto-identify steps (be polite to the game/server)
+  id_timeout = 4.0,  -- give up on one identify block if no result parses in this long
+  id_combat_retry = 2.0, -- how often to re-check for combat-clear while the id pass is paused
 }
 cfg.dir = cfg.home .. "/Documents/MudClient"
 cfg.cache_file = cfg.dir .. "/equipment_items.lua"
