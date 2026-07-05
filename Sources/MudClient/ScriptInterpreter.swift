@@ -6,7 +6,8 @@
 //
 //  Scripts are interpreted Lua (see Lua.swift / LuaScriptEngine.swift). The old
 //  pipeline — shelling out to `swift build`, copying a .dylib, and dlopen'ing a
-//  `createFactory` symbol — is gone; `#load {Name}` now reads `Scripts/Name.lua`.
+//  `createFactory` symbol — is gone. Scripts are loaded by the Lua `load(path)` loader
+//  (Scripts/bootstrap.lua): `load("Scripts")` loads the directory; `reload()` re-runs it.
 //
 
 import Afluent
@@ -16,45 +17,21 @@ import Foundation
 final class ScriptInterpreter {
     let engine = LuaScriptEngine()
 
-    /// Scripts loaded via `#load {Name}`, in load order (deduped). `reload()` re-runs exactly this
-    /// set, so any newly `#load`ed script is automatically picked up by future hot-reloads — there is
-    /// no hardcoded script list to keep in sync. Mutated and read only on the input-processing task.
-    private(set) var loadedScripts: [String] = []
-
     init() {
         engine.onSend = { message in try? Container.inputService().send(verbatim: message) }
         engine.onEcho = { message in Container.terminalService().print(message) }
         // All game-specific behavior (KXWT parsing, state, recovery, the AI pilot) now lives in
-        // the Lua scripts (Scripts/AlterAeon.lua + Scripts/AIPilot.lua), not the Swift client.
+        // the Lua scripts (Scripts/*.lua), not the Swift client. There is no hardcoded script list
+        // here anymore: `loadScripts()` just runs the Lua `load("Scripts")` loader, which loads the
+        // Scripts/ directory (see bootstrap.lua). `reload()` is likewise `load("Scripts")` again.
     }
 
-    /// Load (or re-load) a script by bare name and remember it so `reload()` includes it. The single
-    /// entry point for `#load {Name}` and startup — keeping the tracked set and the on-disk load in
-    /// one place.
-    func loadScript(named scriptName: String) {
-        let path = "Scripts/\(scriptName).lua"
-        do {
-            try engine.load(path: path)
-            if !loadedScripts.contains(scriptName) { loadedScripts.append(scriptName) }
-            Container.terminalService().print("Loaded script \(path)")
-        } catch {
-            Container.terminalService().print("Failed to load script \(path): \(error)")
-        }
-    }
-
-    /// Re-run the game scripts live, clearing existing rules first so triggers/aliases aren't
-    /// duplicated. This is how `#ai reload` applies edits without a relaunch.
-    func reload() {
-        engine.clearRules()
-        for name in loadedScripts {
-            let path = "Scripts/\(name).lua"
-            do {
-                try engine.load(path: path)
-                Container.terminalService().print("[ai] reloaded \(path)")
-            } catch {
-                Container.terminalService().print("[ai] failed to reload \(path): \(error)")
-            }
-        }
+    /// Load the whole Scripts/ directory via the Lua loader — the single entry point for startup.
+    /// Resolving/ordering/exclusions all live in the pure-Lua `load` function (Scripts/bootstrap.lua);
+    /// the connection is opened by AlterAeon.lua's own top-level `connect()` during this load, not here.
+    func loadScripts() {
+        do { try engine.load(source: #"load("Scripts")"#) }
+        catch { Container.terminalService().print("Failed to load Scripts/: \(error)") }
     }
 }
 

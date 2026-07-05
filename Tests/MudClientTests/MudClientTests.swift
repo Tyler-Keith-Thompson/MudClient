@@ -154,6 +154,7 @@ private actor RecordedWrites {
     let engine = LuaScriptEngine()
     let scriptDir = URL(fileURLWithPath: "\(#filePath)")
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try? engine.load(path: scriptDir.appendingPathComponent("Scripts/AlterAeon.lua").path)
     let display = terminal.components(separatedBy: "\n")
         .compactMap { engine.processLine($0) }.joined(separator: "\n")
@@ -182,6 +183,7 @@ private actor RecordedWrites {
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent(rel).path
     }
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag + music trigger
 
     var text = ""
@@ -307,6 +309,7 @@ private actor RecordedWrites {
 
     let interp = Container.scriptInterpreter()
     interp.engine.clearRules()
+    try? interp.engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try interp.engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
 
@@ -357,6 +360,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
     var echoed = [String]()
     engine.onEcho = { echoed.append($0) }
@@ -408,6 +412,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // throws on syntax/runtime error
     try engine.load(path: repoFile("Scripts/AIPilot.lua"))
 }
@@ -422,6 +427,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
     try engine.load(path: repoFile("Scripts/AIPilot.lua"))
 
@@ -463,6 +469,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
     try engine.load(path: repoFile("Scripts/AIPilot.lua"))
 
@@ -532,6 +539,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let lines = text.components(separatedBy: "\n")
     let gagged = lines.map { engine.processLine($0) == nil }

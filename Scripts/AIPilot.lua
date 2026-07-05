@@ -2221,7 +2221,7 @@ for verb, info in pairs(PILOT_CMDS) do
 end
 function pilot.reload() return reload() end
 doc(pilot.reload, { name = "pilot.reload", sig = "pilot.reload()", group = "pilot",
-  text = "Hot-reload every loaded script (same as the reload() builtin / legacy `#ai reload`)." })
+  text = "Hot-reload the Scripts/ directory (same as reload() / legacy `#ai reload`)." })
 setmetatable(pilot, { __call = function(_, args) return ai(args) end })
 
 -- `ai` stays as a thin, deprecated wrapper (bootstrap defines it; here we just re-document it) so the

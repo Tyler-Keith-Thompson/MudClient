@@ -24,8 +24,15 @@ for _, n in ipairs({
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
   "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send",
-  "load_script", "reload", "log_start", "log_stop", "log_active", "replay",
+  "log_start", "log_stop", "log_active", "replay",
 }) do stub(n) end
+-- Script-loader primitives the pure-Lua `load`/`reload` (bootstrap.lua) stand on. `__`-prefixed, so
+-- doc-exempt; scripts don't call them at load time, so these defaults just keep load()/reload()
+-- callable in the harness (load_spec overrides them to drive the loader against a fake filesystem).
+stub("__path_kind", function() return "missing" end)
+stub("__list_dir", function() return {} end)
+stub("__run_file", function() return true end)
+stub("__clear_rules")
 stub("__term_cols", function() return 80 end)   -- internal (__-prefixed): help() packs to this width
 stub("ai_rag_count", function() return 0 end)
 stub("ai_usage", function() return 0, 0, 0, 0 end)

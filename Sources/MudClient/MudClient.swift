@@ -31,16 +31,12 @@ struct Connect: ParsableCommand {
 
         Container.terminalService().setup()
 
-        for script in ["AlterAeon", "AIPilot", "HUD", "Trivia", "Equipment"] {
-            Container.scriptInterpreter().loadScript(named: script)
-        }
-        
-        // The connection lifecycle now lives in ConnectionManager, which owns the current connection,
-        // pumps its output to the terminal/HUD, and can be re-driven at runtime (by the Lua
-        // connect/disconnect builtins). The default startup connection is unchanged.
-//        Container.connectionManager().connect(host: "godwars2.org", port: 3000)
-        Container.connectionManager().connect(host: "alteraeon.com", port: 3002)
-//        Container.connectionManager().connect(host: "localhost", port: 3000)
+        // Load the Scripts/ directory. This runs each script's top-level code, which is what wires
+        // the client up: AlterAeon.lua opens the connection itself (a guarded top-level `connect()`),
+        // so there is no hardcoded host/port here. The connection lifecycle lives in ConnectionManager
+        // (driven by the Lua connect/disconnect builtins); `reload()` re-runs this same loader.
+        Container.scriptInterpreter().loadScripts()
+
         Task {
             let stream = Container.inputService().commandStream.processScriptInput()
             for try await command in stream {

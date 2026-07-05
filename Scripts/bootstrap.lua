@@ -549,12 +549,103 @@ doc("ai_mem_usage", { sig = "ai_mem_usage() -> (in, out, cache_read, cache_write
   text = "Memory-head token counts, for cost reporting." })
 doc("ai_usage_reset", { sig = "ai_usage_reset()", group = "ai", text = "Reset the decision-brain and memory-head token counters." })
 
+--------------------------------------------------------------------------------
+-- Script loader — `load(path)` (shadows Lua's stdlib `load`; that stays at `loadchunk`)
+--------------------------------------------------------------------------------
+-- `load(path)` resolves `path` relative to the CWD the client launched from (the repo root):
+--   * a file loads that file; the `.lua` extension is assumed when absent
+--     (`load("AlterAeon")` == `load("AlterAeon.lua")`);
+--   * a directory loads its top-level `*.lua` scripts (`load("Scripts")`), non-recursively.
+-- Because top-level script code runs on load, this is also how the app boots (the host runs
+-- `load("Scripts")` at startup) and hot-reloads (`reload()` == clear rules + `load("Scripts")`).
+--
+-- NAME COLLISION: this shadows the Lua stdlib `load` (compile a chunk from a string/function). The
+-- rule is simple and loud: a STRING argument is always a PATH; a non-string (a function, the classic
+-- `load(fn)` chunk-reader form) delegates to the stdlib, still reachable as `loadchunk`. Code that
+-- means "compile this Lua source string" must call `loadchunk("...")`, not `load`.
+loadchunk = loadchunk or load                 -- preserve the stdlib chunk-compiler before we shadow it
+
+-- Directory-loading policy (kept as pure, testable helpers; see Scripts/tests/load_spec.lua):
+-- files the directory loader never runs — host-owned / harness-only, plus manifest metadata.
+local LOAD_EXCLUDE = { ["bootstrap.lua"] = true, ["testing.lua"] = true, ["manifest.lua"] = true }
+
+-- From a directory's file list, keep the game scripts to load: only `*.lua`, never an excluded file,
+-- never a `_`-prefixed file (private/scratch). Order of the input is preserved.
+local function load_filter(names)
+  local out = {}
+  for _, n in ipairs(names) do
+    if n:sub(1, 1) ~= "_" and n:match("%.lua$") and not LOAD_EXCLUDE[n] then out[#out + 1] = n end
+  end
+  return out
+end
+
+-- Deterministic load order. A `manifest` (array of base names, extension optional) pins the leading
+-- order — scripts it lists load first, in that order — because top-level ordering matters (AlterAeon
+-- defines the shared `state`/kxwt triggers the others build on, and registration order is firing
+-- order). Anything the manifest omits follows in case-insensitive alphabetical order; with no manifest
+-- the whole set is alphabetical. Sorts and returns `names` in place.
+local function load_order(names, manifest)
+  local rank = {}
+  if manifest then
+    for i, base in ipairs(manifest) do rank[base] = i; rank[base .. ".lua"] = i end
+  end
+  local BIG = math.huge
+  table.sort(names, function(a, b)
+    local ra, rb = rank[a] or BIG, rank[b] or BIG
+    if ra ~= rb then return ra < rb end
+    return a:lower() < b:lower()
+  end)
+  return names
+end
+
+-- Read an optional ordering manifest (`<dir>/manifest.lua` returning an array of base names). IO, so
+-- it isn't unit-tested; the ordering logic it feeds (load_order) is.
+local function read_manifest(dir)
+  local path = dir .. "/manifest.lua"
+  if __path_kind(path) ~= "file" then return nil end
+  local ok, chunk = pcall(loadfile, path)
+  if ok and chunk then
+    local ok2, list = pcall(chunk)
+    if ok2 and type(list) == "table" then return list end
+  end
+  return nil
+end
+
+function load(arg)
+  if type(arg) ~= "string" then return loadchunk(arg) end   -- non-string → stdlib chunk-reader
+  local path, kind = arg, __path_kind(arg)
+  if kind == "missing" and not path:match("%.lua$") then      -- assume the .lua extension
+    local withext = path .. ".lua"
+    if __path_kind(withext) == "file" then path, kind = withext, "file" end
+  end
+  if kind == "dir" then
+    local names = load_order(load_filter(__list_dir(path)), read_manifest(path))
+    for _, n in ipairs(names) do __run_file(path .. "/" .. n) end
+  elseif kind == "file" then
+    __run_file(path)
+  else
+    error("load: no such script or directory: " .. tostring(arg), 2)
+  end
+end
+
+-- reload() — hot-reload: drop all rules/timers, then re-run the Scripts/ directory. (No longer a host
+-- builtin; it's this Lua wrapper over __clear_rules + load.) `#reload` / `#ai reload` route here.
+function reload()
+  __clear_rules()
+  load("Scripts")
+end
+
+-- Test seam for the pure loader logic (extension/exclusion/ordering); see Scripts/tests/load_spec.lua.
+_LOAD_TEST = { filter = load_filter, order = load_order }
+
 -- scripts / documentation
-doc("load_script", { sig = "load_script(name)", group = "scripts",
-  text = "Load (or hot-reload) Scripts/<name>.lua and remember it so reload() re-runs it. Also handles the braced `{Name}` form. `#load {Name}` rewrites to this.",
-  example = "load_script(\"HUD\")" })
+doc("load", { sig = "load(path)", group = "scripts",
+  text = "Load a Lua script or directory, resolved relative to the launch CWD. A file loads that file (the `.lua` extension is assumed if absent); a directory loads its top-level *.lua scripts. Shadows stdlib load — a non-string arg delegates to `loadchunk`. `#load {Name}` rewrites to `load(\"Scripts/Name\")`.",
+  example = "load(\"Scripts\")   load(\"AlterAeon\")" })
+doc("loadchunk", { sig = "loadchunk(chunk[, ...])", group = "scripts",
+  text = "Lua's stdlib `load` (compile a chunk from a string or reader function), preserved here because `load` is shadowed by the script loader." })
 doc("reload", { sig = "reload()", group = "scripts",
-  text = "Re-run every loaded script live (clears triggers/aliases/timers first). `#reload` rewrites to this." })
+  text = "Hot-reload: clear all triggers/aliases/timers, then re-run `load(\"Scripts\")`. `#reload` and `#ai reload` route here." })
 doc("command", { sig = "command(name, handler)", group = "scripts",
   text = "Legacy bridge: define a global function <name> (sanitized) that forwards one string argument to handler. Prefer defining and doc()ing a real function." })
 doc("help", { sig = "help([target])", group = "help",

@@ -72,10 +72,22 @@ just test-lua                   # via Bazel (fast, cached)
 Adding a spec is just dropping a `Scripts/tests/foo_spec.lua` — the Bazel filegroup globs it. Trigger
 *regexes* run in Swift's engine (not testable from Lua); test the pure helpers they call instead.
 
+## Script loading (self-bootstrapping)
+
+`load(path)` (Lua, in `bootstrap.lua`, shadows stdlib `load` — that stays at `loadchunk`) resolves
+relative to the launch CWD: a file loads that file (`.lua` assumed if absent, so `load("AlterAeon")` ≡
+`load("AlterAeon.lua")`); a directory loads its top-level `*.lua`, non-recursively, excluding
+`bootstrap.lua`/`testing.lua`/`manifest.lua`/`_`-prefixed files/subdirs, ordered by `Scripts/manifest.lua`
+(then alphabetical). `reload()` = clear all rules/timers + `load("Scripts")`. Scripts are self-bootstrapping:
+top-level code runs on load, so **`AlterAeon.lua` opens the connection itself** (a guarded top-level
+`connect("alteraeon.com", 3002)` — the host no longer hardcodes it). The host just runs `load("Scripts")`
+at launch. `#load {Name}` / `#load Name` still work (rewrite to `load("Scripts/Name")`).
+
 ## Build / run
 
 - `just build` / `just run` — Bazel build of `//Sources/MudClient` (runs from repo root; the app shells
-  out to `swift build` for Scripts' SwiftPM packages, so CWD matters).
+  out to `swift build` for Scripts' SwiftPM packages, so CWD matters — and `load("Scripts")` resolves
+  against that same CWD).
 - `just test` — `bazel test //...` (Swift + Lua suites). `just generate` — Xcode project.
 - Note: plain `swift build` (SwiftPM CLI) currently fails on strict-concurrency errors in
   `LLMClient.swift`/`RAGRetriever.swift`; build via **Bazel or Xcode**, not the SwiftPM CLI.

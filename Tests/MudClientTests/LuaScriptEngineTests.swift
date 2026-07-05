@@ -84,17 +84,54 @@ import AppKit
     #expect(got == ["direct"])                         // not "(\"direct\")"
 }
 
-@Test func replLoadBracedFormRewritesToLoadScript() throws {
-    // `#load {Name}` must rewrite to load_script("{Name}") even though stdlib `load` is a function.
+@Test func replLoadBracedFormRewritesToScriptsPath() throws {
+    // The legacy `#load {Name}` / `#load Name` habit resolves a single game script under Scripts/,
+    // rewriting to `load("Scripts/Name")` — even though `load {HUD}` itself parses as valid Lua.
+    // A parenthesised `#load("Scripts")` is left as real Lua (the directory loader), not rewritten.
     let engine = LuaScriptEngine()
     var loaded: [String] = []
-    // Shadow the load_script builtin with a recorder for this test.
-    engine.register("load_script") { args in
+    // Shadow the bootstrap `load` loader with a recorder for this test.
+    engine.register("load") { args in
         if case .string(let s)? = args.first { loaded.append(s) }
         return []
     }
     engine.evalREPL("load {HUD}")
-    #expect(loaded == ["{HUD}"])
+    engine.evalREPL("load Equipment")
+    engine.evalREPL(#"load("Scripts")"#)
+    #expect(loaded == ["Scripts/HUD", "Scripts/Equipment", "Scripts"])
+}
+
+@Test func loadDirectoryRunsTopLevelLuaInOrderExcludingSubdirsAndUnderscored() throws {
+    // End-to-end over the REAL host primitives (__list_dir/__path_kind/__run_file) + the pure-Lua
+    // loader: a directory loads its top-level *.lua in alphabetical order (no manifest here), skipping
+    // subdirectories, non-.lua files, and `_`-prefixed files.
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("loadtest-\(UUID().uuidString)")
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+    // Each script appends its tag to a global; alphabetical run order should give "a,b".
+    try #"_order = (_order or "") .. "b""#.write(
+        to: dir.appendingPathComponent("b.lua"), atomically: true, encoding: .utf8)
+    try #"_order = (_order or "") .. "a""#.write(
+        to: dir.appendingPathComponent("a.lua"), atomically: true, encoding: .utf8)
+    try #"_order = (_order or "") .. "X""#.write(
+        to: dir.appendingPathComponent("_priv.lua"), atomically: true, encoding: .utf8)   // _-prefixed
+    try "not lua".write(to: dir.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+    try fm.createDirectory(at: dir.appendingPathComponent("sub"), withIntermediateDirectories: true)
+    try #"_order = (_order or "") .. "S""#.write(
+        to: dir.appendingPathComponent("sub/inner.lua"), atomically: true, encoding: .utf8)  // subdir
+
+    let engine = LuaScriptEngine()
+    var echoed: [String] = []
+    engine.onEcho = { echoed.append($0) }
+    try engine.load(source: "load(\(luaStringLiteral(dir.path)))")
+    engine.evalREPL("echo(_order)")
+    #expect(echoed == ["ab"])   // a.lua then b.lua; _priv.lua, notes.txt, sub/ all skipped
+}
+
+/// Minimal Lua double-quoted literal for a filesystem path (escapes backslashes/quotes).
+private func luaStringLiteral(_ s: String) -> String {
+    "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
 }
 
 @Test func replBareReloadCallsReload() throws {

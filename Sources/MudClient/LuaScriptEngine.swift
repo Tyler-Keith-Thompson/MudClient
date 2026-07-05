@@ -488,25 +488,43 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.aliasRules.removeAll { $0.ruleClass == name }
             return []
         }
-        // load_script(name) — load (or hot-reload) Scripts/<name>.lua and remember it so reload()
-        // re-runs it. Tolerates the legacy braced form (`{Name}`) the REPL rewrites `#load {Name}` to.
-        lua.register("load_script") { [weak self] args in
-            guard case .string(let raw)? = args.first else {
-                self?.usage(#"load_script: expected a script name — e.g. load_script("HUD")"#)
-                return []
+        // ---- Script-loader primitives (the `load`/`reload`/`loadchunk` globals live in bootstrap.lua) ----
+        // The user-facing loader is pure Lua (path resolution, the `.lua` extension rule, directory
+        // ordering/exclusions); these `__`-prefixed builtins are the thin host I/O it stands on. All
+        // paths resolve relative to the process CWD (the app runs from the repo root).
+        //
+        // __path_kind(path) -> "file" | "dir" | "missing".
+        lua.register("__path_kind") { args in
+            guard case .string(let p)? = args.first else { return [.string("missing")] }
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: p, isDirectory: &isDir) else {
+                return [.string("missing")]
             }
-            var name = raw.trimmingCharacters(in: .whitespaces)
-            if name.hasPrefix("{"), name.hasSuffix("}"), name.count >= 2 {
-                name = String(name.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            return [.string(isDir.boolValue ? "dir" : "file")]
+        }
+        // __list_dir(path) -> array of the regular (non-directory) file names directly in `path`.
+        // Subdirectories are omitted, so the directory loader is inherently non-recursive.
+        lua.register("__list_dir") { args in
+            guard case .string(let p)? = args.first,
+                  let entries = try? FileManager.default.contentsOfDirectory(atPath: p) else {
+                return [.table([], [:])]
             }
-            Container.scriptInterpreter().loadScript(named: name)
-            return []
+            let files = entries.filter { name in
+                var isDir: ObjCBool = false
+                _ = FileManager.default.fileExists(atPath: p + "/" + name, isDirectory: &isDir)
+                return !isDir.boolValue
+            }
+            return [.table(files.map(LuaValue.string), [:])]
         }
-        // reload() — re-run every loaded script live (clears rules first). Same as the old `#reload`.
-        lua.register("reload") { _ in
-            Container.scriptInterpreter().reload()
-            return []
+        // __run_file(path) — execute one Lua file in the live state. Errors are echoed (a host call
+        // can't raise a Lua error across the trampoline); returns true on success, false on failure.
+        lua.register("__run_file") { [weak self] args in
+            guard case .string(let path)? = args.first, let self else { return [.bool(false)] }
+            do { try self.load(path: path); return [.bool(true)] }
+            catch { self.onEcho("[load] \(path): \(error)"); return [.bool(false)] }
         }
+        // __clear_rules() — drop every trigger/alias/gag/bind/timer (reload() calls this first).
+        lua.register("__clear_rules") { [weak self] _ in self?.clearRules(); return [] }
         // ---- Connection lifecycle control (host-generic; the default startup connection is unchanged) ----
         // connect(host, port) — open (or re-open) the connection. `port` defaults to 23 if omitted.
         lua.register("connect") { [weak self] args in
@@ -865,20 +883,29 @@ final class LuaScriptEngine: @unchecked Sendable {
     }
 
     /// Rewrite legacy typed-command shapes into Lua calls, or return `raw` unchanged for real Lua.
-    /// `#reload` / `#load X` map to the `reload()` / `load_script("X")` builtins; a bare `#word` naming
-    /// a callable global (function or `__call` table) becomes `word()`; `#word rest` becomes
-    /// `word("rest")` — but only when the whole
-    /// line doesn't already parse as a Lua expression (so `#panel.height(2)` or `#foo(1, 2)` are left
-    /// alone). Must be called with the lock held.
+    /// A bare `#word` naming a callable global (function or `__call` table) becomes `word()`; `#word
+    /// rest` becomes `word("rest")` — but only when the whole line doesn't already parse as a Lua
+    /// expression (so `#panel.height(2)`, `#foo(1, 2)`, or `#load("Scripts")` are left alone). The one
+    /// special case is the old `#load {Name}` / `#load Name` habit: it names a single game script, so it
+    /// maps to `load("Scripts/Name")` (the loader adds the `.lua`), matching the pre-loader behaviour.
+    /// Must be called with the lock held.
     private func legacyRewrite(_ raw: String) -> String {
         let line = raw.trimmingCharacters(in: .whitespaces)
         // Split into leading identifier `word` and the remainder (after the first whitespace run).
         guard let m = try? Self.wordRest.wholeMatch(in: line) else { return raw }
         let word = String(m.1)
         let rest = m.2.map { String($0).trimmingCharacters(in: .whitespaces) } ?? ""
-        // Host command words first (stdlib `load` would otherwise shadow the `#load {X}` habit).
-        if word == "reload" { return "reload()" }
-        if word == "load", !rest.isEmpty { return "load_script(\(Self.luaQuote(rest)))" }
+        // `#load {HUD}` / `#load HUD` — a bare/braced script name resolves under Scripts/, as before.
+        // A parenthesised `#load(...)` is real Lua (the directory loader, `#load("Scripts")`) and is
+        // left untouched — note `load {HUD}` itself compiles as `load({HUD})`, so we can't lean on the
+        // generic "already valid Lua" guard here and must special-case the bare/braced shape first.
+        if word == "load", !rest.isEmpty, !rest.hasPrefix("(") {
+            var name = rest
+            if name.hasPrefix("{"), name.hasSuffix("}"), name.count >= 2 {
+                name = String(name.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+            }
+            return "load(\(Self.luaQuote("Scripts/\(name)")))"
+        }
         guard lua.globalIsCallable(word) else { return raw }
         if rest.isEmpty { return "\(word)()" }
         // `word rest` — only rewrite if it isn't already a valid Lua expression on its own.

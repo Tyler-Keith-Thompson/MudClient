@@ -7,6 +7,11 @@
 --
 -- Trigger patterns are SWIFT regular expressions, so they use [[...]] long strings to pass
 -- backslash classes like \d through untouched.
+--
+-- This script is the game ENTRY POINT: loading it (at startup, via load("Scripts")) opens the
+-- connection. The connect is top-level and guarded by is_connected() so a hot-reload() — which
+-- re-runs this file in the LIVE state — never drops or redials an already-open session.
+if not is_connected() then connect("alteraeon.com", 3002) end
 
 state = state or {
   name = nil, gold = nil, exp = nil, expcap = nil, classes = {},
