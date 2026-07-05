@@ -287,3 +287,295 @@ test("looks_like_container: by keyword and by cached CONTAINER type", function()
   expect(looks_like_container("a leather backpack")):eq(true)
   expect(looks_like_container("a lost lead ring")):eq(false)
 end)
+
+-- ====================================================================================================
+-- Live-wire identify capture + the auto-identify queue.
+--
+-- Every fixture below is VERBATIM from a raw session capture (mud_raw_copy.log, decoded off the wire —
+-- ANSI/IAC stripped, split on \r\n) where the user identified their whole loadout by hand. This is the
+-- exact line stream the trigger pipeline saw, kxwt_ wrappers and all (the earlier human-traces samples
+-- were POST-gag, which hid the wrappers and the "You are wearing" display form and led to the bug).
+-- ====================================================================================================
+
+local feed_id_stream = E.feed_id_stream
+local assign_ordinals = E.assign_ordinals
+local build_id_queue  = E.build_id_queue
+
+-- A WORN item's identify block: keyword name in Item:'…', display name only in "You are wearing …",
+-- which arrives AFTER two blank lines, quality footers, and the kxwt_id_end marker.
+local HOOD_LINES = {
+  "kxwt_id_start",
+  "Item: 'imp scalp horned imp-hide hide hood'  ",
+  'Weight: 2  Size: 1\'0"  Level: 11  Item Quality: WELL CRAFTED',
+  "Type: CLOTHING   Composition: FLESH, SKIN",
+  "Object is:  NECR ",
+  "Wear locations are:  HEAD ",
+  "Item has other effects:",
+  "Affects:  NECR_CAST_LEVEL by 1",
+  "Affects:  MANA_REGEN by 0.5",
+  "",
+  "",
+  "a horned imp-hide hood is WELL CRAFTED in quality.",
+  "A horned imp-hide hood has not much room for improvement.",
+  "kxwt_id_end",
+  "You are wearing a horned imp-hide hood.",
+}
+
+-- A CARRIED item's block, ending "You are carrying a chameleon ring."
+local RING_LINES = {
+  "kxwt_id_start",
+  "Item: 'ring chameleon'  ",
+  'Weight: 1  Size: 0\'1"  Total levels: 25   Item Quality: WELL CRAFTED',
+  "Type: TREASURE   Composition: MINERAL, CRYSTAL",
+  "Object is: ",
+  "Wear locations are:  FINGERS ",
+  "Item has other effects:",
+  "Affects:  HITROLL by 2",
+  "",
+  "",
+  "a chameleon ring is WELL CRAFTED in quality.",
+  "kxwt_id_end",
+  "You are carrying a chameleon ring.",
+}
+
+test("PASSIVE CAPTURE (the bug): a worn-item block caches under the DISPLAY name the listing shows", function()
+  E.reset()
+  feed_id_stream(HOOD_LINES)
+  -- Equipment listing shows "head - a horned imp-hide hood"; parse_eq_line -> "horned imp-hide hood".
+  local r = resolve_item("horned imp-hide hood")
+  expect(r.status):ne("unknown")                          -- BEFORE the fix this was "unknown" -> inert
+  expect(r.status):eq("session")                          -- freshly identified this session
+  expect(r.variant.type):eq("CLOTHING")
+  expect(r.variant.class_flags[1]):eq("NECR")
+  -- NOT keyed under the raw Item: keyword string.
+  expect(resolve_item("imp scalp horned imp-hide hide hood").status):eq("unknown")
+end)
+
+test("PASSIVE CAPTURE: capture runs THROUGH the two blank lines + kxwt_id_end to reach the display line", function()
+  E.reset()
+  feed_id_stream(RING_LINES)
+  local r = resolve_item("chameleon ring")                -- inventory shows "a chameleon ring"
+  expect(r.status):eq("session")
+  expect(r.variant.affects[1].stat):eq("HITROLL")
+end)
+
+test("PASSIVE CAPTURE: interleaved kxwt_ protocol lines inside a block are skipped, not terminators", function()
+  E.reset()
+  local lines = {}
+  for _, l in ipairs(HOOD_LINES) do
+    lines[#lines + 1] = l
+    if l:match("^Affects:  MANA_REGEN") then
+      lines[#lines + 1] = "kxwt_prompt 113 159 187 259 199 199"   -- a prompt tick lands mid-block
+      lines[#lines + 1] = "kxwt_group_start"
+    end
+  end
+  feed_id_stream(lines)
+  expect(resolve_item("horned imp-hide hood").status):eq("session")   -- still fully captured
+end)
+
+test("PASSIVE CAPTURE: 'You are carrying N/M items' is NOT mistaken for a display line", function()
+  E.reset()
+  -- If the inventory summary bled into a block it must not bind as a display name.
+  local v = parse_identify(table.concat({
+    "Item: 'ring chameleon'", "Type: TREASURE   Composition: X",
+    "You are carrying 5/9 items with weight 85/180 pounds.  Encumbrance:  10%",
+  }, "\n"))
+  expect(v.display):eq(nil)                               -- fell back to the keyword name, not the summary
+  expect(v.name):eq("ring chameleon")
+end)
+
+-- ---- ordinal assignment ---------------------------------------------------------------------------
+test("assign_ordinals: duplicate keywords get bare, then 2.kw, 3.kw in listing order", function()
+  local es = assign_ordinals({
+    { name = "a chameleon ring" }, { name = "a small silver ring" }, { name = "an imp eye ring" },
+    { name = "a studded belt" },
+  })
+  expect(es[1].kw):eq("ring")       -- first ring is bare
+  expect(es[2].kw):eq("2.ring")
+  expect(es[3].kw):eq("3.ring")
+  expect(es[4].kw):eq("belt")       -- a lone keyword stays bare
+  expect(es[1].base_kw):eq("ring")
+  expect(es[3].ordinal):eq(3)
+end)
+
+-- ---- build_id_queue -------------------------------------------------------------------------------
+test("build_id_queue: skips session-bound, includes unknown/multi/stale, dedups identical displays", function()
+  E.reset()
+  -- 'a chameleon ring' identified THIS session (trustworthy) -> must be SKIPPED as already-known.
+  feed_id_stream(RING_LINES)
+  -- 'well made leather gloves' cached but NOT session-bound (stale) -> must be INCLUDED.
+  ingest(parse_identify(GLOVES))
+  E.session["well made leather gloves"] = nil
+
+  local worn = { "a chameleon ring", "well made leather gloves" }
+  local inv  = { "a horned imp-hide hood", "a horned imp-hide hood", "a mysterious orb" }  -- dup + unknown
+  local queue, known = build_id_queue(worn, inv, {})
+
+  expect(known):eq(1)                                     -- the chameleon ring
+  local names = {}
+  for _, e in ipairs(queue) do names[e.name] = (names[e.name] or 0) + 1 end
+  expect(names["chameleon ring"]):eq(nil)               -- skipped (session); names are article-stripped
+  expect(names["well made leather gloves"]):eq(1)        -- stale cache -> re-id
+  expect(names["horned imp-hide hood"]):eq(1)            -- duplicate display collapsed to one
+  expect(names["mysterious orb"]):eq(1)                  -- unknown -> included
+end)
+
+test("build_id_queue: ordinals span worn+carried as one scope (identify sees both)", function()
+  E.reset()
+  -- two different rings, one worn one carried: identify's scope is worn+carried, so the carried one is
+  -- the SECOND ring overall and must be targeted as 2.ring, not bare 'ring'.
+  local queue = build_id_queue({ "a small silver ring" }, { "an imp eye ring" }, {})
+  local byname = {}
+  for _, e in ipairs(queue) do byname[e.name] = e.kw end
+  expect(byname["small silver ring"]):eq("ring")
+  expect(byname["imp eye ring"]):eq("2.ring")
+end)
+
+test("build_id_queue: container items carry their container name + within-container ordinal", function()
+  E.reset()
+  local queue = build_id_queue({}, {}, {
+    ["a small sack"] = { "an iridescent black sequined sash", "sleeves of the warmage", "a chameleon ring" },
+  })
+  local byname = {}
+  for _, e in ipairs(queue) do byname[e.name] = e end
+  expect(byname["iridescent black sequined sash"].container):eq("a small sack")
+  expect(byname["iridescent black sequined sash"].kw):eq("sash")
+  expect(byname["chameleon ring"].kw):eq("ring")         -- its own keyword, bare (one ring in this sack)
+end)
+
+-- ---- the phase machine (pacing / get-id-put / failure-skip / summary) ------------------------------
+-- Drive the queue deterministically: capture sends + echoes, record timers, fire the pending one to step.
+local function drive(queue, known)
+  local sent, echoes, timers = {}, {}, {}
+  local o_send, o_after, o_cancel, o_echo, o_incombat = send, after, cancel, echo, in_combat
+  send = function(s) sent[#sent + 1] = s end
+  after = function(_d, cb) timers[#timers + 1] = cb; return #timers end
+  cancel = function(id) if id then timers[id] = false end end
+  echo = function(s) echoes[#echoes + 1] = tostring(s) end
+  local ctx = {
+    sent = sent, echoes = echoes,
+    -- fire whatever timer the queue is currently waiting on (a gap step or combat-retry).
+    tick = function()
+      local q = E.idq_state()
+      if q and q.timer and timers[q.timer] then local cb = timers[q.timer]; timers[q.timer] = false; cb() end
+    end,
+    set_combat = function(f) in_combat = f end,
+    restore = function() send, after, cancel, echo, in_combat = o_send, o_after, o_cancel, o_echo, o_incombat end,
+    summary = function() for _, e in ipairs(echoes) do if e:find("identify pass:", 1, true) then return e end end end,
+  }
+  in_combat = nil
+  E.idq_start(queue, known)
+  return ctx
+end
+
+test("QUEUE: paces inventory identifies one at a time and reports the summary counts", function()
+  E.reset()
+  local queue = {
+    { name = "a steel longsword", kw = "longsword", base_kw = "longsword" },
+    { name = "a lost lead ring",  kw = "ring",      base_kw = "ring" },
+  }
+  local d = drive(queue, 3)
+  expect(d.sent[1]):eq("identify longsword")             -- first identify fired synchronously on start
+  E.idq_advance(true); d.tick()                          -- block parsed -> gap -> next entry
+  expect(d.sent[2]):eq("identify ring")
+  E.idq_advance(true); d.tick()                          -- done
+  expect(E.idq_state()):eq(nil)                          -- queue torn down
+  expect(d.summary()):contains("2 identified, 0 failed, 3 already known")
+  d.restore()
+end)
+
+test("QUEUE: an identify failure is counted and skipped, the pass continues", function()
+  E.reset()
+  local queue = {
+    { name = "a ghost sword", kw = "sword", base_kw = "sword" },
+    { name = "a real ring",   kw = "ring",  base_kw = "ring" },
+  }
+  local d = drive(queue, 0)
+  expect(d.sent[1]):eq("identify sword")
+  E.idq_advance(false); d.tick()                         -- "You don't seem to be carrying…" / timeout
+  expect(d.sent[2]):eq("identify ring")
+  E.idq_advance(true); d.tick()
+  expect(d.summary()):contains("1 identified, 1 failed")
+  d.restore()
+end)
+
+test("QUEUE: a container item is get -> identify -> put, in that order", function()
+  E.reset()
+  local queue = { { name = "an iridescent black sequined sash", kw = "sash", base_kw = "sash",
+                    container = "a small sack" } }
+  local d = drive(queue, 0)
+  expect(d.sent[1]):eq("get sash sack")                  -- pulled out first
+  E.idq_get_result(true)
+  expect(d.sent[2]):eq("identify sash")                  -- identified in inventory
+  E.idq_advance(true)
+  expect(d.sent[3]):eq("put sash sack")                  -- returned to the sack
+  E.idq_put_result(true); d.tick()
+  expect(d.summary()):contains("1 identified, 0 failed")
+  d.restore()
+end)
+
+test("QUEUE: identify FAILING on a container item STILL puts it back (never left out)", function()
+  E.reset()
+  local queue = { { name = "a cursed idol", kw = "idol", base_kw = "idol", container = "a chest" } }
+  local d = drive(queue, 0)
+  expect(d.sent[1]):eq("get idol chest")
+  E.idq_get_result(true)
+  E.idq_advance(false)                                   -- identify failed
+  expect(d.sent[3]):eq("put idol chest")                 -- restored anyway
+  E.idq_put_result(true); d.tick()
+  expect(E.idq_state()):eq(nil)
+  d.restore()
+end)
+
+test("QUEUE: a get failure skips the item WITHOUT any put (nothing was pulled out)", function()
+  E.reset()
+  local queue = { { name = "a wedged gem", kw = "gem", base_kw = "gem", container = "a sack" } }
+  local d = drive(queue, 0)
+  expect(d.sent[1]):eq("get gem sack")
+  E.idq_get_result(false)                                -- "You don't see anything named…" / can't carry
+  d.tick()
+  expect(#d.sent):eq(1)                                  -- no identify, no put
+  expect(d.summary()):contains("0 identified, 1 failed")
+  d.restore()
+end)
+
+test("QUEUE: a PUT-BACK failure is reported LOUDLY with the item left on you", function()
+  E.reset()
+  local queue = { { name = "a heavy anvil", kw = "anvil", base_kw = "anvil", container = "a bag" } }
+  local d = drive(queue, 0)
+  E.idq_get_result(true)                                 -- got it out
+  E.idq_advance(true)                                    -- identified
+  E.idq_put_result(false); d.tick()                      -- put back FAILED
+  local warned
+  for _, e in ipairs(d.echoes) do if e:find("could NOT return", 1, true) then warned = e end end
+  expect(warned):contains("a heavy anvil")
+  d.restore()
+end)
+
+test("QUEUE: combat pause defers the next entry until combat clears", function()
+  E.reset()
+  local queue = {
+    { name = "a sword", kw = "sword", base_kw = "sword" },
+    { name = "a ring",  kw = "ring",  base_kw = "ring" },
+  }
+  local d = drive(queue, 0)
+  expect(d.sent[1]):eq("identify sword")
+  d.set_combat(function() return true end)
+  E.idq_advance(true); d.tick()                          -- gap fires -> next entry sees combat -> pauses
+  expect(#d.sent):eq(1)                                  -- 2nd identify NOT sent yet
+  d.set_combat(nil)
+  d.tick()                                               -- combat-retry timer -> now proceeds
+  expect(d.sent[2]):eq("identify ring")
+  E.idq_advance(true); d.tick()
+  expect(E.idq_state()):eq(nil)
+  d.restore()
+end)
+
+test("QUEUE + binding: finalize binds the parsed block to the possession name the queue asked about", function()
+  E.reset()
+  -- The queue sets id_expect to the possession-list display; a matching block binds under it.
+  E.set_id_expect("horned imp-hide hood")
+  feed_id_stream(HOOD_LINES)
+  expect(resolve_item("horned imp-hide hood").status):eq("session")
+  E.set_id_expect(nil)
+end)

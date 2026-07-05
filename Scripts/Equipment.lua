@@ -52,6 +52,19 @@ _EQUIP.epoch = (_EQUIP.epoch or 0) + 1
 local EPOCH = _EQUIP.epoch
 local S = _EQUIP
 
+-- Reload safety: a hot-reload (`#ai reload`) wipes every trigger/timer, so an in-flight auto-identify
+-- queue is orphaned. Drop it — its pending timers no-op on the EPOCH check — and warn loudly if a
+-- container item was OUT of its container when the reload hit, so the user knows to put it back.
+if S.idq then
+  if S.idq.got and S.idq.cur then
+    echo("[eq] reload interrupted the identify pass — '" .. tostring(S.idq.cur.name)
+      .. "' may still be OUT of its container; check your inventory and put it back.", "red")
+  end
+  S.idq = nil
+end
+S.id_expect = nil
+S.id_cap = nil
+
 -- items[name] = { variants = { [fingerprint] = variant, ... } }   (persistent, name -> LIST of variants)
 -- session[name] = { fp, variant, ts }                             (this-session id while holding the item)
 local items = S.items
@@ -133,8 +146,13 @@ local function parse_identify(block)
       if stat then v.affects[#v.affects + 1] = { stat = trim(stat), by = trim(by) } end
     elseif L:match("^This item is bound") then
       v.bound = true
-    elseif L:match("^You are carrying ") then
+    elseif L:match("^You are carrying ") and not L:match("^You are carrying %d") then
+      -- "You are carrying a chameleon ring." (a display line) — NOT "You are carrying 5/9 items ...".
       v.display = norm_name(L:gsub("^You are carrying ", ""))
+    elseif L:match("^You are wearing ") then
+      -- Worn items report their display name as "You are wearing a horned imp-hide hood." — the live
+      -- wire form the earlier trace mining missed (traces only had carrying/wielding samples).
+      v.display = norm_name(L:gsub("^You are wearing ", ""))
     elseif L:match("^You are wielding ") then
       v.display = norm_name(L:gsub("^You are wielding ", ""))
     elseif L:match("to start using ") then
@@ -528,28 +546,272 @@ local function run_model(sys, user, on_reply)
 end
 
 -- ---- PASSIVE identify capture (always on) --------------------------------------------------------
--- Every identify/list block that scrolls by is folded into the cache, whoever triggered it. We capture
--- from the "Item: '...'" header until a terminator (prompt/blank/typed-echo), then parse+ingest.
+-- Every identify/list block that scrolls by is folded into the cache, whoever triggered it.
+--
+-- LIVE WIRE FORMAT (from a raw session capture — the earlier trace mining was misleading because traces
+-- are POST-gag, so the kxwt_ wrappers are absent there):
+--
+--   kxwt_id_start                                          <- gagged, but triggers still fire on it
+--   Item: 'imp scalp horned imp-hide hide hood'            <- the KEYWORD string (not the display name)
+--   Weight: ...  / Type: ... / Object is: ... / Affects: ...
+--                                                          <- TWO blank lines here
+--   a horned imp-hide hood is WELL CRAFTED in quality.     <- quality footer
+--   A horned imp-hide hood has not much room for improvement.
+--   kxwt_id_end                                            <- gagged; marks the body's end
+--   You are wearing a horned imp-hide hood.                <- the DISPLAY name (worn items say "wearing")
+--
+-- The OLD capture had three fatal bugs against this: (1) it terminated on the FIRST blank line — long
+-- before the display line — so v.display was never set; (2) parse_identify didn't recognise "You are
+-- wearing"; (3) so blocks were cached under the KEYWORD name ("imp scalp horned imp-hide hide hood")
+-- while inventory/equipment listings show the DISPLAY name ("a horned imp-hide hood") — every resolve
+-- missed and everything read "unidentified". We now capture THROUGH the display line, skip interleaved
+-- kxwt_ lines instead of terminating on them, and (for our own queued/#eq id requests) bind the block to
+-- the exact possession-list name we asked about via S.id_expect.
+local idq_advance   -- forward decl: finalize_id notifies the auto-identify queue when a block parses.
 local function finalize_id()
   local cap = S.id_cap
   S.id_cap = nil
   if not cap then return end
   local v = parse_identify(table.concat(cap.lines, "\n"))
-  if v then ingest(v) end
-end
-trigger([[^Item: '(.+)']], function(line)
-  S.id_cap = { lines = { strip_ansi(line) } }
-end)
-trigger([[.*]], function(line)
-  if not S.id_cap then return end
-  local L = strip_ansi(line)
-  if L:match("^<%d+hp") or trim(L) == "" or L:match("^%[the human typed%]") or L:match("^kxwt_") then
-    finalize_id(); return
+  local expect = S.id_expect
+  S.id_expect = nil
+  local matched = true
+  if v then
+    if expect and expect ~= "" then
+      if v.display and v.display ~= "" and v.display ~= expect then
+        matched = false            -- keyword/ordinal collision: we identified a DIFFERENT item than asked
+      else
+        v.name = expect            -- bind to the EXACT possession-list entry the queue/#eq id asked about
+      end
+    end
+    ingest(v)
   end
+  if idq_advance then idq_advance(v ~= nil and matched) end
+end
+local function id_begin() S.id_cap = { lines = {} } end
+local function id_feed(line)
   local cap = S.id_cap
+  if not cap then return end
+  local L = strip_ansi(line)
+  if L:match("^kxwt_id_end") then cap.body_done = true; return end   -- body done; display line follows
+  if L:match("^kxwt_") then return end                               -- interleaved protocol line: skip
+  -- The definitive end AND the display-name binding: "You are (wearing|carrying|wielding) <display>."
+  local disp = L:match("^You are wearing (.+)$") or L:match("^You are wielding (.+)$")
+    or (L:match("^You are carrying (.+)$") and not L:match("^You are carrying %d") and L:match("^You are carrying (.+)$"))
+  if disp then cap.lines[#cap.lines + 1] = L; finalize_id(); return end
+  -- Hard boundaries for the no-display-line case (item on ground / shop `list`, or replay without kxwt).
+  if L:match("^<%d+hp") or L:match("^%[the human typed%]") then finalize_id(); return end
+  if cap.body_done and trim(L) ~= "" then finalize_id(); return end  -- kxwt_id_end passed, no display line
   cap.lines[#cap.lines + 1] = L
-  if #cap.lines > 40 then finalize_id() end   -- safety: never grow unbounded on a missed terminator
-end)
+  if #cap.lines > 60 then finalize_id() end   -- safety: never grow unbounded on a missed terminator
+end
+trigger([[^kxwt_id_start]], function() id_begin() end)
+trigger([[^Item: '(.+)']], function() if not S.id_cap then id_begin() end end)  -- replay/#test have no kxwt_
+trigger([[.*]], function(line) id_feed(line) end)
+
+-- Test helper: faithfully replays the processLine dispatch of the id-capture triggers over a line list.
+local function feed_id_stream(lines)
+  for _, line in ipairs(lines) do
+    if line:match("^kxwt_id_start") then id_begin()
+    elseif line:match("^Item: '") and not S.id_cap then id_begin() end
+    id_feed(line)
+  end
+end
+
+-- ---- auto-identify queue (the heart of `#eq scan`) ----------------------------------------------
+-- Scan collects NAMES; on its own that's inert — resolve_item can't judge an item it's never seen the
+-- stats of. So after collection we walk everything that lacks a trustworthy binding and identify it,
+-- paced one at a time, folding each block into the cache via the passive capture above.
+--
+-- Ground truth for the mechanics below is a raw session where the user did all of this by hand:
+--   * identify is a plain command that works on anything you CARRY or WEAR: `identify <keyword>`.
+--   * a duplicate keyword is disambiguated by an ordinal PREFIX counted in listing order within a
+--     scope: `ring`, `2.ring`, `3.ring`. identify's scope is worn+carried together, so ordinals must be
+--     assigned across the WHOLE person list (skipped/known items still occupy an ordinal slot), or a
+--     `2.ring` targets the wrong ring.
+--   * items INSIDE a container can't be identified in place — the user pulled each out and put it back:
+--       get <kw> <container-kw>   ->  "You get <display> from a small sack."
+--       identify <kw>             ->  the id block
+--       put <kw> <container-kw>   ->  "You put <display> in a small sack."
+--     Failure forms seen: "You don't see anything named 'x' in a small sack." / "You can't carry that
+--     many items." (get); "You don't seem to be carrying anything named 'x'." (identify).
+
+-- Assign the game's `N.keyword` ordinals across an ordered entry list: entries that share a first_kw get
+-- bare kw, then 2.kw, 3.kw ... in list order (how the game counts within a scope). Pure/testable.
+local function assign_ordinals(entries)
+  local counts = {}
+  for _, e in ipairs(entries) do
+    local k = first_kw(e.name)
+    counts[k] = (counts[k] or 0) + 1
+    e.base_kw = k
+    e.ordinal = counts[k]
+    e.kw = (counts[k] == 1) and k or (counts[k] .. "." .. k)
+  end
+  return entries
+end
+
+-- Build the identify work-list from a scan's collected possessions. worn/inv are ordered display-name
+-- lists; containers is { [container-display] = { item-display, ... } }. Skips items already identified
+-- THIS session (they're trustworthy); includes unknown, ambiguous(multi), and cached-but-stale — re-id
+-- to confirm is exactly the point. Dedups identical display names within a scope (identical items have
+-- identical stats — identify once). Returns queue, known_count. Pure/testable.
+local function build_id_queue(worn, inv, containers)
+  local queue, known, seen = {}, 0, {}
+  local function consider(e, container)
+    if not e.name or e.name == "" then return end
+    local dkey = (container or "person") .. "|" .. e.name
+    if seen[dkey] then return end
+    seen[dkey] = true
+    local r = resolve_item(e.name)
+    if r.status == "session" then known = known + 1; return end
+    queue[#queue + 1] = { name = e.name, kw = e.kw, base_kw = e.base_kw, ordinal = e.ordinal,
+                          status = r.status, container = container }
+  end
+  -- identify sees worn + carried as ONE scope, so ordinals span the combined list in listing order.
+  local person = {}
+  for _, n in ipairs(worn or {}) do person[#person + 1] = { name = norm_name(n) } end
+  for _, n in ipairs(inv or {}) do person[#person + 1] = { name = norm_name(n) } end
+  assign_ordinals(person)
+  for _, e in ipairs(person) do consider(e, nil) end
+  -- each container is its own scope for `get N.kw <container>`.
+  for cname, list in pairs(containers or {}) do
+    local cont = {}
+    for _, n in ipairs(list or {}) do cont[#cont + 1] = { name = norm_name(n) } end
+    assign_ordinals(cont)
+    for _, e in ipairs(cont) do consider(e, cname) end
+  end
+  return queue, known
+end
+
+-- Forward decls for the mutually-recursive phase machine.
+local idq_next_entry, idq_do_get, idq_do_identify, idq_do_put, idq_gap_then_next, idq_finish, idq_put_result_fail
+
+local function idq_clear_timer()
+  if S.idq and S.idq.timer and cancel then cancel(S.idq.timer) end
+  if S.idq then S.idq.timer = nil end
+end
+local function idq_arm(fn)
+  idq_clear_timer()
+  if after and S.idq then S.idq.timer = after(cfg.id_timeout, fn) end
+end
+
+idq_gap_then_next = function()
+  local q = S.idq; if not q then return end
+  q.phase = "gap"
+  if after then q.timer = after(cfg.id_gap, function() q.timer = nil; idq_next_entry() end)
+  else idq_next_entry() end
+end
+
+idq_finish = function()
+  local q = S.idq; if not q then return end
+  idq_clear_timer()
+  if class_remove then class_remove("eqid") end
+  S.idq = nil
+  echo(string.format("[eq] identify pass: %d identified, %d failed, %d already known.",
+    q.ident, q.failed, q.known), "cyan")
+  if #q.left_out > 0 then
+    echo("[eq] WARNING — could NOT return to their container, they are ON YOU now: "
+      .. table.concat(q.left_out, ", ") .. " — put them back manually.", "red")
+  end
+  echo("[eq] now try `#eq compare`.", "cyan")
+end
+
+idq_next_entry = function()
+  local q = S.idq; if not q then return end
+  if EPOCH ~= _EQUIP.epoch then return end          -- died on reload
+  if in_combat and in_combat() then                 -- pause (don't advance) until combat clears
+    if not q.paused_msg then echo("[eq] identify pass paused (in combat) — resuming when clear.", "yellow"); q.paused_msg = true end
+    if after then q.timer = after(cfg.id_combat_retry, function() q.timer = nil; idq_next_entry() end) end
+    return
+  end
+  q.paused_msg = nil
+  q.i = q.i + 1
+  if q.i > #q.list then idq_finish(); return end
+  q.cur = q.list[q.i]; q.got = false
+  echo(string.format("[eq] identifying %d/%d: %s%s", q.i, #q.list, q.cur.name,
+    q.cur.container and (" (from " .. q.cur.container .. ")") or ""), "cyan")
+  if q.cur.container then idq_do_get() else idq_do_identify() end
+end
+
+idq_do_get = function()
+  local q = S.idq; local e = q.cur
+  q.phase = "get"
+  send(string.format("get %s %s", e.kw, first_kw(e.container)))
+  idq_arm(function() q.timer = nil; if S.idq and S.idq.phase == "get" then S.idq.failed = S.idq.failed + 1; idq_gap_then_next() end end)
+end
+
+-- get result signal (from triggers). ok=true => item is now in inventory and MUST be put back.
+local function idq_get_result(ok)
+  local q = S.idq; if not q or q.phase ~= "get" then return end
+  idq_clear_timer()
+  if not ok then q.failed = q.failed + 1; idq_gap_then_next(); return end
+  q.got = true
+  idq_do_identify()
+end
+
+idq_do_identify = function()
+  local q = S.idq; local e = q.cur
+  q.phase = "id"
+  S.id_expect = e.name
+  -- A just-gotten container item is now in inventory; use its bare keyword and let finalize_id verify the
+  -- parsed display against S.id_expect (guards against another same-keyword item already in inventory).
+  send("identify " .. (e.container and e.base_kw or e.kw))
+  idq_arm(function() q.timer = nil; if idq_advance then idq_advance(false) end end)
+end
+
+-- identify result (from finalize_id on a parsed block, or the failure trigger / timeout). Assigned to the
+-- forward-declared upvalue so finalize_id (defined earlier) can see it.
+idq_advance = function(ok)
+  local q = S.idq; if not q or q.phase ~= "id" then return end
+  idq_clear_timer()
+  S.id_expect = nil
+  if ok then q.ident = q.ident + 1 else q.failed = q.failed + 1 end
+  if q.got then idq_do_put() else idq_gap_then_next() end
+end
+
+idq_do_put = function()
+  local q = S.idq; local e = q.cur
+  q.phase = "put"
+  send(string.format("put %s %s", e.base_kw, first_kw(e.container)))
+  idq_arm(function() q.timer = nil; if S.idq and S.idq.phase == "put" then idq_put_result_fail() end end)
+end
+-- put result signals.
+idq_put_result_fail = function()
+  local q = S.idq; if not q or q.phase ~= "put" then return end
+  idq_clear_timer(); q.got = false
+  q.left_out[#q.left_out + 1] = q.cur.name
+  idq_gap_then_next()
+end
+local function idq_put_result(ok)
+  local q = S.idq; if not q or q.phase ~= "put" then return end
+  if not ok then idq_put_result_fail(); return end
+  idq_clear_timer(); q.got = false
+  idq_gap_then_next()
+end
+
+local function idq_install_triggers()
+  trigger([[^You get .+ from ]],                       function() idq_get_result(true) end,  { class = "eqid" })
+  trigger([[^You don't see anything named]],           function() idq_get_result(false) end, { class = "eqid" })
+  trigger([[^You can't carry that many items]],        function() idq_get_result(false) end, { class = "eqid" })
+  trigger([[^You can't safely carry]],                 function() idq_get_result(false) end, { class = "eqid" })
+  trigger([[^You put .+ in ]],                         function() idq_put_result(true) end,  { class = "eqid" })
+  trigger([[^You don't seem to be carrying anything named]], function()
+    if S.idq and S.idq.phase == "id" and idq_advance then idq_advance(false) end
+  end, { class = "eqid" })
+end
+
+local function idq_start(queue, known)
+  if #queue == 0 then
+    echo(string.format("[eq] nothing to auto-identify — %d item(s) already identified this session.", known), "cyan")
+    echo("[eq] now try `#eq compare`.", "cyan")
+    return
+  end
+  S.idq = { list = queue, i = 0, known = known, ident = 0, failed = 0, left_out = {},
+            phase = nil, cur = nil, got = false, timer = nil }
+  idq_install_triggers()
+  echo(string.format("[eq] auto-identifying %d item(s) (%d already known this session)…", #queue, known), "cyan")
+  idq_next_entry()
+end
 
 -- ---- #eq scan: worn gear + inventory + look-in every container -----------------------------------
 local CONTAINER_KW = { "sack", "bag", "backpack", "pack", "pouch", "chest", "box", "quiver", "basket",
@@ -567,7 +829,8 @@ local function scan_feed(line)
   local sc = S.scan
   if not sc or not sc.mode then return end
   local L = strip_ansi(line)
-  if L:match("^<%d+hp") or trim(L) == "" or L:match("^%[the human typed%]") or L:match("^kxwt_") then
+  if L:match("^kxwt_") then return end   -- interleaved protocol line: skip, don't end the section
+  if L:match("^<%d+hp") or trim(L) == "" or L:match("^%[the human typed%]") then
     sc.mode = nil; return
   end
   if sc.mode == "eq" then
@@ -608,8 +871,19 @@ local function finish_scan()
   local ccount = 0
   for _, its in pairs(sc.containers) do ccount = ccount + #its; for _, n in ipairs(its) do possess[norm_name(n)] = true end end
   for name in pairs(session) do if not possess[name] then session[name] = nil end end
-  echo(string.format("[eq] scan: %d worn, %d in inventory, %d in %d container(s). Now try `#eq compare`.",
+  echo(string.format("[eq] scan: %d worn, %d in inventory, %d in %d container(s).",
     #sc.eq, #sc.inv, ccount, (function() local n = 0; for _ in pairs(sc.containers) do n = n + 1 end; return n end)()), "cyan")
+  if sc.quick then
+    echo("[eq] quick scan — collected names only (no identify). Run `#eq scan` to auto-identify.", "dim")
+    echo("[eq] now try `#eq compare` (items you've never identified will read 'unidentified').", "cyan")
+    return
+  end
+  -- The point of `#eq scan`: identify everything that lacks a trustworthy binding so compare/shop can
+  -- actually reason about stats. worn/inv/containers feed the paced auto-identify queue.
+  local worn = {}
+  for _, e in ipairs(sc.eq) do worn[#worn + 1] = e.item end
+  local queue, known = build_id_queue(worn, sc.inv, sc.containers)
+  idq_start(queue, known)
 end
 
 -- Send `look in <container>` for each detected container, one at a time with a beat between, then finish.
@@ -620,11 +894,12 @@ local function scan_containers(list, i)
   after(cfg.look_wait, function() scan_containers(list, i + 1) end)
 end
 
-local function eq_scan()
+local function eq_scan(mode)
   if combat_block() then return end
-  S.scan = { eq = {}, inv = {}, containers = {}, mode = nil, curcont = nil }
+  local quick = (trim(mode or ""):lower() == "quick")
+  S.scan = { eq = {}, inv = {}, containers = {}, mode = nil, curcont = nil, quick = quick }
   install_scan_triggers()
-  echo("[eq] scanning gear, inventory, and containers…", "cyan")
+  echo(quick and "[eq] quick scan — collecting names only…" or "[eq] scanning gear, inventory, containers, then auto-identifying…", "cyan")
   send("equipment")
   after(cfg.look_wait, function()
     send("inventory")
@@ -731,14 +1006,14 @@ local function eq_stats()
 end
 
 local function eq_usage()
-  return "[eq] usage: #eq scan | compare [slot|item] | shop | id <item> | stats | forget"
+  return "[eq] usage: #eq scan [quick] | compare [slot|item] | shop | id <item> | stats | forget"
 end
 
 if command then command("eq", function(rest)
   rest = trim(rest)
   local verb = (rest:match("^%S*") or ""):lower()
   local arg = rest:match("^%S+%s+(.*)$") or ""
-  if verb == "scan" then eq_scan()
+  if verb == "scan" then eq_scan(arg)
   elseif verb == "compare" or verb == "cmp" then eq_compare(arg)
   elseif verb == "id" or verb == "identify" then eq_id(arg)
   elseif verb == "shop" then eq_shop()
@@ -771,6 +1046,16 @@ _EQ_TEST = {
   variant_stats_str = variant_stats_str,
   norm_name = norm_name,
   first_kw = first_kw,
+  -- auto-identify: pure construction + the phase machine's signal surface (drive it with a stubbed after()).
+  assign_ordinals = assign_ordinals,
+  build_id_queue = build_id_queue,
+  feed_id_stream = feed_id_stream,     -- replay verbatim id-block lines through the passive capture
+  idq_start = idq_start,
+  idq_get_result = function(ok) idq_get_result(ok) end,
+  idq_put_result = function(ok) idq_put_result(ok) end,
+  idq_advance = function(ok) if idq_advance then idq_advance(ok) end end,
+  idq_state = function() return S.idq end,
+  set_id_expect = function(name) S.id_expect = name end,
   items = items,
   session = session,
   reset = function() for k in pairs(items) do items[k] = nil end; for k in pairs(session) do session[k] = nil end end,
