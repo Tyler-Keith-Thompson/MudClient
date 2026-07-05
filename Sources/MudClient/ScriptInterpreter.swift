@@ -20,6 +20,9 @@ final class ScriptInterpreter {
     init() {
         engine.onSend = { message in try? Container.inputService().send(verbatim: message) }
         engine.onEcho = { message in Container.terminalService().print(message) }
+        // Install the text-to-speech + live/history builtins (speak/speech_stop/speech_voices/is_live).
+        // Kept out of LuaScriptEngine/bootstrap; see SpeechBuiltins.swift.
+        engine.installSpeech()
         // All game-specific behavior (KXWT parsing, state, recovery, the AI pilot) now lives in
         // the Lua scripts (Scripts/*.lua), not the Swift client. There is no hardcoded script list
         // here anymore: `loadScripts()` just runs the Lua `load("Scripts")` loader, which loads the
@@ -80,7 +83,11 @@ extension AsyncSequence where Self: Sendable, Element == String {
             // Keep every surviving line verbatim — including blanks, which are the MUD's own spacing.
             // (We used to drop blanks adjacent to a gagged kxwt_ batch as "framing", but that ate real
             // spacing between content during combat's group-status bursts, and isn't needed.)
-            let out = lines.compactMap { engine.processLine($0) }
+            //
+            // Mark this batch LIVE (LiveGate) so triggers can tell real-time output from replayed
+            // history via is_live() — the replay() path deliberately doesn't set this, so speech and
+            // other live-only reactions stay silent on history.
+            let out = LiveGate.shared.live { lines.compactMap { engine.processLine($0) } }
             return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()

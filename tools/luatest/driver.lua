@@ -25,7 +25,16 @@ for _, n in ipairs({
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
   "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send",
   "log_start", "log_stop", "log_active", "replay",
+  "speak", "speech_stop",
 }) do stub(n) end
+-- Speech / live-vs-history stubs (SpeechService + SpeechBuiltins). is_live defaults to true so specs
+-- run "as if live"; speech_voices returns a small canned voice list so Speech.lua's assignment logic
+-- has voices to work with. Specs override these locally to exercise the gating/assignment paths.
+stub("is_live", function() return true end)
+stub("speech_voices", function()
+  return { { name = "Alex", locale = "en_US" }, { name = "Samantha", locale = "en_US" },
+           { name = "Daniel", locale = "en_GB" }, { name = "Karen", locale = "en_AU" } }
+end)
 -- Script-loader primitives the pure-Lua `load`/`reload` (bootstrap.lua) stand on. `__`-prefixed, so
 -- doc-exempt; scripts don't call them at load time, so these defaults just keep load()/reload()
 -- callable in the harness (load_spec overrides them to drive the loader against a fake filesystem).
@@ -74,7 +83,7 @@ end
 -- _HUD_TEST, _AIP_TEST, …) are all present AND the defensive `state = state or {}` decoupling is
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Equipment.lua",
-                     "Scripts/HUD.lua", "Scripts/Trivia.lua" }) do
+                     "Scripts/HUD.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end
