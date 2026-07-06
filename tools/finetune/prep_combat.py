@@ -44,13 +44,132 @@ DEFAULT_TRACES = os.path.expanduser("~/Documents/MudClient/human-traces.jsonl")
 # We keep the human's short cast form (`c <kw>`) — it works in-game — just fix spelling.
 SPELL_FIX = {
     "hower": "shower", "choswer": "shower", "shwoer": "shower", "shoewr": "shower",
+    "showerc": "shower", "whoer": "shower", "showe": "shower",
     "sahrds": "shards", "sharsd": "shards", "shrads": "shards",
     "souslteal": "soulsteal", "soul": "soulsteal",
     "frost": "frostflower", "frostflwoer": "frostflower", "sfrostflower": "frostflower",
+    "forstflower": "frostflower",
     "soothe": "sooth",
 }
 # Spells that are AoE (thrown early / on groups) — informational tagging only.
 AOE_SPELLS = {"frostflower", "shower"}
+
+# CLIENT-GENERATED command-echo lines in the RECENT GAME OUTPUT window: the client re-displays a
+# typed command as `[the human typed] <cmd>` (co-driver echo, AIPilot.lua) and its own past actions
+# as `[you] <cmd>`. The live pilot injects these at inference too and the system prompt documents
+# the convention, so as PRIOR-turn history they are legitimate context (knowing what was just cast
+# drives sustain/switch decisions) and are KEPT. The one poisonous case is the echo of THIS row's
+# own label sitting in the tail of the window with no game output after it — the capture fired
+# right after the command was typed, so the "context" literally contains the answer (~25% of
+# windows). strip_label_echo removes exactly that. Genuine bracketed GAME text — `[event]`,
+# `[Exits: ...]`, price/loot tables — starts with a different tag and is never touched.
+CLIENT_ECHO_RE = re.compile(r"^\s*\[(?:the human typed|you)\]\s*(.*)$", re.I)
+# Client-appended final instruction line(s) — not game output; the tail scan skips them.
+INSTRUCTION_RE = re.compile(r"^\s*(?:Decide the single best next action\b|You are IN COMBAT\b)")
+
+
+DIR_ABBREV = {"north": "n", "south": "s", "east": "e", "west": "w", "up": "u", "down": "d",
+              "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw"}
+TOOL_ALIASES = {"look": ["look", "l"], "inventory": ["inventory", "inv", "i"],
+                "recover": ["recover"], "flee": ["flee", "fl"], "stand": ["stand"]}
+
+
+def label_texts(assistant):
+    """Every plausible TYPED form of this row's label, for matching against a client echo line:
+    the CMD: content, tool-call arg values, and per-tool typed variants (the capture stores the
+    canonical tool — move{direction:"south"} — but the human typed 's', 'drop leg', 'recover'...)."""
+    out = set()
+    if not assistant:
+        return out
+    c = (assistant.get("content") or "").strip()
+    m = re.match(r"CMD:\s*(.+)", c)
+    if m:
+        out.add(m.group(1).strip())
+    elif c:
+        out.add(c)
+    for tc in assistant.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        name = fn.get("name") or ""
+        args = fn.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                args = {}
+        args = args or {}
+        vals = [v.strip() for v in args.values() if isinstance(v, str) and v.strip()]
+        out.update(vals)
+        if name == "move" and vals:
+            d = vals[0].lower()
+            out.add(DIR_ABBREV.get(d, d))
+            out.update(d[:i] for i in range(1, len(d)))       # typed prefixes: s, so, sou...
+        elif name == "command":
+            pass                                              # text IS the typed form
+        elif name == "cast" and vals:
+            out.update(("c " + vals[0], "cast " + vals[0]))
+        elif name == "attack" and vals:
+            out.update(("attack " + vals[0], "kill " + vals[0], "k " + vals[0]))
+        elif name in TOOL_ALIASES:
+            out.update(TOOL_ALIASES[name])
+        elif name and vals:                                   # get/drop/wear/...: "<tool> <item>"
+            out.update(f"{name} {v}" for v in vals)
+    return {t.lower() for t in out if t}
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;<>]*[A-Za-z]?|\x1b")
+# A mouse-tracking fragment masquerading as a command: digits/`;`/`<`/`>`/`M` only
+# (pieces of `\x1b[<65;41;27M` wheel events that got split into the input line).
+MOUSE_JUNK_RE = re.compile(r"^[\d;<>Mm\s]*$")
+
+
+def sanitize_command_label(txt):
+    """Return a cleaned command text, or None if the label is terminal junk and the row must be
+    dropped. Handles the two corruption modes seen in the capture: raw mouse-tracking fragments
+    ('38M\\x1b[<65', bare '41'/'60') -> drop; up-arrow history recalls ('\\x1b[A\\nc shards') ->
+    salvage the real command after the last escape/newline."""
+    if txt is None:
+        return None
+    if "\x1b" in txt:
+        # salvage: strip escapes, take the last non-empty piece; it must look like a command
+        clean = ANSI_RE.sub("\n", txt)
+        parts = [p.strip() for p in clean.split("\n") if p.strip()]
+        cand = parts[-1] if parts else ""
+        if cand and not MOUSE_JUNK_RE.match(cand) and re.search(r"[a-zA-Z]{2,}", cand):
+            return cand
+        return None
+    if MOUSE_JUNK_RE.match(txt):
+        return None
+    return txt
+
+
+def strip_label_echo(text, labels):
+    """Remove ONLY the label-leaking echo lines from a user message: client echo lines
+    ([the human typed]/[you]) whose command equals this row's label AND that sit in the TAIL of
+    the window — after the last real game-output line (skipping blanks and the client-appended
+    instruction line). A mid-window echo of the same command is prior-turn history (its result
+    followed it) and is kept, as are all non-label echoes."""
+    if not text or "[" not in text or not labels:
+        return text
+    lines = text.split("\n")
+    # find the last real content line, skipping trailing blanks + the instruction line(s)
+    j = len(lines) - 1
+    while j >= 0 and (lines[j].strip() == "" or INSTRUCTION_RE.match(lines[j])):
+        j -= 1
+    # tail region: contiguous run of echo/blank lines ending at j
+    t = j
+    while t >= 0 and (lines[t].strip() == "" or CLIENT_ECHO_RE.match(lines[t])):
+        t -= 1
+    t += 1
+    if t > j:
+        return text  # tail is game output — nothing to strip
+    keep = []
+    for i, ln in enumerate(lines):
+        if t <= i <= j:
+            m = CLIENT_ECHO_RE.match(ln)
+            if m and m.group(1).strip().lower() in labels:
+                continue  # the leak: this row's own answer echoed with no result after it
+        keep.append(ln)
+    return "\n".join(keep)
 
 
 def load_rows(path, include_old):
@@ -208,10 +327,31 @@ def main():
     stats = Counter()
     spell_raw = Counter()
 
+    junk_labels = 0
+    salvaged_labels = 0
     for obj in rows:
         msgs = obj["messages"]
         user = next((m["content"] for m in msgs if m.get("role") == "user"), "")
         assistant = next((m for m in msgs if m.get("role") == "assistant"), None)
+
+        # drop/salvage corrupt command labels (mouse-escape fragments, up-arrow history recalls)
+        if assistant and assistant.get("tool_calls"):
+            fn = assistant["tool_calls"][0].get("function") or {}
+            if fn.get("name") == "command":
+                raw = fn.get("arguments")
+                try:
+                    cargs = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except (json.JSONDecodeError, TypeError):
+                    cargs = {}
+                clean = sanitize_command_label(cargs.get("text"))
+                if clean is None:
+                    junk_labels += 1
+                    continue
+                if clean != cargs.get("text"):
+                    salvaged_labels += 1
+                    cargs["text"] = clean
+                    fn["arguments"] = json.dumps(cargs) if isinstance(raw, str) else cargs
+
         act = action_of(assistant)
         if not act:
             continue
@@ -290,6 +430,13 @@ def main():
         if w == 0:
             continue
 
+        # strip ONLY the label-leaking tail echo from the training context. Labels are collected
+        # from the assistant BEFORE the spell-typo rewrite, since the echo shows what was typed.
+        labels = label_texts(assistant)
+        for m in msgs:
+            if m.get("role") == "user":
+                m["content"] = strip_label_echo(m.get("content") or "", labels)
+
         # normalize typo'd spell in the label we'll actually train on
         if is_cast and spell and assistant:
             rewrite_spell_label(assistant, spell)
@@ -313,6 +460,8 @@ def main():
 
     summary = {
         "input_rows": len(rows),
+        "junk_labels_dropped": junk_labels,
+        "labels_salvaged_from_escapes": salvaged_labels,
         "duplicates_dropped": dup,
         "kept_decisions": kept,
         "training_rows_after_weighting": expanded,
@@ -330,6 +479,7 @@ def main():
         return {k: f"{v} ({100*v/tot:.1f}%)" for k, v in c.most_common()}
 
     print(f"input rows (schema-filtered): {len(rows)}")
+    print(f"junk labels dropped:          {junk_labels} (salvaged from escapes: {salvaged_labels})")
     print(f"exact dupes dropped:          {dup}")
     print(f"kept decisions:               {kept}")
     print(f"training rows after weighting:{expanded}")

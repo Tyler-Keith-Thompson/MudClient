@@ -27,6 +27,8 @@ import os
 import re
 from collections import defaultdict
 
+from prep_combat import label_texts, strip_label_echo   # single source of the label-echo rule
+
 HERE = os.path.dirname(__file__)
 
 # Templated-length budget. mlx_lm.lora truncates the TAIL of any sequence over --max-seq-length,
@@ -174,6 +176,13 @@ def main():
     for name, data in (("train", train), ("valid", valid)):
         with open(os.path.join(args.out, name + ".jsonl"), "w") as f:
             for r in data:
+                # belt-and-suspenders: strip any residual label-leaking tail echo (combat rows are
+                # cleaned in prep_combat; this also covers the general set). Prior-turn echoes stay.
+                labels = label_texts(next(
+                    (m for m in r["messages"] if m.get("role") == "assistant"), None))
+                for m in r["messages"]:
+                    if m.get("role") == "user":
+                        m["content"] = strip_label_echo(m.get("content") or "", labels)
                 fix_tool_args(r)
                 r, was_trimmed = trim_to_budget(r)
                 trimmed[name] += was_trimmed
