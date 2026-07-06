@@ -26,7 +26,9 @@ local cfg = {
   combat_only = true,
   circle_threshold = 3, -- after this many moves with no NEW room, the script auto-routes to a frontier
   use_tools = false,    -- set by the brain choice below (tools for hosted models, CMD: text for local)
-  brain = "sonnet",     -- DEFAULT decision model: "sonnet" | "haiku" | "local". Applied on load.
+  brain = "local",      -- DEFAULT decision model: "sonnet" | "haiku" | "local". Applied on load.
+                        -- Defaults LOCAL (the fine-tuned combat model, no API cost/credits). Switch to
+                        -- "sonnet"/"haiku" with pilot.brain(...) for the smarter hosted brains.
   -- The LM Studio model key requested on the "local" brain. MUST be an explicit key: with more than one
   -- model loaded, an empty id makes LM Studio reject the request ("Invalid model identifier"). Override
   -- with `pilot.model(<key>)` / `#ai model <key>`.
@@ -34,7 +36,9 @@ local cfg = {
   -- Memory head: a SEPARATE model (hosted Claude via Anthropic's OpenAI-compat endpoint) maintains
   -- structured world state (creatures/items here, inventory, a running summary) from raw output, so
   -- the decision model reads clean facts instead of hallucinating from scrolling text.
-  use_memory = true,
+  -- DEFAULT OFF: the memory head is hosted-only (Haiku via Anthropic), so it would fail/charge with no
+  -- API credits. Enable it (and set a mem model) once you're on a hosted setup: `pilot.mem('on')`.
+  use_memory = false,
   -- Memory head does EASY, FREQUENT extraction (parse room text -> structured facts), so it wants a
   -- cheap fast model. Haiku is the right default; the DECISION brain is where Sonnet belongs.
   mem_model = "claude-haiku-4-5-20251001",  -- pilot.memmodel('haiku'|'sonnet'|<id>) to switch
