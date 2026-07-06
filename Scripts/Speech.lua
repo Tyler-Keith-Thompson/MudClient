@@ -49,13 +49,14 @@ local cfg = {
     gossip = true, chat = true, auction = true, newbie = true, yell = true, shout = true,
     gtell = true, say = false, tell = false,
   },
-  -- Optional LLM gender classification for a better first voice. NEVER blocks speech.
+  -- Optional LLM gender classification for a better first voice. NEVER blocks speech, and only runs
+  -- for names the cheap gendered-word heuristic can't resolve. Uses the smarter dense 27b via the
+  -- per-REQUEST model override (same pattern as Equipment.lua), so pinned models stay undisturbed.
   classify = {
     enabled = true,
     max_tokens = 4,
     think_prefill = "<think>\n\n</think>\n\n",   -- same Qwen3.x empty-think guard trivia/pilot use
-    model = os.getenv("SPEECH_MODEL") or os.getenv("TRIVIA_MODEL") or os.getenv("LMSTUDIO_MODEL")
-            or "qwen3.6-35b-a3b-mlx",
+    model = os.getenv("SPEECH_MODEL") or os.getenv("EQ_MODEL") or "qwen3.6-27b-mlx@8bit",
   },
 }
 cfg.dir = cfg.home .. "/Documents/MudClient"
@@ -210,6 +211,37 @@ local function active_backend()
   return "kokoro"
 end
 
+-- ============================ gender heuristic (no LLM) ============================
+-- AlterAeon speaker names constantly carry explicit gender words ("An orc woman", "Priest of Xandar",
+-- "the barmaid", "orc mother", "hedge wizard" — all verbatim from human-traces.jsonl). Exact WHOLE-WORD
+-- lookup, so suffix traps are safe by construction: "priestess" is its own word (female) and never
+-- falls through to "priest" (male). Curated; anything unlisted resolves nil and may go to the LLM.
+local GENDER_WORDS = {
+  -- female
+  woman = "f", women = "f", girl = "f", lady = "f", lass = "f", wench = "f", maid = "f",
+  maiden = "f", barmaid = "f", milkmaid = "f", witch = "f", hag = "f", crone = "f", matron = "f",
+  mother = "f", grandmother = "f", grandma = "f", granny = "f", sister = "f", daughter = "f",
+  wife = "f", widow = "f", mistress = "f", dame = "f", madam = "f", madame = "f", nun = "f",
+  abbess = "f", priestess = "f", sorceress = "f", enchantress = "f", seamstress = "f",
+  huntress = "f", queen = "f", princess = "f", duchess = "f", countess = "f", baroness = "f",
+  empress = "f", goddess = "f", she = "f",
+  -- male
+  man = "m", men = "m", boy = "m", lad = "m", guy = "m", lord = "m", sir = "m", mister = "m",
+  gentleman = "m", monk = "m", friar = "m", father = "m", grandfather = "m", grandpa = "m",
+  brother = "m", son = "m", husband = "m", widower = "m", priest = "m", wizard = "m",
+  sorcerer = "m", king = "m", prince = "m", duke = "m", count = "m", baron = "m", emperor = "m",
+  he = "m",
+}
+
+-- gender_from_name(name) -> "m" | "f" | nil. First gendered word wins, scanning left to right.
+local function gender_from_name(name)
+  for w in tostring(name or ""):lower():gmatch("%a+") do
+    local g = GENDER_WORDS[w]
+    if g then return g end
+  end
+  return nil
+end
+
 -- ============================ voice pools (per backend) ============================
 -- SAY voices carry no gender in `say -v ?`, so we curate hints; any name not here is gender-neutral and
 -- stays eligible for either classification.
@@ -249,6 +281,45 @@ local KOKORO_FALLBACK = {
   "am_adam", "am_michael", "am_liam", "am_echo", "am_eric", "am_onyx", "am_puck", "am_fenrir",
   "bf_emma", "bf_alice", "bf_isabella", "bf_lily",
   "bm_george", "bm_daniel", "bm_lewis", "bm_fable",
+}
+
+-- ---- fantasy/epic preference tiers ----
+-- Tier 1 = dramatic, fantasy-appropriate (assigned first); tier 2 = decent; tier 3 = flat/thin. Kokoro
+-- tiers combine the repo VOICES.md quality grades (af_heart=A, af_bella=A-, bf_emma=B-, am_fenrir/
+-- am_michael/af_kore/af_aoede=C+…) with TIMBRE: am_onyx is the DEEP male (OpenAI-style naming —
+-- onyx = deep — outweighs its D grade for epic flavor), bm_george the deeper British male, am_michael
+-- solid mid, am_fenrir dramatic; bm_fable is a lighter, androgynous "storyteller" — kept in tier 1 for
+-- variety but NOT the deep-male default. British voices skew epic (bf_emma, bf_isabella).
+-- am_santa is EXCLUDED outright (this is fantasy, not Christmas).
+local KOKORO_EXCLUDE = { am_santa = true }
+local KOKORO_TIER = {
+  -- tier 1 — epic
+  am_onyx = 1, bm_george = 1, am_michael = 1, am_fenrir = 1, bm_fable = 1,
+  af_heart = 1, af_bella = 1, bf_emma = 1, af_kore = 1, af_aoede = 1,
+  -- tier 2 — solid
+  bm_lewis = 2, bm_daniel = 2, am_puck = 2,
+  bf_isabella = 2, bf_alice = 2, af_nova = 2, af_nicole = 2, af_sarah = 2,
+  -- everything else (am_adam, am_eric, am_echo, am_liam, af_jessica, af_river, af_sky, af_alloy,
+  -- bf_lily, unknown future ids) defaults to tier 3.
+}
+-- Say voices, same idea lighter-touch (by BASE name, within the existing curated allowlist): the
+-- deeper/theatrical accents first. On this machine `say -v ?` offers Daniel (GB), Moira (IE),
+-- Tessa (ZA), Rishi, Tara, Samantha, Karen, Kathy, Fred — tiers cover the wider allowlist so richer
+-- voice sets (Premium/Enhanced installs) rank sensibly too.
+local SAY_TIER = {
+  Daniel = 1, Moira = 1, Tessa = 1, Serena = 1, Oliver = 1, Fiona = 1,
+  Samantha = 2, Karen = 2, Alex = 2, Ava = 2, Tom = 2, Rishi = 2, Tara = 2, Victoria = 2,
+  Kate = 2, Allison = 2, Susan = 2, Aaron = 2, Matilda = 2, Isha = 2, Nora = 2, Stephanie = 2,
+  -- unlisted (Kathy, Fred, Vicki, Zoe, Nicky…) -> tier 3
+}
+
+-- Your OWN character's default candidates when no gender can be resolved from the character name
+-- (e.g. "Vaelith"): the DEEP-male/epic set per backend (the user's evident preference — a necromancer
+-- should not sound like af_jessica), drawn RANDOMLY so voice.reset() re-rolls "you" too. am_onyx leads
+-- (the deep male); bm_fable deliberately absent (lighter/androgynous). Override with voice.set("you",…).
+local YOU_POOL = {
+  kokoro = { "am_onyx", "bm_george", "am_michael", "am_fenrir" },
+  say = { "Daniel", "Oliver", "Tom", "Alex", "Rishi" },
 }
 
 -- A say voice's base name: "Ava (Premium)" -> "Ava" (for gender/preference/novelty lookup).
@@ -292,14 +363,17 @@ local function build_say_pool()
   return pool
 end
 
--- Build the KOKORO pool: the server's English (a_/b_) voice ids, else the curated fallback.
+-- Build the KOKORO pool: the server's English (a_/b_) voice ids minus the exclusions (am_santa),
+-- else the curated fallback.
 local function build_kokoro_pool()
   local pool = {}
   if speech_kokoro_voices then
     local ok, list = pcall(speech_kokoro_voices)
     if ok and type(list) == "table" then
       for _, id in ipairs(list) do
-        if type(id) == "string" and id:match("^[ab][fm]_") then pool[#pool + 1] = id end
+        if type(id) == "string" and id:match("^[ab][fm]_") and not KOKORO_EXCLUDE[id] then
+          pool[#pool + 1] = id
+        end
       end
     end
   end
@@ -336,9 +410,20 @@ local function used_count(voice, backend)
   return n
 end
 
--- Pick a voice for `backend`: least-used within the gender pool (or the whole pool when gender is nil /
--- no gendered voices exist), then pool order — deterministic, round-robins as speakers grow.
-local function pick_voice(gender, backend)
+-- Fantasy-preference tier of a voice (1 epic .. 3 flat). Say voices rank by BASE name.
+local function voice_tier(backend, voice)
+  if backend == "kokoro" then return KOKORO_TIER[voice] or 3 end
+  return SAY_TIER[say_base(voice)] or 3
+end
+
+-- The ELIGIBLE candidate set for a new assignment: WEIGHTED least-used with a fantasy/epic tier
+-- preference. Candidates come from the gender pool ("m"/"f"); gender nil / "U" uses the NEUTRAL mixed
+-- pool (every voice, so an unresolved speaker draws evenly rather than skewing one gender's epic
+-- voices). Score is used_count*100 + tier; ALL minimum-score voices are returned — so the first
+-- speakers land in tier 1 (least-used within the tier), and as speakers multiply we SPILL to lower
+-- tiers before reusing anyone (30 speakers still get variety; the first dozen get the epic voices).
+-- Pure and deterministic (unit-tested); the random draw lives in pick_voice.
+local function pick_candidates(gender, backend)
   backend = backend or active_backend()
   local all = pool_for(backend)
   local pool = {}
@@ -346,22 +431,41 @@ local function pick_voice(gender, backend)
     for _, name in ipairs(all) do if voice_gender(backend, name) == gender then pool[#pool + 1] = name end end
   end
   if #pool == 0 then pool = all end
-  local best, bestn
+  local best, bests = {}, nil
   for _, name in ipairs(pool) do
-    local c = used_count(name, backend)
-    if not bestn or c < bestn then best, bestn = name, c end
+    local s = used_count(name, backend) * 100 + voice_tier(backend, name)
+    if not bests or s < bests then best, bests = { name }, s
+    elseif s == bests then best[#best + 1] = name end
   end
   return best
 end
 
--- Ask the LOCAL model to classify a name male/female. Strict one-letter contract; any error, timeout,
--- or garbage falls back silently to cb(nil). Never blocks — the caller has already assigned a voice.
-local function classify_gender(name, cb)
+-- Pick a voice: a RANDOM draw among the equally-eligible candidates. The randomness is at ASSIGNMENT
+-- time only (the persisted assignment stays stable afterward) — it exists so voice.reset() genuinely
+-- re-rolls instead of deterministically re-deriving the identical voice for every speaker.
+local function pick_voice(gender, backend)
+  local c = pick_candidates(gender, backend)
+  if #c == 0 then return nil end
+  return c[math.random(#c)]
+end
+
+-- Ask the LOCAL model to classify a name male/female — only reached when gender_from_name() found no
+-- explicit gender word. The FULL display name (title included: "Gisco the Necromancer", not "Gisco")
+-- and, when available, the line they just said are passed as context; strict one-letter contract; any
+-- error, timeout, or garbage falls back silently to cb(nil). Never blocks — the caller has already
+-- assigned a voice. Uses the dense 27b via ai_local_request's per-call model override (EQ pattern).
+local function classify_gender(name, context, cb)
   if not (cfg.classify.enabled and ai_local_request) then return cb(nil) end
-  local sys = "Classify the given fantasy character or player name as male or female. Reply with "
-    .. "EXACTLY ONE letter: M for male, F for female, or U if unknown/unclear. Output nothing else."
+  local sys = "You classify characters from a fantasy MUD by apparent gender. You are given a "
+    .. "character or mob's full display name (it may include a title or epithet, e.g. 'Gisco the "
+    .. "Necromancer', 'a fruit vendor') and possibly a line they said. Reply with EXACTLY ONE letter: "
+    .. "M for male, F for female, or U if genuinely unknowable. Output nothing else."
+  local user = "Name: " .. name
+  if type(context) == "string" and context ~= "" then
+    user = user .. "\nThey said: \"" .. context:sub(1, 120) .. "\""
+  end
   local epoch = EPOCH
-  ai_local_request(sys, "Name: " .. name, cfg.classify.max_tokens, cfg.classify.think_prefill,
+  ai_local_request(sys, user, cfg.classify.max_tokens, cfg.classify.think_prefill,
     function(reply, err)
       if EPOCH ~= _SPEECH.epoch or epoch ~= _SPEECH.epoch then return end   -- reloaded: drop stale
       if err then return cb(nil) end
@@ -370,21 +474,48 @@ local function classify_gender(name, cb)
     end, cfg.classify.model)
 end
 
--- assign_voice(key, display, backend) -> voice for that backend. Returns the speaker's existing
--- per-backend voice, or picks (and persists) one on first sighting for that backend. Provisional pick is
--- IMMEDIATE; an optional async classify (once per speaker) upgrades EVERY assigned backend's voice iff
--- the speaker hasn't been heard yet. Assignments for both backends are kept side by side, so switching
--- backends never loses the other's voice and only fills the gap for the newly-active backend.
-local function assign_voice(key, display, backend)
+-- The voice for YOUR OWN character: gendered pick if the character's NAME resolves via the heuristic,
+-- else a random draw from the deep-male/epic YOU_POOL (intersected with the live pool; falls back to a
+-- male pick if none of the preferred ids are available).
+local function pick_you_voice(backend)
+  local g = gender_from_name((state and state.name) or "")
+  if g then return pick_voice(g, backend) end
+  local avail = {}
+  for _, n in ipairs(pool_for(backend)) do avail[n] = true end
+  local c = {}
+  for _, n in ipairs(YOU_POOL[backend] or {}) do if avail[n] then c[#c + 1] = n end end
+  if #c > 0 then return c[math.random(#c)] end
+  return pick_voice("m", backend)
+end
+
+-- assign_voice(key, display, backend[, context]) -> voice for that backend. Returns the speaker's
+-- existing per-backend voice, or picks (and persists) one on first sighting for that backend.
+-- Gender is resolved in LAYERS: (1) the FREE gendered-word heuristic on the display name ("An orc
+-- woman" — no LLM call at all); (2) otherwise a provisional neutral pick IMMEDIATELY plus an async LLM
+-- classify (full display name + optionally the line they said as `context`) that upgrades EVERY
+-- assigned backend's voice iff the speaker hasn't been heard yet. Assignments for both backends are
+-- kept side by side, so switching backends never loses the other's voice.
+local function assign_voice(key, display, backend, context)
   backend = backend or active_backend()
   local rec = S.speakers[key]
   if rec and rec[backend] then return rec[backend] end
-  local v = pick_voice(nil, backend)
+  local v
+  if key == "you" then
+    v = pick_you_voice(backend)
+  else
+    local heur = gender_from_name(display)
+    if heur then
+      v = pick_voice(heur, backend)
+      S.classified[key] = true                     -- decided for free — never ask the LLM
+    else
+      v = pick_voice(nil, backend)                 -- neutral/mixed provisional
+    end
+  end
   rec = rec or {}; rec[backend] = v; S.speakers[key] = rec
   schedule_save()
   if key ~= "you" and display and display ~= "" and not S.classified[key] then
     S.classified[key] = true
-    classify_gender(display, function(gender)
+    classify_gender(display, context, function(gender)
       if not gender then return end
       if S.spoken[key] then return end             -- already heard with the provisional voice — keep it
       local r = S.speakers[key]; if not r then return end
@@ -505,9 +636,10 @@ local function speak_line(line)
   if recently_spoken(key, msg) then return end
   local backend = active_backend()
   -- Primary voice for the active backend; when kokoro, also resolve a `say` voice so the host's
-  -- transparent fallback (server unreachable) keeps this speaker sounding consistent.
-  local voice = assign_voice(key, display, backend)
-  local say_fallback = (backend == "kokoro") and assign_voice(key, display, "say") or nil
+  -- transparent fallback (server unreachable) keeps this speaker sounding consistent. The message is
+  -- passed as classifier context (a line of dialogue often disambiguates an androgynous name).
+  local voice = assign_voice(key, display, backend, msg)
+  local say_fallback = (backend == "kokoro") and assign_voice(key, display, "say", msg) or nil
   S.spoken[key] = true
   record_spoken(key, msg)
   local text = msg
@@ -728,6 +860,11 @@ _SPEECH_TEST = {
   speak_line = speak_line,
   speak_emote = speak_emote,
   parse_social = parse_social,
+  gender_from_name = gender_from_name,
+  pick_candidates = pick_candidates,
+  pick_you_voice = pick_you_voice,
+  voice_tier = voice_tier,
+  you_pool = YOU_POOL,
   social_sounds = SOCIAL_SOUNDS,
   social_verbs = SOCIAL_VERBS,
   recently_spoken = recently_spoken,

@@ -125,11 +125,12 @@ end)
 
 test("assignment: round-robins by least-used and reuses on exhaustion", function()
   reset(); T.set_pools({ "Alex", "Samantha" }, nil)
+  math.randomseed(11)
   local a = T.assign_voice("s1", "s1", "say")
   local b = T.assign_voice("s2", "s2", "say")
   expect(a):ne(b)                          -- distinct while voices remain
-  local c = T.assign_voice("s3", "s3", "say")     -- pool exhausted -> reuse least-used (first)
-  expect(c):eq("Alex")
+  local c = T.assign_voice("s3", "s3", "say")     -- pool exhausted -> reuse one of the least-used
+  expect(c == "Alex" or c == "Samantha"):truthy()
 end)
 
 test("assignment: per-backend records kept side by side", function()
@@ -304,11 +305,13 @@ test("voice.reset: wipes both backends, dedupe memory, and the persisted file", 
   local tmp = os.tmpname()
   local old_file = T.cfg.save_file
   T.cfg.save_file = tmp
-  S.speakers = { mouserat = { say = "Zarvox", kokoro = "af_heart" }, lokar = { say = "Bells" } }
+  S.speakers = { mouserat = { say = "Zarvox", kokoro = "af_heart" }, lokar = { say = "Bells" },
+                 you = { say = "Fred", kokoro = "af_jessica" } }
   S.spoken = { mouserat = true }; S.classified = { mouserat = true }
   T.record_spoken("mouserat", "hi")
   voice.reset()
   expect(next(S.speakers)):eq(nil)          -- all assignments gone (both backends)
+  expect(S.speakers["you"]):eq(nil)         -- including your own character's
   expect(next(S.spoken)):eq(nil); expect(next(S.classified)):eq(nil)
   expect(T.recently_spoken("mouserat", "hi")):falsy()   -- dedupe cleared
   -- The persisted file was rewritten with an EMPTY registry.
@@ -327,7 +330,7 @@ test("voice.reset: next sighting picks fresh voices from the current pools", fun
   voice.reset()
   T.set_pools({ "Samantha", "Daniel" }, nil)        -- the current curated pool
   local v = T.assign_voice("mouserat", "Mouserat", "say")
-  expect(v):eq("Samantha")                          -- fresh pick, not the old Zarvox
+  expect(v):eq("Daniel")                            -- fresh pick from tier 1, not the old Zarvox
   os.remove(tmp)
   T.cfg.save_file = old_file
 end)
@@ -410,6 +413,142 @@ test("emotes: obey is_live, the toggle, and dedupe", function()
   speak, is_live = real_speak, real_live
 end)
 
+-- ---------------------------------------------------------------- gendered-word heuristic (no LLM)
+test("gender heuristic: explicit gender words resolve without any LLM", function()
+  expect(T.gender_from_name("An orc woman")):eq("f")
+  expect(T.gender_from_name("A hedge witch")):eq("f")
+  expect(T.gender_from_name("the barmaid")):eq("f")
+  expect(T.gender_from_name("older woman")):eq("f")
+  expect(T.gender_from_name("orc mother")):eq("f")
+  expect(T.gender_from_name("A young lord")):eq("m")
+  expect(T.gender_from_name("Priest of Xandar")):eq("m")
+  expect(T.gender_from_name("hedge wizard")):eq("m")
+  expect(T.gender_from_name("shy little boy")):eq("m")
+end)
+
+test("gender heuristic: priestess/priest suffix trap and misses fall through", function()
+  expect(T.gender_from_name("the high priestess")):eq("f")   -- whole-word: not caught by "priest"
+  expect(T.gender_from_name("the priest")):eq("m")
+  expect(T.gender_from_name("a sorceress supreme")):eq("f")
+  expect(T.gender_from_name("Gisco the Necromancer")):eq(nil)  -- no gender word -> LLM territory
+  expect(T.gender_from_name("Mouserat")):eq(nil)
+  expect(T.gender_from_name("")):eq(nil)
+  expect(T.gender_from_name(nil)):eq(nil)
+end)
+
+test("gender heuristic: a hit assigns a gendered voice and SKIPS the LLM", function()
+  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Daniel", "Samantha" }, nil)
+  local called = false
+  local real = ai_local_request
+  ai_local_request = function(_, _, _, _, cb) called = true; cb("M", nil) end
+  local v = T.assign_voice("an orc woman", "An orc woman", "say")
+  expect(v):eq("Samantha")                   -- the only female voice in the pool
+  expect(called):falsy()                     -- no LLM call for a heuristic hit
+  expect(S.classified["an orc woman"]):truthy()   -- and it never will be asked
+  ai_local_request = real
+end)
+
+test("classify prompt: full display name, said-line context, and the dense-model override", function()
+  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Daniel", "Samantha" }, nil)
+  local got = {}
+  local real = ai_local_request
+  ai_local_request = function(sys, user, max, prefill, cb, model)
+    got.sys, got.user, got.model = sys, user, model
+    cb("U", nil)
+  end
+  T.assign_voice("gisco the necromancer", "Gisco the Necromancer", "say", "flee, mortals!")
+  expect(got.user:find("Gisco the Necromancer", 1, true) ~= nil):truthy()   -- FULL name incl. title
+  expect(got.user:find("flee, mortals!", 1, true) ~= nil):truthy()          -- the message as context
+  expect(got.sys:find("EXACTLY ONE letter") ~= nil):truthy()                -- strict M/F/U contract
+  expect(got.model):eq(T.cfg.classify.model)                                -- per-call 27b override
+  ai_local_request = real
+end)
+
+-- ---------------------------------------------------------------- weighted fantasy tiers
+test("tiers: kokoro ranking — onyx/george epic, santa excluded, flat voices tier 3", function()
+  expect(T.voice_tier("kokoro", "am_onyx")):eq(1)      -- THE deep male
+  expect(T.voice_tier("kokoro", "bm_george")):eq(1)
+  expect(T.voice_tier("kokoro", "af_heart")):eq(1)
+  expect(T.voice_tier("kokoro", "bm_daniel")):eq(2)
+  expect(T.voice_tier("kokoro", "af_jessica")):eq(3)
+  expect(T.voice_tier("kokoro", "am_eric")):eq(3)
+  expect(T.voice_tier("say", "Daniel")):eq(1)
+  expect(T.voice_tier("say", "Ava (Premium)")):eq(2)   -- ranks by base name
+  expect(T.voice_tier("say", "Kathy")):eq(3)
+  -- am_santa never enters the pool, even if the server offers it.
+  local real = speech_kokoro_voices
+  speech_kokoro_voices = function() return { "am_santa", "am_onyx", "af_heart" } end
+  local pool = T.build_kokoro_pool()
+  local has = {}; for _, id in ipairs(pool) do has[id] = true end
+  expect(has["am_santa"]):falsy(); expect(has["am_onyx"]):truthy()
+  speech_kokoro_voices = real
+end)
+
+test("tiers: candidate set is least-used within the best tier; spills before reusing", function()
+  reset(); T.set_pools(nil, { "af_heart", "af_nova", "af_jessica" })   -- tiers 1, 2, 3
+  -- Empty registry: only the tier-1 voice is eligible.
+  local c1 = T.pick_candidates("f", "kokoro")
+  expect(#c1):eq(1); expect(c1[1]):eq("af_heart")
+  -- Tier 1 taken -> spill to tier 2, then tier 3, BEFORE reusing anyone.
+  S.speakers = { a = { kokoro = "af_heart" } }
+  expect(T.pick_candidates("f", "kokoro")[1]):eq("af_nova")
+  S.speakers.b = { kokoro = "af_nova" }
+  expect(T.pick_candidates("f", "kokoro")[1]):eq("af_jessica")
+  -- Everyone used once -> reuse starts back at the epic tier.
+  S.speakers.c = { kokoro = "af_jessica" }
+  expect(T.pick_candidates("f", "kokoro")[1]):eq("af_heart")
+end)
+
+test("tiers: equal-score candidates are ALL returned; the draw stays within them", function()
+  reset(); T.set_pools(nil, { "af_jessica", "af_heart", "af_bella", "af_river" })
+  local c = T.pick_candidates("f", "kokoro")             -- af_heart + af_bella, both tier 1 unused
+  expect(#c):eq(2)
+  local set = {}; for _, n in ipairs(c) do set[n] = true end
+  expect(set["af_heart"]):truthy(); expect(set["af_bella"]):truthy()
+  math.randomseed(7)
+  for _ = 1, 20 do
+    local v = T.pick_voice("f", "kokoro")
+    expect(set[v]):truthy()                              -- random draw never leaves the candidate set
+  end
+end)
+
+test("tiers: U/unresolved uses the NEUTRAL mixed pool (both genders eligible)", function()
+  reset(); T.set_pools(nil, { "af_heart", "bm_george", "af_jessica" })
+  local c = T.pick_candidates(nil, "kokoro")             -- no gender: mixed pool, tier 1 of EITHER
+  local set = {}; for _, n in ipairs(c) do set[n] = true end
+  expect(set["af_heart"]):truthy(); expect(set["bm_george"]):truthy()   -- both tier-1 genders
+  expect(set["af_jessica"]):falsy()                                      -- tier 3 not eligible yet
+end)
+
+-- ---------------------------------------------------------------- own character ("you")
+test("own char: unresolvable name defaults to the deep-male pool and re-rolls on reset", function()
+  reset(); T.set_pools(nil, nil)                          -- full built-in pools
+  local old_state = state
+  state = { name = "Vaelith" }                            -- no gender word -> deep-male YOU_POOL
+  local deep = {}; for _, id in ipairs(T.you_pool.kokoro) do deep[id] = true end
+  math.randomseed(3)
+  local seen = {}
+  for _ = 1, 40 do
+    S.speakers = {}                                       -- what voice.reset() does to the registry
+    local v = T.assign_voice("you", nil, "kokoro")
+    expect(deep[v]):truthy()                              -- always a deep-male pick (am_onyx tier)
+    seen[v] = true
+  end
+  local distinct = 0
+  for _ in pairs(seen) do distinct = distinct + 1 end
+  expect(distinct >= 2):truthy()                          -- reset genuinely RE-ROLLS
+  state = old_state
+end)
+
+test("own char: gendered character name resolves via the heuristic", function()
+  reset(); T.set_pools(nil, nil)
+  local old_state = state
+  state = { name = "Queen Vaelith" }
+  local v = T.assign_voice("you", nil, "kokoro")
+  expect(T.voice_gender("kokoro", v)):eq("f")             -- female pick, not the deep-male default
+  state = old_state
+end)
+
 -- ---------------------------------------------------------------- LLM classification contract
 test("classify: valid reply reassigns an unspoken speaker's voice", function()
   reset(); T.cfg.classify.enabled = true; T.set_pools({ "Alex", "Samantha" }, nil)   -- Alex=m, Samantha=f
@@ -446,11 +585,13 @@ test("classify: garbage / error falls back silently to the provisional voice", f
 end)
 
 test("classify: does NOT reassign a speaker already heard this session", function()
-  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Alex", "Samantha" }, nil)
+  -- Daniel is tier 1 / Samantha tier 2, so the provisional (neutral) pick is deterministically Daniel.
+  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Daniel", "Samantha" }, nil)
   local real = ai_local_request
   ai_local_request = function(_, _, _, _, cb) cb("F", nil) end
   S.spoken["gwen"] = true                                                       -- already heard
   local v = T.assign_voice("gwen", "Gwen", "say")
+  expect(v):eq("Daniel")
   expect(S.speakers["gwen"].say):eq(v)                                          -- keeps provisional
   expect(S.speakers["gwen"].say):ne("Samantha")
   ai_local_request = real
