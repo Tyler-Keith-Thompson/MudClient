@@ -41,7 +41,13 @@ local function with_pilot(fields, fn)
   local saved = {}
   for _, k in ipairs(keys) do saved[k] = P[k] end
   for k, v in pairs(fields) do P[k] = v end
+  -- These tests exercise the timer machinery in isolation, independent of the combat-only gate
+  -- (which now defaults ON). Neutralize it here so fire_if_ready isn't short-circuited by "not in
+  -- combat" — combat-gating has its own coverage in combat_only_spec.
+  local saved_co = cfg.combat_only
+  cfg.combat_only = false
   local ok, err = pcall(fn)
+  cfg.combat_only = saved_co
   for _, k in ipairs(keys) do P[k] = saved[k] end
   if not ok then error(err, 2) end
 end

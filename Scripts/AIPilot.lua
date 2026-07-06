@@ -21,7 +21,9 @@ local cfg = {
   combat_context_lines = 8,   -- fewer output lines in a combat turn: less prefill = faster first token
   -- Combat-only: when ON the pilot acts ONLY while in a fight and stays dormant between fights (you
   -- explore/move manually; the AI auto-resumes the instant the next fight starts). See fire_if_ready.
-  combat_only = false,
+  -- DEFAULT ON: the intended use is human-drives-exploration, AI-fights. `pilot.combat_only('off')`
+  -- for a fully autonomous pilot that also explores/loots/navigates on its own.
+  combat_only = true,
   circle_threshold = 3, -- after this many moves with no NEW room, the script auto-routes to a frontier
   use_tools = false,    -- set by the brain choice below (tools for hosted models, CMD: text for local)
   brain = "sonnet",     -- DEFAULT decision model: "sonnet" | "haiku" | "local". Applied on load.
@@ -2340,7 +2342,7 @@ local PILOT_CMDS = {
   model      = { sig = "pilot.model(id)",         text = "Set the decision model id directly." },
   brain      = { sig = "pilot.brain(which)",      text = "Choose the decision brain: 'local' | 'haiku' | 'sonnet'." },
   mode       = { sig = "pilot.mode(m)",           text = "Force 'tools' (base models) or 'text'/'cmd' (fine-tuned) mode." },
-  combat_only = { sig = "pilot.combat_only(on)",  text = "When ON, the pilot acts ONLY during fights and stays dormant (hands-off) between them, auto-resuming each new fight. A modifier on pilot.on(); 'on'/'off'." },
+  combat_only = { sig = "pilot.combat_only(on)",  text = "When ON (the DEFAULT), the pilot acts ONLY during fights and stays dormant (hands-off) between them, auto-resuming each new fight — you explore/move manually. 'off' makes it fully autonomous (explores/loots/navigates too). A modifier on pilot.on()." },
   url        = { sig = "pilot.url(base)",         text = "Set the decision client's API endpoint." },
   mem        = { sig = "pilot.mem(on_off)",       text = "Turn the memory head on or off ('on'/'off')." },
   memmodel   = { sig = "pilot.memmodel(which)",   text = "Set the memory head's model ('haiku' | 'sonnet' | <id>)." },
