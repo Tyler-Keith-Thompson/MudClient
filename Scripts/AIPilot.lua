@@ -1351,7 +1351,7 @@ local PRIMARY_ARG = {
 -- we never emit a duplicate (e.g. cast 'X' X).
 local function normalize_call(obj)
   if type(obj) ~= "table" then return nil end
-  local name = obj.name or obj.action or obj.tool or obj.function_name
+  local name = obj.name or obj.action or obj.call or obj.tool or obj.function_name
   if type(name) ~= "string" or trim(name) == "" then return nil end
   name = trim(name):lower()
   if name == "kill" then name = "attack" end
