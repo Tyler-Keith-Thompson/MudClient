@@ -69,7 +69,10 @@ _AIP.epoch = (_AIP.epoch or 0) + 1
 local EPOCH = _AIP.epoch
 
 local P = {
-  enabled = _AIP.enabled or false, busy = false,
+  -- Default ON: with combat_only (also default on) the pilot only acts during fights, so it's "AI
+  -- fights, you explore" from launch with no manual `pilot.on()`. `_AIP.enabled` still remembers an
+  -- explicit off across reloads (nil = first load this session → default on). `pilot.off()` to disable.
+  enabled = (_AIP.enabled == nil) and true or _AIP.enabled, busy = false,
   goal = _AIP.goal or "Explore, kill easy mobs, level up, and survive.",
   transcript = {}, last_turn = 0, recent_cmds = {}, loop_breaks = 0, stale_skips = 0,
   requested = {}, input_seq = 0, last_human = 0, pending = nil, nudge = nil, gen = 0, snap_seq = 0,
