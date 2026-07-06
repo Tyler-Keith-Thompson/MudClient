@@ -27,6 +27,10 @@ local cfg = {
   circle_threshold = 3, -- after this many moves with no NEW room, the script auto-routes to a frontier
   use_tools = false,    -- set by the brain choice below (tools for hosted models, CMD: text for local)
   brain = "sonnet",     -- DEFAULT decision model: "sonnet" | "haiku" | "local". Applied on load.
+  -- The LM Studio model key requested on the "local" brain. MUST be an explicit key: with more than one
+  -- model loaded, an empty id makes LM Studio reject the request ("Invalid model identifier"). Override
+  -- with `pilot.model(<key>)` / `#ai model <key>`.
+  local_model = "qwen3.6-27b-alteraeon-mlx",
   -- Memory head: a SEPARATE model (hosted Claude via Anthropic's OpenAI-compat endpoint) maintains
   -- structured world state (creatures/items here, inventory, a running summary) from raw output, so
   -- the decision model reads clean facts instead of hallucinating from scrolling text.
@@ -2195,10 +2199,10 @@ end
 local function set_brain(b)
   b = (b or ""):lower()
   if b == "local" then
-    ai_set_endpoint("http://localhost:1234/v1"); ai_set_model("")
+    ai_set_endpoint("http://localhost:1234/v1"); ai_set_model(cfg.local_model or "")
     if ai_set_auth then ai_set_auth(false) end
     cfg.use_tools = false; cfg.think_prefill = "<think>\n\n</think>\n\n"; cfg.brain = "local"
-    return "LOCAL fine-tune (CMD: text) — load it via serve.sh + `#ai model <key>`"
+    return "LOCAL fine-tune (" .. (cfg.local_model or "auto") .. ") — override with `pilot.model(<key>)`"
   elseif b == "haiku" or b == "sonnet" then
     local m = (b == "haiku") and "claude-haiku-4-5-20251001" or "claude-sonnet-4-6"
     ai_set_endpoint("https://api.anthropic.com/v1"); ai_set_model(m)
