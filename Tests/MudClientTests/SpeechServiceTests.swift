@@ -118,3 +118,112 @@ private final class Recorder: @unchecked Sendable {
     Thread.sleep(forTimeInterval: 0.1)
     #expect(rec.spokenText.isEmpty)
 }
+
+// MARK: - Kokoro backend
+
+/// A fake HTTP synthesizer: returns canned WAV bytes or throws, records the last request, and can block
+/// (to simulate an in-flight request) until `cancel()` releases it.
+private final class FakeSynthesizer: SpeechSynthesizer, @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: Result<Data, Error>
+    private let block: Bool
+    private let gate = DispatchSemaphore(value: 0)
+    private let started = DispatchSemaphore(value: 0)
+    private(set) var lastText: String?
+    private(set) var lastVoice: String?
+    private(set) var cancelled = false
+
+    init(result: Result<Data, Error>, block: Bool = false) { self.result = result; self.block = block }
+
+    func synthesize(text: String, voice: String?) throws -> Data {
+        lock.lock(); lastText = text; lastVoice = voice; lock.unlock()
+        started.signal()
+        if block { gate.wait() }                    // simulate a slow, cancellable request
+        lock.lock(); let c = cancelled; lock.unlock()
+        if c { throw NSError(domain: "cancelled", code: -999) }
+        return try result.get()
+    }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock(); gate.signal() }
+    func waitUntilStarted() { started.wait() }
+}
+
+/// Thread-safe recorder of the argv arrays passed to a process factory.
+private final class ArgLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [[String]] = []
+    func add(_ a: [String]) { lock.lock(); items.append(a); lock.unlock() }
+    var all: [[String]] { lock.lock(); defer { lock.unlock() }; return items }
+}
+
+@Test func kokoroSynthesizesThenPlaysViaAfplay() {
+    let rec = Recorder()
+    let playLog = ArgLog()
+    let synth = FakeSynthesizer(result: .success(Data(count: 200)))
+    let service = SpeechService(
+        makeUtterance: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },   // say
+        voiceListing: { "" },
+        synthesizer: synth,
+        makePlayback: { args in playLog.add(args); return FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        tempWriter: { _ in "/tmp/mudclient_test_tts.wav" })
+
+    service.speak(text: "hello there", voice: "af_heart", backend: .kokoro, sayFallbackVoice: "Samantha")
+    rec.waitForCount(1)
+
+    #expect(synth.lastText == "hello there")           // POST body carried the text
+    #expect(synth.lastVoice == "af_heart")             // ...and the kokoro voice
+    #expect(playLog.all == [["/tmp/mudclient_test_tts.wav"]])   // afplay launched with the temp file
+    #expect(service.backendStatus().backend == "kokoro")        // healthy, no fallback
+    for u in rec.utterances { u.release() }
+}
+
+@Test func kokoroFallsBackToSayAndArmsCooldown() {
+    let rec = Recorder()
+    let sayLog = ArgLog()
+    let synth = FakeSynthesizer(result: .failure(NSError(domain: "down", code: 61)))   // ECONNREFUSED-ish
+    let service = SpeechService(
+        makeUtterance: { args in sayLog.add(args); return FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        voiceListing: { "" },
+        synthesizer: synth,
+        makePlayback: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        tempWriter: { _ in "/tmp/never.wav" })
+
+    service.speak(text: "hi", voice: "af_heart", backend: .kokoro, sayFallbackVoice: "Samantha")
+    rec.waitForCount(1)
+
+    // Server down -> fell back to `say` with the fallback voice (never touched afplay).
+    #expect(sayLog.all == [["-v", "Samantha", "hi"]])
+    // Cooldown armed: the effective backend now reports `say` so we don't hammer the dead server.
+    #expect(service.backendStatus().backend == "say")
+    for u in rec.utterances { u.release() }
+}
+
+@Test func stopCancelsInFlightKokoroRequest() {
+    let rec = Recorder()
+    let synth = FakeSynthesizer(result: .success(Data(count: 200)), block: true)   // blocks mid-request
+    let service = SpeechService(
+        makeUtterance: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        voiceListing: { "" },
+        synthesizer: synth,
+        makePlayback: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        tempWriter: { _ in "/tmp/never.wav" })
+
+    service.speak(text: "hi", voice: "af_heart", backend: .kokoro, sayFallbackVoice: "Samantha")
+    synth.waitUntilStarted()             // the HTTP request is now in flight (blocked)
+    service.stop()                       // must abandon it
+
+    Thread.sleep(forTimeInterval: 0.2)
+    #expect(synth.cancelled == true)     // in-flight request cancelled
+    #expect(rec.spokenText.isEmpty)      // nothing ever played (no afplay, no say fallback)
+}
+
+@Test func kokoroRequestBodyIsCorrect() throws {
+    let req = KokoroHTTPSynthesizer.makeRequest(base: "http://127.0.0.1:8880",
+                                                text: "true fishing is awesome", voice: "am_adam", timeout: 3)
+    #expect(req.url?.absoluteString == "http://127.0.0.1:8880/v1/audio/speech")
+    #expect(req.httpMethod == "POST")
+    #expect(req.value(forHTTPHeaderField: "Content-Type") == "application/json")
+    let body = try #require(req.httpBody)
+    let obj = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(obj["input"] as? String == "true fishing is awesome")
+    #expect(obj["voice"] as? String == "am_adam")
+}

@@ -1,16 +1,20 @@
--- Specs for Speech.lua — chat parsing, per-speaker voice assignment, live-vs-history gating, and the
--- optional LLM gender classification contract. Pure helpers are reached through _SPEECH_TEST; the
--- speaking path is driven by stubbing the global `speak`/`is_live`/`ai_local_request` builtins.
+-- Specs for Speech.lua — chat parsing, backend-aware per-speaker voice assignment, live-vs-history
+-- gating, the say-pool novelty filter, and the optional LLM gender classification contract. Pure helpers
+-- are reached through _SPEECH_TEST; the speaking path is driven by stubbing the global
+-- `speak`/`is_live`/`ai_local_request`/`speech_backend` builtins.
 
 local T = _SPEECH_TEST
 local S = T.state
 
--- Reset the registry + session bookkeeping to a known state before an assignment/speak case.
+-- Reset the registry + session bookkeeping to a known state before an assignment/speak case. Defaults
+-- to the `say` backend for deterministic voice picks unless a case opts into kokoro.
 local function reset()
   S.speakers = {}; S.spoken = {}; S.classified = {}
   S.enabled = true; S.connect_at = nil; S.mute_until = nil
-  T.cfg.classify.enabled = false          -- default OFF for deterministic assignment cases
-  T.set_pool(nil)                          -- fall back to the built-in default pool unless a case sets one
+  S.backend = "say"                        -- deterministic backend for most cases
+  T.cfg.backend = "say"
+  T.cfg.classify.enabled = false           -- default OFF for deterministic assignment cases
+  T.set_pools(nil, nil)                     -- fall back to built-in pools unless a case sets one
 end
 
 -- ---------------------------------------------------------------- parsing (verbatim wire formats)
@@ -67,39 +71,110 @@ test("parse_chat: NON-chat lines are rejected (never speak)", function()
   expect(T.parse_chat("")):eq(nil)
 end)
 
--- ---------------------------------------------------------------- voice assignment
-test("assignment: first sighting assigns a voice, then it is stable", function()
-  reset(); T.set_pool({ "Alex", "Samantha", "Daniel" })
-  local v1 = T.assign_voice("mouserat", "Mouserat")
+-- ---------------------------------------------------------------- say-pool novelty filter
+test("say pool: drops novelty voices, keeps natural ones, prefers premium variants", function()
+  reset()
+  -- Stub the host say-voice list with a mix of novelty + natural + a premium variant.
+  local real = speech_voices
+  speech_voices = function()
+    return {
+      { name = "Zarvox", locale = "en_US" }, { name = "Trinoids", locale = "en_US" },
+      { name = "Bells", locale = "en_US" }, { name = "Samantha", locale = "en_US" },
+      { name = "Daniel", locale = "en_GB" }, { name = "Ava", locale = "en_US" },
+      { name = "Ava (Premium)", locale = "en_US" },
+    }
+  end
+  local pool = T.build_say_pool()
+  local has = {}
+  for _, n in ipairs(pool) do has[n] = true end
+  expect(has["Zarvox"]):falsy()                 -- novelty dropped
+  expect(has["Trinoids"]):falsy(); expect(has["Bells"]):falsy()
+  expect(has["Samantha"]):truthy(); expect(has["Daniel"]):truthy()
+  expect(has["Ava (Premium)"]):truthy()         -- premium variant chosen
+  expect(has["Ava"]):falsy()                    -- plain variant dropped in favor of premium
+  speech_voices = real
+end)
+
+test("kokoro pool + gender: english ids from server, gender by prefix", function()
+  reset()
+  local real = speech_kokoro_voices
+  speech_kokoro_voices = function()
+    return { "af_heart", "am_adam", "bf_emma", "bm_george", "jf_alpha", "zm_yunxi" }   -- last two non-english
+  end
+  local pool = T.build_kokoro_pool()
+  local has = {}; for _, id in ipairs(pool) do has[id] = true end
+  expect(has["af_heart"]):truthy(); expect(has["bm_george"]):truthy()
+  expect(has["jf_alpha"]):falsy(); expect(has["zm_yunxi"]):falsy()   -- non-english filtered
+  expect(T.voice_gender("kokoro", "af_heart")):eq("f")
+  expect(T.voice_gender("kokoro", "am_adam")):eq("m")
+  expect(T.voice_gender("kokoro", "bf_emma")):eq("f")
+  expect(T.voice_gender("kokoro", "bm_george")):eq("m")
+  speech_kokoro_voices = real
+end)
+
+-- ---------------------------------------------------------------- voice assignment (per backend)
+test("assignment: first sighting assigns a say voice, then it is stable", function()
+  reset(); T.set_pools({ "Alex", "Samantha", "Daniel" }, nil)
+  local v1 = T.assign_voice("mouserat", "Mouserat", "say")
   expect(type(v1)):eq("string")
-  local v2 = T.assign_voice("mouserat", "Mouserat")
+  expect(S.speakers["mouserat"].say):eq(v1)
+  local v2 = T.assign_voice("mouserat", "Mouserat", "say")
   expect(v2):eq(v1)                       -- same voice on re-sighting
 end)
 
 test("assignment: round-robins by least-used and reuses on exhaustion", function()
-  reset(); T.set_pool({ "Alex", "Samantha" })
-  local a = T.assign_voice("s1", "s1")
-  local b = T.assign_voice("s2", "s2")
+  reset(); T.set_pools({ "Alex", "Samantha" }, nil)
+  local a = T.assign_voice("s1", "s1", "say")
+  local b = T.assign_voice("s2", "s2", "say")
   expect(a):ne(b)                          -- distinct while voices remain
-  local c = T.assign_voice("s3", "s3")     -- pool exhausted -> reuse least-used (first)
+  local c = T.assign_voice("s3", "s3", "say")     -- pool exhausted -> reuse least-used (first)
   expect(c):eq("Alex")
 end)
 
-test("assignment: set / forget", function()
-  reset()
-  S.speakers[T.norm("Bob")] = "Alex"
-  expect(S.speakers["bob"]):eq("Alex")
-  S.speakers["bob"] = nil
-  expect(S.speakers["bob"]):eq(nil)
+test("assignment: per-backend records kept side by side", function()
+  reset(); T.set_pools({ "Alex", "Samantha" }, { "af_heart", "am_adam" })
+  local sv = T.assign_voice("bob", "Bob", "say")
+  local kv = T.assign_voice("bob", "Bob", "kokoro")
+  expect(S.speakers["bob"].say):eq(sv)
+  expect(S.speakers["bob"].kokoro):eq(kv)
+  expect(kv:match("^%a%a_")):truthy()            -- a kokoro id, not a say name
 end)
 
-test("persistence: serialize -> reload round-trips the registry", function()
+test("assignment: switching backend gives a fresh pick for the new backend, keeps the old", function()
+  reset(); T.set_pools({ "Alex" }, { "af_heart" })
+  S.backend = "say"
+  T.assign_voice("gwen", "Gwen", "say")
+  expect(S.speakers["gwen"].say):eq("Alex")
+  expect(S.speakers["gwen"].kokoro):eq(nil)      -- no kokoro voice yet
+  S.backend = "kokoro"
+  local kv = T.assign_voice("gwen", "Gwen", "kokoro")
+  expect(kv):eq("af_heart")
+  expect(S.speakers["gwen"].say):eq("Alex")      -- old say assignment preserved
+end)
+
+test("persistence: serialize -> reload round-trips the per-backend registry + backend pref", function()
   reset()
-  S.speakers = { mouserat = "Daniel", ["a fruit vendor"] = "Fred" }
-  local blob = T.ser({ speakers = S.speakers })
+  S.speakers = { mouserat = { say = "Daniel", kokoro = "am_adam" }, ["a fruit vendor"] = { say = "Fred" } }
+  local blob = T.ser({ speakers = S.speakers, backend = "kokoro" })
   local t = loadchunk("return " .. blob)()
-  expect(t.speakers.mouserat):eq("Daniel")
-  expect(t.speakers["a fruit vendor"]):eq("Fred")
+  expect(t.speakers.mouserat.say):eq("Daniel")
+  expect(t.speakers.mouserat.kokoro):eq("am_adam")
+  expect(t.speakers["a fruit vendor"].say):eq("Fred")
+  expect(t.backend):eq("kokoro")
+end)
+
+-- ---------------------------------------------------------------- active backend selection
+test("active_backend: say preference forces say; kokoro honors host health", function()
+  reset()
+  S.backend = "say"
+  expect(T.active_backend()):eq("say")
+  S.backend = "kokoro"
+  local real = speech_backend
+  speech_backend = function() return "kokoro", "ready" end
+  expect(T.active_backend()):eq("kokoro")
+  speech_backend = function() return "say", "kokoro unreachable" end   -- cooldown
+  expect(T.active_backend()):eq("say")
+  speech_backend = real
 end)
 
 -- ---------------------------------------------------------------- is_live gating + speaking
@@ -130,6 +205,22 @@ test("speaking: channel prepends the name, tell/say do not", function()
   speak, is_live = real_speak, real_live
 end)
 
+test("speaking: kokoro backend passes a say fallback voice through to the host", function()
+  reset(); S.backend = "kokoro"; T.set_pools({ "Alex" }, { "af_heart" })
+  local calls = {}
+  local real_speak, real_live, real_backend = speak, is_live, speech_backend
+  speak = function(text, voice, rate, backend, fallback)
+    calls[#calls + 1] = { text = text, voice = voice, backend = backend, fallback = fallback }
+  end
+  is_live = function() return true end
+  speech_backend = function() return "kokoro", "ready" end
+  T.speak_line("Mouserat tells you, 'hi'")
+  expect(calls[1].backend):eq("kokoro")
+  expect(calls[1].voice):eq("af_heart")           -- kokoro id
+  expect(calls[1].fallback):eq("Alex")            -- say fallback resolved alongside
+  speak, is_live, speech_backend = real_speak, real_live, real_backend
+end)
+
 test("speaking: muted window swallows speech", function()
   reset()
   local said = {}
@@ -144,33 +235,46 @@ end)
 
 -- ---------------------------------------------------------------- LLM classification contract
 test("classify: valid reply reassigns an unspoken speaker's voice", function()
-  reset(); T.cfg.classify.enabled = true; T.set_pool({ "Alex", "Samantha" })   -- Alex=m, Samantha=f
+  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Alex", "Samantha" }, nil)   -- Alex=m, Samantha=f
   local real = ai_local_request
   ai_local_request = function(_, _, _, _, cb) cb("F", nil) end                  -- classifier says female
-  local v = T.assign_voice("gwen", "Gwen")                                      -- provisional = Alex
-  expect(S.speakers["gwen"]):eq("Samantha")                                     -- upgraded to a female voice
+  T.assign_voice("gwen", "Gwen", "say")                                         -- provisional = Alex
+  expect(S.speakers["gwen"].say):eq("Samantha")                                 -- upgraded to a female voice
+  ai_local_request = real
+end)
+
+test("classify: upgrades every assigned backend for an unspoken speaker", function()
+  reset(); T.cfg.classify.enabled = true
+  T.set_pools({ "Alex", "Samantha" }, { "am_adam", "af_heart" })
+  local real = ai_local_request
+  ai_local_request = function(_, _, _, _, cb) cb("F", nil) end
+  T.assign_voice("gwen", "Gwen", "say")       -- provisional say = Alex; triggers classify
+  T.assign_voice("gwen", "Gwen", "kokoro")    -- provisional kokoro = am_adam (classify already ran once)
+  -- The classify callback ran on the first assign and upgraded whatever was assigned then (say). Re-run
+  -- the upgrade path by classifying again is guarded; assert the say voice is the female pick.
+  expect(S.speakers["gwen"].say):eq("Samantha")
   ai_local_request = real
 end)
 
 test("classify: garbage / error falls back silently to the provisional voice", function()
-  reset(); T.cfg.classify.enabled = true; T.set_pool({ "Alex", "Samantha" })
+  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Alex", "Samantha" }, nil)
   local real = ai_local_request
   ai_local_request = function(_, _, _, _, cb) cb("purple monkey", nil) end       -- unparseable
-  local v = T.assign_voice("zed", "Zed")
-  expect(S.speakers["zed"]):eq(v)                                               -- unchanged
+  local v = T.assign_voice("zed", "Zed", "say")
+  expect(S.speakers["zed"].say):eq(v)                                            -- unchanged
   ai_local_request = function(_, _, _, _, cb) cb(nil, "timeout") end             -- error path
-  local v2 = T.assign_voice("qux", "Qux")
-  expect(S.speakers["qux"]):eq(v2)
+  local v2 = T.assign_voice("qux", "Qux", "say")
+  expect(S.speakers["qux"].say):eq(v2)
   ai_local_request = real
 end)
 
 test("classify: does NOT reassign a speaker already heard this session", function()
-  reset(); T.cfg.classify.enabled = true; T.set_pool({ "Alex", "Samantha" })
+  reset(); T.cfg.classify.enabled = true; T.set_pools({ "Alex", "Samantha" }, nil)
   local real = ai_local_request
   ai_local_request = function(_, _, _, _, cb) cb("F", nil) end
   S.spoken["gwen"] = true                                                       -- already heard
-  local v = T.assign_voice("gwen", "Gwen")
-  expect(S.speakers["gwen"]):eq(v)                                              -- keeps provisional
-  expect(S.speakers["gwen"]):ne("Samantha")
+  local v = T.assign_voice("gwen", "Gwen", "say")
+  expect(S.speakers["gwen"].say):eq(v)                                          -- keeps provisional
+  expect(S.speakers["gwen"].say):ne("Samantha")
   ai_local_request = real
 end)

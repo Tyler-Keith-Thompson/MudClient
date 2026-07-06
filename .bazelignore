@@ -4,6 +4,10 @@
 swift/.build
 Scripts/AlterAeon/.build
 
+# Python venvs (torch/torchgen etc. ship stray BUILD/.bzl files Bazel must not recurse into).
+tools/tts/.venv
+tools/finetune/.venv
+
 # Convenience symlinks
 bazel-bin
 bazel-out

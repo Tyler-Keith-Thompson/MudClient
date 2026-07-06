@@ -13,9 +13,11 @@
 //    * is_live() -> bool          — true only while the engine is processing lines from the LIVE
 //                                    connection right now; false during replay() and outside a live
 //                                    batch. Chat TTS guards on this so replayed history is never spoken.
-//    * speak(text[, voice[, rate]]) — enqueue an utterance (see SpeechService).
+//    * speak(text[, voice[, rate[, backend[, say_fallback]]]]) — enqueue an utterance (see SpeechService).
 //    * speech_stop()              — cancel the current utterance and flush the queue.
-//    * speech_voices([all])       — array of { name=, locale= } voices (English-only unless all=true).
+//    * speech_voices([all])       — array of { name=, locale= } `say` voices (English-only unless all=true).
+//    * speech_kokoro_voices()     — array of Kokoro voice-id strings from the local server (empty if down).
+//    * speech_backend()           — (backend, detail): the effective TTS backend ("kokoro"|"say").
 //
 
 import Foundation
@@ -49,8 +51,10 @@ extension LuaScriptEngine {
     func installSpeech() {
         register("is_live") { _ in [.bool(LiveGate.shared.isLive)] }
 
-        // speak(text[, voice[, rate]]). text is the untrusted game line; SpeechService passes it as a
-        // single argv element to `say`, so there's no shell-injection surface.
+        // speak(text[, voice[, rate[, backend[, say_fallback]]]]). text is the untrusted game line;
+        // SpeechService passes it as a single argv element to `say` (and as a JSON string field to the
+        // kokoro server), so there's no shell-injection surface. backend is "kokoro" or "say" (default
+        // "say"); say_fallback names the `say` voice used if a kokoro synth fails.
         register("speak") { args in
             guard case .string(let text)? = args.first, !text.isEmpty else { return [] }
             var voice: String?
@@ -63,13 +67,34 @@ extension LuaScriptEngine {
                 default: break
                 }
             }
-            Container.speechService().speak(text: text, voice: voice, rate: rate)
+            var backend: SpeechBackend = .say
+            if args.count > 3, case .string(let b) = args[3], let parsed = SpeechBackend(rawValue: b) {
+                backend = parsed
+            }
+            var sayFallback: String?
+            if args.count > 4, case .string(let f) = args[4], !f.isEmpty { sayFallback = f }
+            Container.speechService().speak(text: text, voice: voice, rate: rate,
+                                            backend: backend, sayFallbackVoice: sayFallback)
             return []
         }
 
         register("speech_stop") { _ in
             Container.speechService().stop()
             return []
+        }
+
+        // speech_kokoro_voices() -> array of voice-id strings from the local Kokoro server (empty if the
+        // server is unreachable; the Lua side then uses its curated voice set).
+        register("speech_kokoro_voices") { _ in
+            let ids = Container.speechService().kokoroVoices()
+            return [.table(ids.map { .string($0) }, [:])]
+        }
+
+        // speech_backend() -> (backend, detail). backend is "kokoro" or "say" (the effective backend,
+        // downgraded to say while a kokoro cooldown is active); detail is a human status string.
+        register("speech_backend") { _ in
+            let s = Container.speechService().backendStatus()
+            return [.string(s.backend), .string(s.detail)]
         }
 
         // speech_voices([all]) -> array of { name=, locale= }. English-only unless a truthy arg asks for
