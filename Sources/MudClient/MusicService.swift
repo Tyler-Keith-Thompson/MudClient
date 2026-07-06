@@ -82,6 +82,15 @@ final class MusicService: @unchecked Sendable {
         }
     }
 
+    /// Fade out and stop every channel (e.g. the connection dropped — ambience must not outlive it).
+    func stopAll() {
+        audioQueue.async { [weak self] in
+            guard let self else { return }
+            for (_, player) in self.channels { player.fadeOutAndStop(duration: self.crossfade) }
+            self.channels.removeAll()
+        }
+    }
+
     /// Set the master volume for all channels from a 0-100 percentage, fading currently-playing
     /// channels to the new level and applying it to anything started afterward. Clamped to 0…100.
     func setVolume(percent: Double) {

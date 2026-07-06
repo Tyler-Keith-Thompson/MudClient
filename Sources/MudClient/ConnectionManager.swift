@@ -93,6 +93,11 @@ final class ConnectionManager: @unchecked Sendable {
         if notifiedDisconnect { lock.unlock(); return }
         notifiedDisconnect = true
         lock.unlock()
+        // The game's soundscape must not outlive the connection: fade out music channels, cut
+        // in-flight MSP one-shots, and flush any queued speech.
+        Container.musicService().stopAll()
+        Container.mspService().stopAll()
+        Container.speechService().stop()
         Container.scriptInterpreter().engine.notifyDisconnect(reason: reason)
     }
 }

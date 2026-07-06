@@ -249,6 +249,14 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
         .shareFromCache(cache, strategy: .cacheUntilCompletionOrCancellation, keys: url)
     }
     
+    /// Stop every in-flight MSP sound (looping ambience included) — used when the connection drops.
+    func stopAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        for p in players { p.stop() }
+        players.removeAll()
+    }
+
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         lock.lock()
         defer { lock.unlock() }
