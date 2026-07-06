@@ -17,8 +17,13 @@
 -- the speaker's name male/female (ai_local_request, strict one-letter contract, silent fallback) and, if
 -- it lands before that speaker has been heard, upgrades the pick.
 --
--- Controls: voice.on()/off() · voice.list() · voice.set("name","Samantha") · voice.test("Samantha") ·
--- voice.forget("name") · voice.mute(seconds); `help(voice)`. Hot-reloadable: edit + pilot.reload().
+-- Repeats: an identical (speaker, message) pair is never spoken twice within cfg.dedupe_window — this
+-- silences the game's `replay` command (whose output is byte-identical to live chat). Curated socials
+-- ("Mouserat chuckles.") speak a short vocalization in the emoter's voice (cfg.emotes/voice.emotes).
+--
+-- Controls: voice.on()/off() · voice.list() · voice.set("name","af_heart") · voice.test("af_heart") ·
+-- voice.backend("kokoro"|"say") · voice.forget("name") · voice.reset() · voice.emotes("on"|"off") ·
+-- voice.mute(seconds); `help(voice)`. Hot-reloadable: edit + pilot.reload().
 
 local cfg = {
   enabled = true,            -- speak by default; voice.off() to silence
@@ -28,6 +33,15 @@ local cfg = {
   -- fallback whenever it's unreachable (the Swift host arms a cooldown and re-probes); "say" forces
   -- macOS `say`. Runtime-switchable + persisted via voice.backend("kokoro"|"say").
   backend = "kokoro",
+  -- Never speak an identical (speaker, message) pair twice within this window. This is what silences
+  -- the game's `replay` command: replayed channel lines are BYTE-IDENTICAL to the live ones (verified
+  -- against human-traces.jsonl — no prefix/timestamp distinguishes them), so shape-detection is
+  -- impossible and recency-dedupe is the correct gate. Bounded LRU (dedupe_max entries).
+  dedupe_window = 180,
+  dedupe_max = 200,
+  -- Speak short vocalizations for a curated set of socials ("Mouserat chuckles." -> "heh heh" in
+  -- Mouserat's voice). Non-vocal socials (waves, nods) and free-form emotes stay silent.
+  emotes = true,
   home = os.getenv("HOME") or "",
   -- Say the speaker's name before the message on these channels (public chatter reads better with an
   -- attribution; private tells/says are quieter without one). Keyed by canonical channel.
@@ -63,6 +77,11 @@ _SPEECH = _SPEECH or {
 _SPEECH.epoch = (_SPEECH.epoch or 0) + 1
 local EPOCH = _SPEECH.epoch
 local S = _SPEECH
+-- Recently-spoken dedupe LRU: sig -> os.time(), plus an insertion-order queue for the size cap.
+-- Deliberately reset on EVERY (re)load — a reload should never carry over suppression state.
+S.recent, S.recent_q = {}, {}
+-- Emote toggle survives reload (kept in S, seeded from cfg the first time).
+if S.emotes == nil then S.emotes = cfg.emotes end
 
 local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 -- Canonical speaker key: lowercased, whitespace collapsed. So "Mouserat" and "mouserat " map together.
@@ -382,6 +401,84 @@ local function assign_voice(key, display, backend)
   return v
 end
 
+-- ============================ recently-spoken dedupe ============================
+-- Never speak an identical (speaker, message) pair twice within cfg.dedupe_window seconds. This is the
+-- defense against the game's `replay` command (replayed lines are indistinguishable from live ones) and
+-- against any other repeat vector. Bounded: at most cfg.dedupe_max remembered pairs (oldest evicted).
+local function dedupe_sig(key, text) return key .. "\0" .. text end
+
+local function recently_spoken(key, text)
+  local t = S.recent[dedupe_sig(key, text)]
+  return t ~= nil and (os.time() - t) < cfg.dedupe_window
+end
+
+local function record_spoken(key, text)
+  local sig = dedupe_sig(key, text)
+  S.recent[sig] = os.time()
+  local q = S.recent_q
+  q[#q + 1] = sig
+  while #q > cfg.dedupe_max do
+    local old = table.remove(q, 1)
+    -- Only drop the map entry if no NEWER queue slot re-armed the same sig.
+    local rearmed = false
+    for i = 1, #q do if q[i] == old then rearmed = true; break end end
+    if not rearmed then S.recent[old] = nil end
+  end
+end
+
+local function clear_dedupe() S.recent, S.recent_q = {}, {} end
+
+-- ============================ socials / emotes ============================
+-- Curated VOCALIZABLE socials -> the short sound spoken in the emoter's voice. Kokoro renders these
+-- interjections well; keep them SHORT. Anything not in this map (waves, nods, dances, free-form emote
+-- text) is deliberately silent — an emote line can say literally anything.
+local SOCIAL_SOUNDS = {
+  chuckle = "heh heh", laugh = "ha ha ha!", giggle = "hee hee hee!", snicker = "heh",
+  cackle = "heh heh heh!", sigh = "hhhh, sigh", groan = "ughhh", gasp = "gasp!",
+  cry = "sob... sob...", scream = "aaaah!", snort = "hmph",
+}
+-- Third-person verb form -> base ("chuckles" -> "chuckle", "cries" -> "cry").
+local SOCIAL_VERBS = {}
+for base in pairs(SOCIAL_SOUNDS) do
+  SOCIAL_VERBS[(base == "cry") and "cries" or (base .. "s")] = base
+end
+
+-- A social line's tail after the verb: empty, or a SHORT unpunctuated clause ("somberly", "out loud",
+-- "at you"). Anything longer/with punctuation is a mob-flavor or combat sentence that merely CONTAINS
+-- a social verb ("A mindless zombie groans as it shuffles slowly towards you.") — rejected.
+local function social_tail_ok(rest)
+  if rest == "" then return true end
+  local tail = rest:match("^ ([%a' ]+)$")
+  if not tail then return false end
+  local n = 0
+  for _ in tail:gmatch("%S+") do n = n + 1 end
+  return n <= 3
+end
+
+-- parse_social(line) -> { speaker, verb, is_self } for a curated-social line, else nil. Anchored on the
+-- verbatim wire shapes from human-traces.jsonl: "You chuckle." · "You laugh out loud." ·
+-- "Mario sighs somberly." · "A baby water elemental giggles." — and rejects quoted lines
+-- ("You scream '…'"), long clauses, and non-vocal socials. Pure (unit-tested).
+local function parse_social(line)
+  line = trim(line)
+  if line == "" or line:find("'", 1, true) then return nil end   -- quoted = speech, not a social
+  local body = line:match("^(.-)[.!]$")
+  if not body or body:find("[.!,]") then return nil end          -- one short sentence only
+  -- Your own: "You chuckle[ tail]"
+  local verb, rest = body:match("^You (%a+)(.*)$")
+  if verb and SOCIAL_SOUNDS[verb] and social_tail_ok(rest) then
+    return { speaker = "you", verb = verb, is_self = true }
+  end
+  -- Third person: "<Name> <verbs>[ tail]" — the name may be multi-word ("A baby water elemental").
+  for third, base in pairs(SOCIAL_VERBS) do
+    local who, rest2 = body:match("^(.-) " .. third .. "(.*)$")
+    if who and trim(who) ~= "" and social_tail_ok(rest2 or "") then
+      return { speaker = trim(who), verb = base }
+    end
+  end
+  return nil
+end
+
 -- ============================ speaking ============================
 local function is_muted()
   local now = os.time()
@@ -402,18 +499,44 @@ local function speak_line(line)
   local key = c.is_self and "you" or norm(c.speaker)
   if key == "" then return end
   local display = c.is_self and nil or c.speaker
+  local msg = trim(c.message)
+  -- Recency dedupe: an identical (speaker, message) pair within the window is a repeat — most notably
+  -- the game's `replay` command re-printing recent channel history in the exact live format.
+  if recently_spoken(key, msg) then return end
   local backend = active_backend()
   -- Primary voice for the active backend; when kokoro, also resolve a `say` voice so the host's
   -- transparent fallback (server unreachable) keeps this speaker sounding consistent.
   local voice = assign_voice(key, display, backend)
   local say_fallback = (backend == "kokoro") and assign_voice(key, display, "say") or nil
   S.spoken[key] = true
-  local text = trim(c.message)
+  record_spoken(key, msg)
+  local text = msg
   if cfg.speak_names[c.channel] then
     local nm = c.is_self and ((state and state.name) or "You") or c.speaker
     text = nm .. ": " .. text
   end
   if speak then speak(text, voice, cfg.rate, backend, say_fallback) end
+end
+
+-- The gate every social/emote-shaped line passes through. Speaks a SHORT curated vocalization in the
+-- emoter's assigned voice; same live/mute/dedupe gates as chat (a chuckle in replayed history or a
+-- repeated chuckle within the window stays silent).
+local function speak_emote(line)
+  if not S.enabled or not S.emotes then return end
+  if is_live and not is_live() then return end
+  if is_muted() then return end
+  local e = parse_social(line)
+  if not e then return end
+  local key = e.is_self and "you" or norm(e.speaker)
+  if key == "" then return end
+  if recently_spoken(key, "emote:" .. e.verb) then return end
+  local display = e.is_self and nil or e.speaker
+  local backend = active_backend()
+  local voice = assign_voice(key, display, backend)
+  local say_fallback = (backend == "kokoro") and assign_voice(key, display, "say") or nil
+  S.spoken[key] = true
+  record_spoken(key, "emote:" .. e.verb)
+  if speak then speak(SOCIAL_SOUNDS[e.verb], voice, cfg.rate, backend, say_fallback) end
 end
 
 -- ============================ triggers ============================
@@ -423,6 +546,11 @@ end
 trigger("^You (say|gossip|chat|auction|yell|shout|newbie|tell)\\b"
   .. "|(?:tells you|tells the group|gossips|chats|auctions|yells|shouts|newbies|says), '",
   function(line) speak_line(line) end)
+
+-- Socials: broad verb-match trigger; parse_social is the exact gate (rejects quoted lines, long
+-- mob-flavor clauses, and any verb not in the curated vocal set).
+trigger("\\b(?:chuckles?|laughs?|giggles?|snickers?|cackles?|sighs?|groans?|gasps?|cry|cries|screams?|snorts?)\\b",
+  function(line) speak_emote(line) end)
 
 -- Post-connect mute window: chain the existing on_connect (AlterAeon defines it) so we don't clobber
 -- it, and stamp the connect time. Re-runs cleanly on reload (AlterAeon reloads first, resetting the
@@ -499,6 +627,27 @@ function voice.forget(name)
   echo("[voice] forgot " .. key)
 end
 
+-- Wipe EVERY speaker's voice assignment (both backends), the session bookkeeping, and the dedupe
+-- memory, and persist the now-empty registry immediately. Each speaker gets a fresh pick from the
+-- CURRENT pools the next time they speak.
+function voice.reset()
+  local n = 0
+  for _ in pairs(S.speakers) do n = n + 1 end
+  S.speakers = {}; S.spoken = {}; S.classified = {}
+  clear_dedupe()
+  save_now()
+  echo(string.format("[voice] reset — dropped %d speaker assignment(s) (say + kokoro); fresh voices on next sighting", n))
+end
+
+-- Toggle (or report) the curated social vocalizations ("Mouserat chuckles." -> "heh heh").
+function voice.emotes(v)
+  if v == nil or v == "" then
+    return echo("[voice] emotes " .. (S.emotes and "ON" or "OFF"))
+  end
+  S.emotes = (v == true or v == "on" or v == "ON")
+  echo("[voice] emotes " .. (S.emotes and "ON" or "OFF"))
+end
+
 function voice.mute(seconds)
   seconds = tonumber(seconds) or 10
   S.mute_until = os.time() + seconds
@@ -540,6 +689,12 @@ doc(voice.backend, { name = "voice.backend", sig = "voice.backend([\"kokoro\"|\"
   example = "voice.backend(\"kokoro\")" })
 doc(voice.forget, { name = "voice.forget", sig = "voice.forget(name)", group = "speech",
   text = "Drop a speaker's saved voices (both backends) so they are reassigned on next sighting." })
+doc(voice.reset, { name = "voice.reset", sig = "voice.reset()", group = "speech",
+  text = "Wipe ALL speaker voice assignments (say + kokoro), in memory and on disk, plus the recently-spoken dedupe memory. Every speaker gets a fresh pick from the current voice pools the next time they speak.",
+  example = "voice.reset()" })
+doc(voice.emotes, { name = "voice.emotes", sig = "voice.emotes([\"on\"|\"off\"])", group = "speech",
+  text = "Toggle (or report, with no arg) spoken vocalizations for curated socials: chuckle/laugh/giggle/snicker/cackle/sigh/groan/gasp/cry/scream/snort speak a short sound (e.g. \"heh heh\") in the emoter's voice. Non-vocal socials and free-form emotes are never spoken.",
+  example = "voice.emotes(\"off\")" })
 doc(voice.mute, { name = "voice.mute", sig = "voice.mute([seconds])", group = "speech",
   text = "Silence speech for N seconds (default 10) and flush anything queued. Handy during a flood.",
   example = "voice.mute(30)" })
@@ -556,8 +711,10 @@ setmetatable(voice, { __call = function(_, rest)
   elseif verb == "test" then voice.test(arg ~= "" and arg or nil)
   elseif verb == "backend" then voice.backend(arg ~= "" and arg or nil)
   elseif verb == "forget" then voice.forget(arg)
+  elseif verb == "reset" then voice.reset()
+  elseif verb == "emotes" then voice.emotes(arg ~= "" and arg or nil)
   elseif verb == "mute" then voice.mute(tonumber(arg))
-  else echo("[voice] usage: voice.on() | off() | list() | set(name,voice) | test(voice) | backend(k/say) | forget(name) | mute(s)  (help(voice))") end
+  else echo("[voice] usage: voice.on() | off() | list() | set(name,voice) | test(voice) | backend(k/say) | forget(name) | reset() | emotes(on/off) | mute(s)  (help(voice))") end
 end })
 
 -- ============================ test seam ============================
@@ -569,6 +726,13 @@ _SPEECH_TEST = {
   assign_voice = assign_voice,
   classify_gender = classify_gender,
   speak_line = speak_line,
+  speak_emote = speak_emote,
+  parse_social = parse_social,
+  social_sounds = SOCIAL_SOUNDS,
+  social_verbs = SOCIAL_VERBS,
+  recently_spoken = recently_spoken,
+  record_spoken = record_spoken,
+  clear_dedupe = clear_dedupe,
   active_backend = active_backend,
   voice_gender = voice_gender,
   build_say_pool = build_say_pool,

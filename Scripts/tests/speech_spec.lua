@@ -10,10 +10,11 @@ local S = T.state
 -- to the `say` backend for deterministic voice picks unless a case opts into kokoro.
 local function reset()
   S.speakers = {}; S.spoken = {}; S.classified = {}
-  S.enabled = true; S.connect_at = nil; S.mute_until = nil
+  S.enabled = true; S.emotes = true; S.connect_at = nil; S.mute_until = nil
   S.backend = "say"                        -- deterministic backend for most cases
   T.cfg.backend = "say"
   T.cfg.classify.enabled = false           -- default OFF for deterministic assignment cases
+  T.clear_dedupe()                          -- no carried-over suppression between cases
   T.set_pools(nil, nil)                     -- fall back to built-in pools unless a case sets one
 end
 
@@ -230,6 +231,182 @@ test("speaking: muted window swallows speech", function()
   S.mute_until = os.time() + 60
   T.speak_line("Mouserat gossips, 'hi'")
   expect(#said):eq(0)
+  speak, is_live = real_speak, real_live
+end)
+
+-- ---------------------------------------------------------------- recently-spoken dedupe
+test("dedupe: identical (speaker, message) within the window is suppressed", function()
+  reset()
+  local said = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text) said[#said + 1] = text end
+  is_live = function() return true end
+  T.speak_line("Mouserat gossips, 'true fishing is awesome'")
+  T.speak_line("Mouserat gossips, 'true fishing is awesome'")   -- e.g. the game's `replay` output
+  expect(#said):eq(1)
+  -- A DIFFERENT message from the same speaker still speaks.
+  T.speak_line("Mouserat gossips, 'something new'")
+  expect(#said):eq(2)
+  -- The SAME message from a different speaker still speaks.
+  T.speak_line("Lokar gossips, 'true fishing is awesome'")
+  expect(#said):eq(3)
+  speak, is_live = real_speak, real_live
+end)
+
+test("dedupe: repeats OUTSIDE the window are spoken again", function()
+  reset()
+  local said = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text) said[#said + 1] = text end
+  is_live = function() return true end
+  T.speak_line("Mouserat gossips, 'hi'")
+  expect(#said):eq(1)
+  -- Age the record past the window (the sig format is key\0message).
+  S.recent["mouserat\0hi"] = os.time() - (T.cfg.dedupe_window + 1)
+  T.speak_line("Mouserat gossips, 'hi'")
+  expect(#said):eq(2)
+  speak, is_live = real_speak, real_live
+end)
+
+test("dedupe: memory-bounded — the queue never exceeds dedupe_max", function()
+  reset()
+  local old_max = T.cfg.dedupe_max
+  T.cfg.dedupe_max = 10
+  for i = 1, 35 do T.record_spoken("spk" .. i, "msg" .. i) end
+  expect(#S.recent_q <= 10):truthy()
+  local n = 0
+  for _ in pairs(S.recent) do n = n + 1 end
+  expect(n <= 10):truthy()                 -- evicted sigs leave the map too
+  -- The NEWEST entries survive; the oldest were evicted.
+  expect(T.recently_spoken("spk35", "msg35")):truthy()
+  expect(T.recently_spoken("spk1", "msg1")):falsy()
+  T.cfg.dedupe_max = old_max
+end)
+
+test("dedupe: replay()/history never records — a gated line still speaks later live", function()
+  reset()
+  local said = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text) said[#said + 1] = text end
+  is_live = function() return false end     -- client-side replay(): is_live gate wins first
+  T.speak_line("Mouserat gossips, 'hi'")
+  expect(#said):eq(0)
+  expect(T.recently_spoken("mouserat", "hi")):falsy()   -- suppression did NOT get recorded
+  is_live = function() return true end
+  T.speak_line("Mouserat gossips, 'hi'")
+  expect(#said):eq(1)                        -- the first LIVE occurrence speaks
+  speak, is_live = real_speak, real_live
+end)
+
+-- ---------------------------------------------------------------- voice.reset
+test("voice.reset: wipes both backends, dedupe memory, and the persisted file", function()
+  reset()
+  local tmp = os.tmpname()
+  local old_file = T.cfg.save_file
+  T.cfg.save_file = tmp
+  S.speakers = { mouserat = { say = "Zarvox", kokoro = "af_heart" }, lokar = { say = "Bells" } }
+  S.spoken = { mouserat = true }; S.classified = { mouserat = true }
+  T.record_spoken("mouserat", "hi")
+  voice.reset()
+  expect(next(S.speakers)):eq(nil)          -- all assignments gone (both backends)
+  expect(next(S.spoken)):eq(nil); expect(next(S.classified)):eq(nil)
+  expect(T.recently_spoken("mouserat", "hi")):falsy()   -- dedupe cleared
+  -- The persisted file was rewritten with an EMPTY registry.
+  local t = loadfile(tmp)()
+  expect(next(t.speakers)):eq(nil)
+  os.remove(tmp)
+  T.cfg.save_file = old_file
+end)
+
+test("voice.reset: next sighting picks fresh voices from the current pools", function()
+  reset()
+  local tmp = os.tmpname()
+  local old_file = T.cfg.save_file
+  T.cfg.save_file = tmp
+  S.speakers = { mouserat = { say = "Zarvox" } }   -- a ludicrous old novelty assignment
+  voice.reset()
+  T.set_pools({ "Samantha", "Daniel" }, nil)        -- the current curated pool
+  local v = T.assign_voice("mouserat", "Mouserat", "say")
+  expect(v):eq("Samantha")                          -- fresh pick, not the old Zarvox
+  os.remove(tmp)
+  T.cfg.save_file = old_file
+end)
+
+-- ---------------------------------------------------------------- socials / emotes
+test("parse_social: verbatim trace shapes (own + third-person, multi-word names)", function()
+  local e1 = T.parse_social("You chuckle.")
+  expect(e1.is_self):truthy(); expect(e1.verb):eq("chuckle"); expect(e1.speaker):eq("you")
+  local e2 = T.parse_social("You laugh out loud.")             -- short tail allowed
+  expect(e2.verb):eq("laugh")
+  local e3 = T.parse_social("You sigh.")
+  expect(e3.verb):eq("sigh")
+  local e4 = T.parse_social("Mario sighs somberly.")           -- adverb tail
+  expect(e4.speaker):eq("Mario"); expect(e4.verb):eq("sigh"); expect(e4.is_self):falsy()
+  local e5 = T.parse_social("A baby water elemental giggles.") -- multi-word name
+  expect(e5.speaker):eq("A baby water elemental"); expect(e5.verb):eq("giggle")
+  local e6 = T.parse_social("Mouserat laughs at Lokar.")       -- targeted social
+  expect(e6.speaker):eq("Mouserat"); expect(e6.verb):eq("laugh")
+end)
+
+test("parse_social: rejects lookalikes that merely contain a social verb", function()
+  -- Mob-flavor sentence with a long clause after the verb (verbatim from traces).
+  expect(T.parse_social("A mindless zombie groans as it shuffles slowly towards you.")):eq(nil)
+  -- Combat scream with a long object clause (hyphenated, multi-word).
+  expect(T.parse_social("A buhito screams a blood-chilling roar at A clay man!")):eq(nil)
+  -- Quoted scream is speech, not a social.
+  expect(T.parse_social("You scream 'The POWER!' and writhe on the floor.")):eq(nil)
+  -- Non-vocal socials stay silent.
+  expect(T.parse_social("Mouserat waves happily.")):eq(nil)
+  expect(T.parse_social("Lokar nods.")):eq(nil)
+  expect(T.parse_social("Mouserat dances with Lokar.")):eq(nil)
+  -- Ordinary narration.
+  expect(T.parse_social("The goblin dies.")):eq(nil)
+  expect(T.parse_social("")):eq(nil)
+end)
+
+test("social sounds: every curated verb (base + third person) maps to a short utterance", function()
+  local n = 0
+  for base, sound in pairs(T.social_sounds) do
+    n = n + 1
+    expect(type(sound)):eq("string"); expect(#sound > 0):truthy(); expect(#sound < 40):truthy()
+    local third = (base == "cry") and "cries" or (base .. "s")
+    expect(T.social_verbs[third]):eq(base)           -- third-person form round-trips
+  end
+  expect(n >= 11):truthy()                            -- chuckle/laugh/giggle/snicker/cackle/sigh/groan/gasp/cry/scream/snort
+end)
+
+test("emotes: speak the vocalization in the emoter's assigned voice", function()
+  reset(); T.set_pools({ "Alex" }, nil)
+  local calls = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text, voice) calls[#calls + 1] = { text = text, voice = voice } end
+  is_live = function() return true end
+  T.speak_emote("Mouserat chuckles.")
+  expect(#calls):eq(1)
+  expect(calls[1].text):eq(T.social_sounds.chuckle)   -- the curated sound, never the raw line
+  expect(calls[1].voice):eq("Alex")                   -- the speaker's assigned voice
+  expect(S.speakers["mouserat"].say):eq("Alex")       -- and it registered like a chat sighting
+  speak, is_live = real_speak, real_live
+end)
+
+test("emotes: obey is_live, the toggle, and dedupe", function()
+  reset(); T.set_pools({ "Alex" }, nil)
+  local said = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text) said[#said + 1] = text end
+  is_live = function() return false end
+  T.speak_emote("Mouserat chuckles.")                 -- replayed history: silent
+  expect(#said):eq(0)
+  is_live = function() return true end
+  S.emotes = false
+  T.speak_emote("Mouserat chuckles.")                 -- toggled off: silent
+  expect(#said):eq(0)
+  S.emotes = true
+  T.speak_emote("Mouserat chuckles.")
+  T.speak_emote("Mouserat chuckles.")                 -- repeat within the window: deduped
+  expect(#said):eq(1)
+  T.speak_emote("Mouserat laughs.")                   -- different social: speaks
+  expect(#said):eq(2)
   speak, is_live = real_speak, real_live
 end)
 
