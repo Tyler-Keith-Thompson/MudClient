@@ -13,8 +13,15 @@ state = state or {}
 
 local cfg = {
   quiet = 0.75, min_interval = 2, human_grace = 4, max_cmds = 3, loop_threshold = 8,
-  max_tokens = 256, combat_max_tokens = 128, max_stale_skips = 2, transcript_lines = 40,
+  -- A combat command is ~5-15 tokens (`kill X` / `cast 'X'`), so cap generation hard for combat turns:
+  -- it stops at EOS long before the cap, but a low ceiling bounds the pathological no-EOS case and keeps
+  -- the local (uncached) path predictable. The full 256 stays for exploration/hosted planning turns.
+  max_tokens = 256, combat_max_tokens = 48, max_stale_skips = 2, transcript_lines = 40,
   context_lines = 20,   -- rolling window: max recent output lines sent per turn (bounds prefill cost)
+  combat_context_lines = 8,   -- fewer output lines in a combat turn: less prefill = faster first token
+  -- Combat-only: when ON the pilot acts ONLY while in a fight and stays dormant between fights (you
+  -- explore/move manually; the AI auto-resumes the instant the next fight starts). See fire_if_ready.
+  combat_only = false,
   circle_threshold = 3, -- after this many moves with no NEW room, the script auto-routes to a frontier
   use_tools = false,    -- set by the brain choice below (tools for hosted models, CMD: text for local)
   brain = "sonnet",     -- DEFAULT decision model: "sonnet" | "haiku" | "local". Applied on load.
@@ -827,9 +834,21 @@ end
 -- The short, plain-text prompt the LoRA was actually FINE-TUNED on (see tools/finetune/parse_capture.py).
 -- A fine-tuned model must be run in the format it learned — short prompt, no tools, `CMD:` output — or
 -- it goes out-of-distribution and produces garbage. Used when cfg.use_tools is false.
-local TEXT_SYS = "You are an expert player of the MUD Alter Aeon, driving a character live. Read the "
-  .. "character's STATE and the RECENT GAME OUTPUT, then issue exactly one command on its own line "
-  .. "prefixed with 'CMD:'. Use real Alter Aeon commands and short target keywords. One action per turn."
+-- TEMPORARY (2026-07-06): swapped to the EXACT compact prompt the 27B-AlterAeon combat fine-tune was
+-- trained on (tools/finetune build_combined-short). A fine-tune only behaves as measured when driven
+-- with its training prompt; the eval showed the full/old prompts collapse it. Restore the original
+-- (commented below) when back on a base/hosted model.
+local TEXT_SYS = "You are an expert player of the MUD Alter Aeon, driving a character live. Each turn you "
+  .. "receive the character's STATE and recent game OUTPUT. Decide the single best next action and TAKE IT "
+  .. "BY CALLING ONE TOOL. ONE action per turn, then wait for the result. Prefer the specific tools "
+  .. "(move, attack, cast, get, drop, wear, put, recover, stand, look, inventory, flee); use `command` for "
+  .. "anything they don't cover (spells, skills, train, buy, list); use `wait` to do nothing. In combat, "
+  .. "attack or cast to deal damage, recover when hurt, flee if losing. ACT, don't talk — your reply must "
+  .. "BE a tool call, not a sentence describing it."
+-- ORIGINAL (restore when off the fine-tune):
+-- local TEXT_SYS = "You are an expert player of the MUD Alter Aeon, driving a character live. Read the "
+--   .. "character's STATE and the RECENT GAME OUTPUT, then issue exactly one command on its own line "
+--   .. "prefixed with 'CMD:'. Use real Alter Aeon commands and short target keywords. One action per turn."
 
 local function system_prompt()
   if not cfg.use_tools then return TEXT_SYS end
@@ -879,7 +898,8 @@ WHO DID WHAT: `[you]` lines are YOUR OWN past actions (a new room after `[you] e
 NOTES: your saved notes (under "NOTES YOU'VE SAVED") are things you've LEARNED are true — ACT on them. Save new ones with `remember` for durable facts: a trainer/vendor location, which spell hits hardest, a good xp spot and its level, a danger. Keep them specific; don't record transient things. Use `make_script` only for a deterministic reflex you'll repeat all session.]] .. ref
 end
 
-local function current_room_slice()
+local function current_room_slice(limit)
+  limit = limit or cfg.context_lines
   local start = 1
   for i = #P.transcript, 1, -1 do
     if P.transcript[i]:find("MOVED to a NEW room", 1, true) then start = i; break end
@@ -889,7 +909,7 @@ local function current_room_slice()
   -- latency, so bounding the changing block keeps turns fast and predictable. Safe to trim old lines
   -- because the durable room identity lives in the STATE block (room name) and MAP block (exits) —
   -- those are sent every turn regardless. Tune cfg.context_lines for the speed/awareness tradeoff.
-  local floor = #P.transcript - cfg.context_lines + 1
+  local floor = #P.transcript - limit + 1
   if start < floor then start = floor end
   if start < 1 then start = 1 end
   local lines = {}
@@ -908,17 +928,32 @@ local function build_user(st, expl, mem, world, convo, directive, nudge, fightin
   -- me" about an automatic nudge it was never given.
   local dir_block = directive and ("\n=== DIRECTOR NOTE (the human just told you this — act on it now) ===\n" .. directive .. "\n") or ""
   local nudge_block = nudge and ("\n=== AUTO NOTE (generated by the game client, NOT from the human) ===\n" .. nudge .. "\n") or ""
+  -- The combat closer is IDENTICAL for both paths: it's the exact string the local combat fine-tune was
+  -- trained on ("call attack or cast NOW. No reasoning."), so the local path stays in-distribution and
+  -- emits the compact JSON action it learned (parsed by handle_reply). The hosted tool path already used
+  -- this closer, so it's unchanged. Only the NON-combat closer differs (tools vs CMD: text).
   local closer
-  if cfg.use_tools then
-    closer = fighting
-      and "You are IN COMBAT — call attack or cast NOW. No reasoning."
-      or "Decide the single best next action and call ONE tool. Call it directly — no preamble, no restating the situation."
+  if fighting then
+    closer = "You are IN COMBAT — call attack or cast NOW. No reasoning."
+  elseif cfg.use_tools then
+    closer = "Decide the single best next action and call ONE tool. Call it directly — no preamble, no restating the situation."
   else
-    closer = fighting
-      and "You are IN COMBAT — reply with one line: CMD: <command> (e.g. CMD: kill kobold). Nothing else."
-      or "Decide the single best next action. Reply with one line: CMD: <command>. Nothing else."
+    closer = "Decide the single best next action. Reply with one line: CMD: <command>. Nothing else."
   end
   return "=== CHARACTER STATE ===\n" .. st .. world_block .. map_block .. mem_block .. manual_block .. "\n=== RECENT GAME OUTPUT ===\n" .. convo .. "\n" .. dir_block .. nudge_block .. "\n" .. closer
+end
+
+-- Lean prompt for a LOCAL combat turn: state + what's here + a short output window + the combat closer.
+-- The MAP / saved NOTES / RAG manual are dropped — a combat decision keys off STATE (hp/mana/target),
+-- and the local model has NO prompt caching, so every dropped line is prefill the turn no longer pays
+-- for. Measured ~30% faster first token vs the full prompt. Hosted models keep the full (cached) prompt;
+-- this is only used on the fine-tune's combat path. A director note still rides along (you can steer).
+local function build_combat_user(st, world, convo, directive)
+  local world_block = (world and world ~= "") and ("\n=== WHAT'S HERE ===\n" .. world .. "\n") or ""
+  local dir_block = directive and ("\n=== DIRECTOR NOTE (act on it now) ===\n" .. directive .. "\n") or ""
+  return "=== CHARACTER STATE ===\n" .. st .. world_block ..
+    "\n=== RECENT GAME OUTPUT ===\n" .. convo .. "\n" .. dir_block ..
+    "\nYou are IN COMBAT — call attack or cast NOW. No reasoning."
 end
 
 -- ---- trace logging (JSONL for fine-tuning) -------------------------------------------------
@@ -1286,9 +1321,85 @@ function execute(actions, thoughts, scripts, mems)
   end
 end
 
--- Text fallback: parse CMD:/SCRIPT:/REMEMBER: lines. Used when the model answers with plain text
--- instead of calling a tool (older/smaller models), so nothing regresses.
+-- ---- fine-tune JSON action parsing ---------------------------------------------------------
+-- The local combat fine-tune replies with a JSON action, NOT `CMD:` text. It emits it two ways:
+--   * the trained tool-call: {"name":"command","arguments":{"text":"c shower"}}  (sometimes wrapped in
+--     Qwen <tool_call>…</tool_call> tags), and
+--   * a flattened shorthand it generalized to: {"action":"attack","target":"town guard"} /
+--     {"action":"cast","target":"shower of sparks"}.
+-- Both must resolve to a REAL game command through the same TOOL build path the hosted models use.
+-- Generic-value key each tool's flattened form routes into (no-arg tools like flee/stand are absent).
+local PRIMARY_ARG = {
+  move = "direction", attack = "target", cast = "spell", get = "item", put = "item",
+  drop = "item", wear = "item", recover = "method", look = "at", command = "text",
+  remember = "fact", make_script = "description", navigate = "destination",
+}
+
+-- Turn ONE decoded object into a { name, args } tool call from_tool_calls understands, or nil if it
+-- can't be understood (never fabricate a command). Handles the proper `arguments` shape and the
+-- flattened `{action,target}` shorthand — routing a single generic value to the tool's primary arg so
+-- we never emit a duplicate (e.g. cast 'X' X).
+local function normalize_call(obj)
+  if type(obj) ~= "table" then return nil end
+  local name = obj.name or obj.action or obj.tool or obj.function_name
+  if type(name) ~= "string" or trim(name) == "" then return nil end
+  name = trim(name):lower()
+  if name == "kill" then name = "attack" end
+  -- Proper OpenAI/Qwen shape: `arguments` is (or JSON-decodes to) the args table — pass it straight on.
+  local args = obj.arguments or obj.args or obj.parameters
+  if type(args) == "string" then local ok, d = pcall(json.decode, args); if ok then args = d end end
+  if type(args) == "table" then return { name = name, args = args } end
+  -- Flattened shorthand: pull the single value the model supplied and route it to the tool's primary arg.
+  local pk = PRIMARY_ARG[name]
+  if pk == nil then return { name = name, args = {} } end   -- no-arg tool (flee/stand/look/inventory/wait)
+  local generic = obj.text or obj.spell or obj.target or obj.direction or obj.item
+                  or obj.destination or obj.method or obj.at or obj.fact or obj.value or obj.arg
+  if generic ~= nil then return { name = name, args = { [pk] = generic } } end
+  return nil   -- an arg was required and none was present — skip safely rather than send garbage
+end
+
+-- Pull every action object out of a raw reply: <tool_call>…</tool_call> blocks first (Qwen format),
+-- else brace-balanced bare JSON objects. Returns a (possibly empty) list of normalized calls.
+local function extract_calls(reply)
+  if type(reply) ~= "string" then return {} end
+  local objs, found = {}, false
+  for block in reply:gmatch("<tool_call>(.-)</tool_call>") do
+    found = true
+    local ok, o = pcall(json.decode, trim(block)); if ok then objs[#objs + 1] = o end
+  end
+  if not found then
+    local i, n = 1, #reply
+    while true do
+      local a = reply:find("{", i, true); if not a then break end
+      local depth, b, instr, esc = 0, nil, false, false
+      for j = a, n do
+        local ch = reply:sub(j, j)
+        if instr then
+          if esc then esc = false elseif ch == "\\" then esc = true elseif ch == '"' then instr = false end
+        elseif ch == '"' then instr = true
+        elseif ch == "{" then depth = depth + 1
+        elseif ch == "}" then depth = depth - 1; if depth == 0 then b = j; break end end
+      end
+      if not b then break end
+      local ok, o = pcall(json.decode, reply:sub(a, b)); if ok then objs[#objs + 1] = o end
+      i = b + 1
+    end
+  end
+  local calls = {}
+  for _, o in ipairs(objs) do local c = normalize_call(o); if c then calls[#calls + 1] = c end end
+  return calls
+end
+
+-- Text fallback: first try the fine-tune's JSON action(s); otherwise parse CMD:/SCRIPT:/REMEMBER: lines.
+-- Used when the model answers with content instead of native API tool_calls (the local path always does).
 function handle_reply(reply)
+  reply = reply or ""
+  local calls = extract_calls(reply)
+  if #calls > 0 then
+    local actions, mems, scripts = from_tool_calls(calls)
+    execute(actions, {}, scripts, mems)
+    return
+  end
   local actions, thoughts, scripts, mems = {}, {}, {}, {}
   for line in reply:gmatch("[^\n]+") do
     local t = trim(line)
@@ -1946,7 +2057,6 @@ function take_turn()
 end
 
 function take_turn_decide()
-  local convo = current_room_slice()
   P.snap_seq = P.input_seq
   P.snap_fighting = in_combat()
   local directive = P.pending; P.pending = nil
@@ -1954,7 +2064,14 @@ function take_turn_decide()
   local fighting = P.snap_fighting
   local max_tokens = fighting and cfg.combat_max_tokens or cfg.max_tokens
   local sys = system_prompt()
-  local user = build_user(describe_state(), exploration_summary(), memory_summary(), world_summary(), convo, directive, nudge, fighting)
+  -- Local combat path gets the LEAN prompt (state + short output window, no map/notes/manual) and a
+  -- shorter output window — no prompt caching locally, so trimming prefill is the biggest speed win.
+  -- Hosted models (cached) and every non-combat turn keep the full prompt.
+  local lean = fighting and not cfg.use_tools
+  local convo = current_room_slice(lean and cfg.combat_context_lines or cfg.context_lines)
+  local user = lean
+    and build_combat_user(describe_state(), world_summary(), convo, directive)
+    or build_user(describe_state(), exploration_summary(), memory_summary(), world_summary(), convo, directive, nudge, fighting)
 
   local tools = cfg.use_tools and tools_json() or ""   -- fine-tuned models get NO tools (CMD: text only)
   ai_request(sys, user, max_tokens, tools, cfg.think_prefill, function(reply, tool_calls_json, err)
@@ -2053,6 +2170,10 @@ end
 function fire_if_ready(g)
   if EPOCH ~= _AIP.epoch then return end   -- superseded by a reload
   if g ~= P.gen or not P.enabled or P.busy or P.nav then return end   -- P.nav: script is auto-walking a route
+  -- Combat-only: go dormant between fights. We simply DON'T fire (and don't re-arm) when out of combat;
+  -- the next fight's output re-arms the chain (pilot_observe -> arm), so this auto-resumes with no
+  -- per-fight re-arming. Nothing else changes — it never fires on your manual movement between fights.
+  if cfg.combat_only and not in_combat() then return end
   local now = os.time()
   if now - P.last_turn < cfg.min_interval then
     after(cfg.min_interval, function() fire_if_ready(g) end); return
@@ -2091,8 +2212,14 @@ local function set_enabled(on)
   _AIP.enabled = on
   if on then
     P.recent_cmds = {}; P.stale_skips = 0
-    echo("[ai] armed — the local model is now driving. pilot.off() to stop.")
-    for _, primer in ipairs({ "look", "spells", "skills" }) do echo("[ai] > " .. primer); send(primer) end
+    if cfg.combat_only then
+      echo("[ai] armed (COMBAT-ONLY) — dormant until a fight starts, then it drives each turn. pilot.off() to stop.")
+    else
+      echo("[ai] armed — the local model is now driving. pilot.off() to stop.")
+      -- Priming look/spells/skills is between-fight setup; skip it in combat-only so the pilot truly
+      -- stays hands-off until a fight begins.
+      for _, primer in ipairs({ "look", "spells", "skills" }) do echo("[ai] > " .. primer); send(primer) end
+    end
     arm()
   else
     echo("[ai] disengaged.")
@@ -2130,6 +2257,13 @@ function ai_command(args)
     if m == "text" or m == "cmd" then cfg.use_tools = false
     elseif m == "tools" or m == "tool" then cfg.use_tools = true end
     echo("[ai] mode: " .. (cfg.use_tools and "tools (base models)" or "text/CMD: (fine-tuned models)"))
+  elseif verb == "combat_only" or verb == "combatonly" then
+    local m = rest:lower()
+    if m == "on" or m == "true" or m == "1" or m == "yes" then cfg.combat_only = true
+    elseif m == "off" or m == "false" or m == "0" or m == "no" then cfg.combat_only = false end
+    echo("[ai] combat-only: " .. (cfg.combat_only
+      and "ON — acts only during fights, dormant (hands-off) between them; auto-resumes each new fight"
+      or "off — the pilot drives continuously (explore/loot/move) when armed"))
   elseif verb == "url" then if rest ~= "" then ai_set_endpoint(rest) end; echo("[ai] endpoint set")
   elseif verb == "mem" then
     local m = rest:lower()
@@ -2206,6 +2340,7 @@ local PILOT_CMDS = {
   model      = { sig = "pilot.model(id)",         text = "Set the decision model id directly." },
   brain      = { sig = "pilot.brain(which)",      text = "Choose the decision brain: 'local' | 'haiku' | 'sonnet'." },
   mode       = { sig = "pilot.mode(m)",           text = "Force 'tools' (base models) or 'text'/'cmd' (fine-tuned) mode." },
+  combat_only = { sig = "pilot.combat_only(on)",  text = "When ON, the pilot acts ONLY during fights and stays dormant (hands-off) between them, auto-resuming each new fight. A modifier on pilot.on(); 'on'/'off'." },
   url        = { sig = "pilot.url(base)",         text = "Set the decision client's API endpoint." },
   mem        = { sig = "pilot.mem(on_off)",       text = "Turn the memory head on or off ('on'/'off')." },
   memmodel   = { sig = "pilot.memmodel(which)",   text = "Set the memory head's model ('haiku' | 'sonnet' | <id>)." },
@@ -2282,6 +2417,7 @@ _AIP_TEST = {
   path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,
   best_explore_dir = best_explore_dir, block_last_move = block_last_move,
   arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
+  extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,
   plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
   HOP_COST = HOP_COST, RECALL_COST = RECALL_COST, BRIDGE_MIN_SAVINGS = BRIDGE_MIN_SAVINGS,
 }
