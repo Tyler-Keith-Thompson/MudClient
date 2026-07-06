@@ -674,6 +674,157 @@ _AA_TEST.parse_affect_row = parse_affect_row
 _AA_TEST.affects_to_spells = affects_to_spells
 _AA_TEST.parse_levels = parse_levels
 
+-- ===== Known spells from the `spells` command ====================================================
+-- The AI combat pilot must cast the character's REAL spells, not melee or hallucinate one it lacks. To
+-- know which offensive spells the character actually HAS (and how strong each is), we parse the `spells`
+-- listing into state.spells_known and cross-reference SPELL_DB — a static table of every game DAMAGE
+-- spell (name -> mana + damage tier), harvested from the help corpus' per-spell pages (each carries a
+-- "Damage: <tier>" line for offensive spells and none for buffs/heals — that Damage tier IS the
+-- offensive signal). A known spell present in SPELL_DB is offensive; absent = a buff/utility spell.
+local SPELL_DB = {
+  ["ball lightning"] = { mana = 13, tier = "massive" },
+  ["blaze"] = { mana = 5, tier = "moderate" },
+  ["blizzard"] = { mana = 35, tier = "massive", area = true },
+  ["blue dart"] = { mana = 4, tier = "low" },
+  ["burning hands"] = { mana = 5, tier = "moderate" },
+  ["call thunder"] = { mana = 15, tier = "massive" },
+  ["chasten"] = { mana = 7, tier = "low" },
+  ["chill touch"] = { mana = 5, tier = "low" },
+  ["coffin"] = { mana = 51, tier = "massive" },
+  ["coldfire"] = { mana = 6, tier = "minor" },
+  ["color spray"] = { mana = 6, tier = "low" },
+  ["condemnation"] = { mana = 34, tier = "high" },
+  ["cone of cold"] = { mana = 16, tier = "high" },
+  ["crystal spear"] = { mana = 12, tier = "high" },
+  ["death and decay"] = { mana = 27, tier = "high", area = true },
+  ["dust devil"] = { mana = 16, tier = "moderate" },
+  ["earthquake"] = { mana = 19, tier = "moderate", area = true },
+  ["field of the grasping dead"] = { mana = 35, tier = "low", area = true },
+  ["fireball"] = { mana = 10, tier = "high" },
+  ["firefield"] = { mana = 10, tier = "moderate", area = true },
+  ["fireweb"] = { mana = 13, tier = "moderate" },
+  ["fist of the earth"] = { mana = 14, tier = "moderate" },
+  ["flamestrike"] = { mana = 15, tier = "moderate" },
+  ["frost bite"] = { mana = 13, tier = "high" },
+  ["frostflower"] = { mana = 4, tier = "moderate", area = true },
+  ["fury of the heavens"] = { mana = 15, tier = "massive", area = true },
+  ["gust of wind"] = { mana = 8, tier = "minor" },
+  ["hailstone"] = { mana = 20, tier = "high" },
+  ["harm"] = { mana = 21, tier = "high" },
+  ["ice fog"] = { mana = 23, tier = "high", area = true },
+  ["icebolt"] = { mana = 8, tier = "moderate" },
+  ["inflict suffering"] = { mana = 13, tier = "moderate" },
+  ["inflict wounds"] = { mana = 4, tier = "minor" },
+  ["kaleidoscope"] = { mana = 16, tier = "high" },
+  ["landslide"] = { mana = 39, tier = "massive" },
+  ["lightning bolt"] = { mana = 9, tier = "moderate" },
+  ["maelstrom"] = { mana = 40, tier = "massive", area = true },
+  ["mage hand"] = { mana = 17, tier = "moderate" },
+  ["magic missile"] = { mana = 2, tier = "minor" },
+  ["noxious cloud"] = { mana = 12, tier = "moderate" },
+  ["prism"] = { mana = 6, tier = "moderate" },
+  ["radiant orbs"] = { mana = 7, tier = "minor" },
+  ["riptide"] = { mana = 25, tier = "moderate" },
+  ["rotting sphere"] = { mana = 27, tier = "moderate" },
+  ["sacred touch"] = { mana = 15, tier = "massive" },
+  ["sandstorm"] = { mana = 20, tier = "minor", area = true },
+  ["scorch"] = { mana = 8, tier = "moderate" },
+  ["shard storm"] = { mana = 18, tier = "high", area = true },
+  ["shards"] = { mana = 4, tier = "moderate" },
+  ["shocking grasp"] = { mana = 5, tier = "moderate" },
+  ["shower of sparks"] = { mana = 4, tier = "low" },
+  ["sickening touch"] = { mana = 10, tier = "moderate" },
+  ["solar flare"] = { mana = 10, tier = "high" },
+  ["spectral claw"] = { mana = 20, tier = "moderate" },
+  ["static blast"] = { mana = 5, tier = "minor" },
+  ["storm of roses"] = { mana = 29, tier = "high", area = true },
+  ["sunbeam"] = { mana = 8, tier = "low" },
+  ["sunblind"] = { mana = 30, tier = "moderate" },
+  ["sunstorm"] = { mana = 85, tier = "massive", area = true },
+  ["tarrants spectral hand"] = { mana = 12, tier = "low" },
+  ["tempest"] = { mana = 20, tier = "low", area = true },
+  ["thistles"] = { mana = 6, tier = "low" },
+  ["thunder seeds"] = { mana = 7, tier = "low" },
+}
+
+-- Damage tiers, weakest -> strongest. Lets the pilot order known offensive spells strongest-first.
+local SPELL_TIER = { minor = 1, low = 2, moderate = 3, high = 4, massive = 5 }
+
+-- Parse ONE row of the `spells` listing. Verbatim rows look like (columns space-padded for alignment):
+--   "shards                            very good  87%"   -> name="shards", prof="very good", pct=87
+-- Class-header lines ("Mage"), the "----" rule, and the "You know..." header have no trailing "N%" and
+-- return nil. Name may be multi-word; the name/prof gap is always 2+ spaces (single spaces are within a
+-- name), and prof is a word or two before the percent.
+local function parse_spell_row(line)
+  local name, prof, pctv = (line or ""):match("^(%S.-%S)%s%s+(%S.-)%s+(%d+)%%")
+  if not name then return nil end
+  return { name = name, prof = prof, pct = tonumber(pctv) }
+end
+
+-- Classify a spell NAME against SPELL_DB. Returns offensive?, mana, tier, area. Absent => a buff/utility
+-- spell (offensive=false), which the combat pilot must never pick as an attack.
+local function classify_spell(name)
+  local e = SPELL_DB[(name or ""):lower()]
+  if e then return true, e.mana, e.tier, e.area end
+  return false
+end
+
+-- Annotate parsed `spells` rows with combat metadata, dropping any "not learned" straggler. Each entry:
+-- { name, prof, pct, offensive, mana, tier, area } — the shape state.spells_known holds and the pilot
+-- reads to build its damage-spell line and its melee->real-spell substitution.
+local function annotate_spells(rows)
+  local out = {}
+  for _, r in ipairs(rows or {}) do
+    if not (r.prof and r.prof:lower():match("not learned")) then
+      local off, mana, tier, area = classify_spell(r.name)
+      out[#out + 1] = { name = r.name, prof = r.prof, pct = r.pct,
+                        offensive = off, mana = mana, tier = tier, area = area }
+    end
+  end
+  return out
+end
+
+-- Pure end-to-end parse of a whole `spells` output BLOCK (the live path uses the line triggers below,
+-- but both share parse_spell_row + annotate_spells, so this is the same logic under test). Captures rows
+-- between the "You know the following spells:" header and the first line that is neither a spell row nor
+-- a class-header/rule line (a prompt or blank ends it).
+local function parse_spells_block(block)
+  local rows, capturing = {}, false
+  for line in (block or ""):gmatch("[^\n]+") do
+    if line:match("^You know the following spells:") then
+      capturing = true
+    elseif capturing then
+      local r = parse_spell_row(line)
+      if r then rows[#rows + 1] = r
+      elseif line:match("^%-+%s*$") or line:match("^%s*%u%a+%s*$") then   -- class header / rule: keep going
+      else break end
+    end
+  end
+  return annotate_spells(rows)
+end
+
+-- Live capture: mirror the affects/inventory block pattern. The header arms it; spell rows accumulate;
+-- a class header / "----" rule keeps it open (multiple classes); anything else (prompt, blank, the
+-- following `skills` header) commits state.spells_known and stops.
+local spells_capturing, spells_buf = false, nil
+trigger([[^You know the following spells:]], function() spells_capturing = true; spells_buf = {} end)
+trigger([[.*]], function(line)
+  if not spells_capturing then return end
+  if line:match("^You know the following spells:") then return end
+  local r = parse_spell_row(line)
+  if r then spells_buf[#spells_buf + 1] = r; return end
+  if line:match("^%-+%s*$") or line:match("^%s*%u%a+%s*$") then return end   -- class header / rule
+  spells_capturing = false
+  state.spells_known = annotate_spells(spells_buf)
+end)
+
+_AA_TEST.SPELL_DB = SPELL_DB
+_AA_TEST.SPELL_TIER = SPELL_TIER
+_AA_TEST.parse_spell_row = parse_spell_row
+_AA_TEST.classify_spell = classify_spell
+_AA_TEST.annotate_spells = annotate_spells
+_AA_TEST.parse_spells_block = parse_spells_block
+
 -- Inventory tracking. kxwt never reports what you carry, so parse the `inventory` output: capture the
 -- lines between "You are carrying:" and the next prompt/section. Until that first capture, inventory
 -- is "unknown" so the agent knows to actually check before reaching for gear it may not have.

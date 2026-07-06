@@ -953,16 +953,109 @@ local function build_user(st, expl, mem, world, convo, directive, nudge, fightin
   return "=== CHARACTER STATE ===\n" .. st .. world_block .. map_block .. mem_block .. manual_block .. "\n=== RECENT GAME OUTPUT ===\n" .. convo .. "\n" .. dir_block .. nudge_block .. "\n" .. closer
 end
 
+-- ---- known-spell combat helpers ------------------------------------------------------------
+-- state.spells_known (filled by AlterAeon's `spells` parse) lists the character's spells, each tagged
+-- offensive?/mana/tier. These turn that into (1) a compact prompt line naming the character's REAL damage
+-- spells strongest-first — the fix for the model meleeing or hallucinating `cast fireball` because it was
+-- never told which spells the character HAS — and (2) a safety net that rewrites a melee/unknown attack
+-- into a real known damage spell for a caster.
+local DMG_TIER = { minor = 1, low = 2, moderate = 3, high = 4, massive = 5 }
+
+-- Known OFFENSIVE spells, strongest-first (higher damage tier first; cheaper mana breaks ties).
+local function damage_spells_ranked(known)
+  local list = {}
+  for _, s in ipairs(known or {}) do if s.offensive then list[#list + 1] = s end end
+  table.sort(list, function(a, b)
+    local ta, tb = DMG_TIER[a.tier or ""] or 0, DMG_TIER[b.tier or ""] or 0
+    if ta ~= tb then return ta > tb end
+    return (a.mana or 0) < (b.mana or 0)
+  end)
+  return list
+end
+
+-- The prompt line naming the character's real damage spells (top `limit`, strongest-first). nil when the
+-- character knows none (not a caster), so the line is simply omitted.
+local function combat_spell_line(known, limit)
+  local ranked = damage_spells_ranked(known)
+  if #ranked == 0 then return nil end
+  local names = {}
+  for i = 1, math.min(#ranked, limit or 6) do names[#names + 1] = ranked[i].name end
+  return "YOUR DAMAGE SPELLS (cast one, exact name): " .. table.concat(names, ", ")
+end
+
+-- Best known damage spell the character can afford (highest tier with mana <= cur_mana); if none is
+-- affordable, the cheapest known damage spell (a stretch beats a melee whiff). nil for a non-caster.
+local function best_damage_spell(known, cur_mana)
+  local ranked = damage_spells_ranked(known)
+  if #ranked == 0 then return nil end
+  for _, s in ipairs(ranked) do if (s.mana or 0) <= (cur_mana or 0) then return s end end
+  local cheapest = ranked[1]
+  for _, s in ipairs(ranked) do if (s.mana or 1e9) < (cheapest.mana or 1e9) then cheapest = s end end
+  return cheapest
+end
+
+-- Does `rest` (the text after `cast`) name a spell the character KNOWS? Handles the quoted 'spell name'
+-- and the unquoted "spell name [target]" form (known name as a prefix). Used to leave a valid cast alone.
+local function names_known_spell(rest, known)
+  local r = trim((rest or ""):lower())
+  local q = r:match("^'([^']+)'")
+  if q then r = q end
+  for _, s in ipairs(known or {}) do
+    local n = s.name:lower()
+    if r == n or r:sub(1, #n + 1) == n .. " " then return true end
+  end
+  return false
+end
+
+-- Pull the target keyword from a combat command so a substituted cast keeps hitting the same thing:
+-- "kill orc bachelor" -> "orc bachelor"; "cast X on siren" -> "siren"; "cast 'X' orc" -> "orc". Empty
+-- when none is parseable — in combat an untargeted attack spell hits your current fight, so "" is safe.
+local function combat_target(cmd)
+  local on = (cmd or ""):match("%s+on%s+(.+)$")
+  if on then return trim(on) end
+  local verb = ((cmd or ""):match("^(%S+)") or ""):lower()
+  if verb == "kill" or verb == "attack" or verb == "k" then
+    return trim((cmd:match("^%S+%s+(.+)$")) or "")
+  end
+  local q = (cmd or ""):match("^%S+%s+'[^']+'%s+(.+)$")
+  return q and trim(q) or ""
+end
+
+-- Safety net: turn the model's "deal damage" intent into the character's REAL spell. If the command is a
+-- melee attack (kill/attack) or a `cast` of a spell the character does NOT know, and the character is a
+-- CASTER (knows >=1 damage spell), rewrite it to `cast '<best affordable known damage spell>' <target>`.
+-- A valid known cast (offensive OR utility) is left exactly as-is; a non-caster's command is never touched.
+local function combat_substitute(cmd, known, cur_mana)
+  if type(cmd) ~= "string" then return cmd end
+  if #damage_spells_ranked(known) == 0 then return cmd end   -- non-caster: never rewrite
+  local verb = (cmd:match("^(%S+)") or ""):lower()
+  local is_melee = (verb == "kill" or verb == "attack" or verb == "k")
+  local rest = cmd:match("^%S+%s+(.+)$")
+  if verb == "cast" or verb == "c" then
+    if rest and names_known_spell(rest, known) then return cmd end   -- valid known cast: leave alone
+  elseif not is_melee then
+    return cmd                                                        -- not an attack: leave alone
+  end
+  local best = best_damage_spell(known, cur_mana)
+  if not best then return cmd end
+  local tgt = combat_target(cmd)
+  return "cast '" .. best.name .. "'" .. (tgt ~= "" and (" " .. tgt) or "")
+end
+
 -- Lean prompt for a LOCAL combat turn: state + what's here + a short output window + the combat closer.
 -- The MAP / saved NOTES / RAG manual are dropped — a combat decision keys off STATE (hp/mana/target),
 -- and the local model has NO prompt caching, so every dropped line is prefill the turn no longer pays
 -- for. Measured ~30% faster first token vs the full prompt. Hosted models keep the full (cached) prompt;
 -- this is only used on the fine-tune's combat path. A director note still rides along (you can steer).
+-- A one-line roster of the character's real damage spells rides along so the model casts what it HAS
+-- instead of meleeing or inventing a spell (a few tokens; keeps the prompt lean).
 local function build_combat_user(st, world, convo, directive)
   local world_block = (world and world ~= "") and ("\n=== WHAT'S HERE ===\n" .. world .. "\n") or ""
   local dir_block = directive and ("\n=== DIRECTOR NOTE (act on it now) ===\n" .. directive .. "\n") or ""
+  local spell_line = combat_spell_line(state.spells_known)
+  local spell_block = spell_line and ("\n" .. spell_line) or ""
   return "=== CHARACTER STATE ===\n" .. st .. world_block ..
-    "\n=== RECENT GAME OUTPUT ===\n" .. convo .. "\n" .. dir_block ..
+    "\n=== RECENT GAME OUTPUT ===\n" .. convo .. "\n" .. dir_block .. spell_block ..
     "\nYou are IN COMBAT — call attack or cast NOW. No reasoning."
 end
 
@@ -1282,10 +1375,19 @@ function execute(actions, thoughts, scripts, mems)
     end
   end
 
-  -- Collect the commands actually sent (skip `wait`/no-op tools).
+  -- Collect the commands actually sent (skip `wait`/no-op tools). In combat, run each through the
+  -- known-spell substitution: a caster that the model told to melee (or to cast a spell it doesn't have)
+  -- gets rewritten to its best affordable REAL damage spell. A valid known cast / non-caster is untouched.
   local commands = {}
   for _, a in ipairs(actions) do
-    if type(a.cmd) == "string" and trim(a.cmd) ~= "" then commands[#commands + 1] = a.cmd end
+    if type(a.cmd) == "string" and trim(a.cmd) ~= "" then
+      local cmd = a.cmd
+      if in_combat() then
+        local sub = combat_substitute(cmd, state.spells_known, state.mana)
+        if sub ~= cmd then echo("[ai] (cast real spell: `" .. cmd .. "` -> `" .. sub .. "`)"); cmd = sub end
+      end
+      commands[#commands + 1] = cmd
+    end
   end
 
   -- Loop detection: only meaningful when a command repeats AND nothing changes. We already reset the
@@ -2222,13 +2324,15 @@ local function set_enabled(on)
   _AIP.enabled = on
   if on then
     P.recent_cmds = {}; P.stale_skips = 0
+    -- `spells` is one-time SESSION setup (it teaches the combat prompt which real spells the character
+    -- has), not a between-fight action, so prime it even in combat-only. The recurring look/skills primers
+    -- stay skipped in combat-only so the pilot truly stays hands-off until a fight begins.
+    echo("[ai] > spells"); send("spells")
     if cfg.combat_only then
       echo("[ai] armed (COMBAT-ONLY) — dormant until a fight starts, then it drives each turn. pilot.off() to stop.")
     else
       echo("[ai] armed — the local model is now driving. pilot.off() to stop.")
-      -- Priming look/spells/skills is between-fight setup; skip it in combat-only so the pilot truly
-      -- stays hands-off until a fight begins.
-      for _, primer in ipairs({ "look", "spells", "skills" }) do echo("[ai] > " .. primer); send(primer) end
+      for _, primer in ipairs({ "look", "skills" }) do echo("[ai] > " .. primer); send(primer) end
     end
     arm()
   else
@@ -2430,4 +2534,8 @@ _AIP_TEST = {
   extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,
   plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
   HOP_COST = HOP_COST, RECALL_COST = RECALL_COST, BRIDGE_MIN_SAVINGS = BRIDGE_MIN_SAVINGS,
+  damage_spells_ranked = damage_spells_ranked, combat_spell_line = combat_spell_line,
+  best_damage_spell = best_damage_spell, names_known_spell = names_known_spell,
+  combat_target = combat_target, combat_substitute = combat_substitute,
+  build_combat_user = build_combat_user,
 }
