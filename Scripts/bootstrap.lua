@@ -520,6 +520,12 @@ if music then
     text = "Set master volume from a 0-100 percentage." })
 end
 
+-- Per-category audio masters (see the `volume` command in AlterAeon.lua, which drives these).
+doc("msp_volume", { sig = "msp_volume(pct)", group = "audio",
+  text = "Set the master volume for MSP sound effects from a 0-100 percentage. Scales every NEW effect; 0 silences them." })
+doc("speech_volume", { sig = "speech_volume(pct)", group = "audio",
+  text = "Set the TTS voice volume from a 0-100 percentage. At 0 utterances are dropped entirely — never synthesized or played (true silence)." })
+
 -- AI / LLM bridge
 doc("ai", { sig = "ai(args)", group = "ai",
   text = "AI pilot control surface. `ai reload` re-runs the loaded scripts; any other text is forwarded to the pilot's ai_command handler." })

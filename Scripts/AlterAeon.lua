@@ -284,34 +284,96 @@ trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch)
   if music then music.stop(ch) end
 end)
 
--- volume('music <0-100>') — master volume for the layered music player (all channels). A bare
--- volume() or volume('music') with no number just reports the current level. Swift starts at 35%
--- (deliberately quiet); we mirror that default here for the readout. `if music.volume` guards an
--- un-relaunched binary that lacks the new builtin.
-state.music_volume = state.music_volume or 35
--- volume('music <0-100>') — master volume for the layered music player. First-class documented function
--- (migrated off command("volume", …)); the legacy typed `#volume music 40` rewrites to volume("music 40").
+-- Audio volume: a MASTER plus three categories — music (layered player), sfx (MSP sound effects), and
+-- voice (TTS). The effective level pushed to each host service = round(master% × category%), so
+-- `volume('0')` zeroes the master → all three effective 0 → full silence, while `volume('voice 0')`
+-- mutes only TTS. Levels persist across reload/reconnect in state.volumes (migrated from the old
+-- single state.music_volume). The `if …` guards tolerate an un-relaunched binary lacking a new builtin.
+-- music defaults to 35% (deliberately quiet, matching Swift's own default); everything else to 100%.
+local VOLUME_DEFAULTS = { master = 100, music = 35, sfx = 100, voice = 100 }
+state.volumes = state.volumes or {}
+for k, v in pairs(VOLUME_DEFAULTS) do
+  if state.volumes[k] == nil then state.volumes[k] = v end
+end
+-- Migrate the legacy single music level into the new table (once).
+if state.music_volume ~= nil then
+  state.volumes.music = state.music_volume
+  state.music_volume = nil
+end
+
+-- Accepted category words (aliases fold onto the three canonical keys). `master` is accepted too so
+-- `volume('master 80')` works alongside the bare-number shorthand.
+local VOLUME_ALIASES = {
+  master = "master", music = "music",
+  sfx = "sfx", effects = "sfx", effect = "sfx", msp = "sfx",
+  voice = "voice", speech = "voice", tts = "voice", say = "voice",
+}
+
+-- Effective 0-100 level for a category = master% × category%, rounded.
+local function volume_effective(cat)
+  return math.floor((state.volumes.master / 100) * (state.volumes[cat] / 100) * 100 + 0.5)
+end
+
+-- Recompute all three effective levels and push them to the host services. Returns them for callers/tests.
+local function volume_apply()
+  local em, es, ev = volume_effective("music"), volume_effective("sfx"), volume_effective("voice")
+  if music and music.volume then music.volume(em) end
+  if msp_volume then msp_volume(es) end
+  if speech_volume then speech_volume(ev) end
+  return em, es, ev
+end
+
+local function volume_readout()
+  echo(string.format("[volume] master %d%%  |  music %d%%->%d%%  sfx %d%%->%d%%  voice %d%%->%d%%",
+    state.volumes.master,
+    state.volumes.music, volume_effective("music"),
+    state.volumes.sfx, volume_effective("sfx"),
+    state.volumes.voice, volume_effective("voice")))
+  echo("[volume] volume('0-100')=master; volume('music|sfx|voice <0-100>')=category; volume()=this readout")
+end
+
+-- First-class documented function (migrated off command("volume", …)); the legacy typed
+-- `#volume music 40` still rewrites to volume("music 40") and lands here unchanged.
 function volume(args) return volume_command(args) end
-doc(volume, { name = "volume", sig = "volume(['music <0-100>'])", group = "audio",
-  text = "Set or report the layered music player's master volume (0-100). volume() or volume('music') reports; volume('40') / volume('music 40') sets it." })
+doc(volume, { name = "volume", sig = "volume(['<0-100>' | '<music|sfx|voice> <0-100>'])", group = "audio",
+  text = "Master + per-category audio volume (0-100). volume('0') mutes EVERYTHING (master); volume('50') sets master; volume('music 40'), volume('sfx 0'), volume('voice 0') set a category (aliases: effects/msp=sfx, speech/tts=voice); volume() prints a readout. Effective = master% x category%.",
+  example = "volume('0')  -- silence all; volume('voice 0')  -- mute only TTS" })
+
 function volume_command(args)
   args = (args or ""):match("^%s*(.-)%s*$")
-  local target = (args:match("^%S*") or ""):lower()
-  local rest = args:match("^%S*%s+(.*)$") or ""
-  -- accept both volume('music 40') and the shorthand volume('40')
-  local num = rest:match("^(%d+)") or (target:match("^%d+$") and target or nil)
-  if target ~= "" and target ~= "music" and not target:match("^%d+$") then
-    echo("[volume] usage: volume('music <0-100>')"); return
+  if args == "" then volume_readout(); return end
+  -- bare number => MASTER
+  if args:match("^%d+$") then
+    state.volumes.master = math.max(0, math.min(100, tonumber(args)))
+    volume_apply()
+    echo(string.format("[volume] master set to %d%%", state.volumes.master))
+    return
   end
-  if num then
-    local n = math.max(0, math.min(100, tonumber(num)))
-    state.music_volume = n
-    if music and music.volume then music.volume(n) end
-    echo(string.format("[volume] music set to %d%%", n))
+  local word = (args:match("^(%S+)") or ""):lower()
+  local rest = args:match("^%S+%s+(.*)$") or ""
+  local cat = VOLUME_ALIASES[word]
+  if not cat then
+    echo("[volume] usage: volume('0-100') sets master; volume('music|sfx|voice <0-100>') sets a category")
+    return
+  end
+  local num = rest:match("^(%d+)")
+  if not num then volume_readout(); return end
+  state.volumes[cat] = math.max(0, math.min(100, tonumber(num)))
+  volume_apply()
+  if cat == "master" then
+    echo(string.format("[volume] master set to %d%%", state.volumes.master))
   else
-    echo(string.format("[volume] music is at %d%% (use volume('music <0-100>'))", state.music_volume))
+    echo(string.format("[volume] %s set to %d%% (effective %d%%)", cat, state.volumes[cat], volume_effective(cat)))
   end
 end
+
+-- Push the persisted levels to the services once at load (so a reload re-applies them).
+volume_apply()
+
+_AA_TEST.volume_effective = volume_effective
+_AA_TEST.volume_apply = volume_apply
+_AA_TEST.volume_command = volume_command
+_AA_TEST.VOLUME_DEFAULTS = VOLUME_DEFAULTS
 
 -- Timed self-effects (spell/skill durations), e.g. "kxwt_spst mana shield, two hours, 20 minutes".
 -- kxwt_spst is sent once per tick per active effect and has NO expiry/down signal, so this table can

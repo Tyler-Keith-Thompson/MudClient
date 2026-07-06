@@ -786,6 +786,16 @@ final class LuaScriptEngine: @unchecked Sendable {
             if let pct = args.first.flatMap(Self.doubleArg) { Container.musicService().setVolume(percent: pct) }
             return []
         }
+        // msp_volume(pct) — master for MSP sound effects (0-100); scales every NEW effect, 0 silences.
+        lua.register("msp_volume") { args in
+            if let pct = args.first.flatMap(Self.doubleArg) { Container.mspService().setVolume(percent: pct) }
+            return []
+        }
+        // speech_volume(pct) — TTS voice volume (0-100); at 0 utterances are dropped (no synth/playback).
+        lua.register("speech_volume") { args in
+            if let pct = args.first.flatMap(Self.doubleArg) { Container.speechService().setVolume(percent: pct) }
+            return []
+        }
         try? lua.run("music = { play = music_play, stop = music_stop, volume = music_volume }")
     }
 

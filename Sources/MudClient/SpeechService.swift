@@ -128,6 +128,7 @@ private final class KokoroUtterance: SpeechUtterance {
     private let sayFallbackArgs: [String]
     private let tempWriter: (Data) -> String?
     private let onFallback: (Error) -> Void
+    private let volume: Float
 
     private let lock = NSLock()
     private var cancelled = false
@@ -137,10 +138,11 @@ private final class KokoroUtterance: SpeechUtterance {
          makePlayback: @escaping ([String]) -> SpeechUtterance,
          makeSay: @escaping ([String]) -> SpeechUtterance,
          sayFallbackArgs: [String], tempWriter: @escaping (Data) -> String?,
-         onFallback: @escaping (Error) -> Void) {
+         volume: Float, onFallback: @escaping (Error) -> Void) {
         self.text = text; self.voice = voice; self.synth = synth
         self.makePlayback = makePlayback; self.makeSay = makeSay
         self.sayFallbackArgs = sayFallbackArgs; self.tempWriter = tempWriter
+        self.volume = volume
         self.onFallback = onFallback
     }
 
@@ -153,7 +155,7 @@ private final class KokoroUtterance: SpeechUtterance {
             if isCancelled { return }
             guard let path = tempWriter(data) else { throw NSError(domain: "Kokoro", code: -1) }
             defer { try? FileManager.default.removeItem(atPath: path) }
-            let p = makePlayback([path])
+            let p = makePlayback(SpeechService.afplayArgs(path: path, volume: volume))
             lock.lock(); if cancelled { lock.unlock(); return }; player = p; lock.unlock()
             p.wait()
         } catch {
@@ -175,13 +177,15 @@ private final class KokoroUtterance: SpeechUtterance {
 final class SpeechService: @unchecked Sendable {
     struct Voice: Equatable { let name: String; let locale: String }
 
-    /// One queued item: the text plus the resolved voice(s) and requested backend.
+    /// One queued item: the text plus the resolved voice(s), requested backend, and a snapshot of the
+    /// TTS volume at enqueue time (0…1).
     private struct Item {
         let text: String
         let backend: SpeechBackend
         let voice: String?          // voice for the requested backend
         let sayFallbackVoice: String?  // say voice to use if a kokoro synth fails
         let rate: Int?
+        let volume: Float
     }
 
     private let cond = NSCondition()
@@ -195,6 +199,12 @@ final class SpeechService: @unchecked Sendable {
     private var cooldownUntil: Date?               // while set & future, kokoro is skipped (server dead)
     private var lastError: String?                 // last kokoro failure reason (for speech_backend())
     private let cooldownInterval: TimeInterval
+
+    /// TTS voice volume, 0…1 (default 1). At 0 an utterance is DROPPED at `speak()` time — no synth, no
+    /// playback — which is what makes a master `volume 0` truly silence voices. Otherwise it is applied
+    /// to playback: afplay via `-v <volume>` and `say` via a `[[volm <volume>]]` inline prefix. Guarded
+    /// by `cond`.
+    private var _volume: Float = 1
 
     /// Cap on queued (not-yet-spoken) utterances. Over this, the OLDEST is dropped.
     let maxBacklog: Int
@@ -236,13 +246,24 @@ final class SpeechService: @unchecked Sendable {
         guard !trimmed.isEmpty else { return }
 
         cond.lock()
+        // Muted: drop the utterance entirely — no enqueue, so no synth (no HTTP to Kokoro) and no
+        // playback ever happens. This is what makes `volume 0` truly silence voices.
+        if _volume <= 0 { cond.unlock(); return }
+        let vol = _volume
         lastRequestedBackend = backend
         ensureWorkerLocked()
         queue.append(Item(text: trimmed, backend: backend, voice: voice,
-                          sayFallbackVoice: sayFallbackVoice, rate: rate))
+                          sayFallbackVoice: sayFallbackVoice, rate: rate, volume: vol))
         while queue.count > maxBacklog { queue.removeFirst() }
         cond.signal()
         cond.unlock()
+    }
+
+    /// Set the TTS voice volume from a 0-100 percentage. Clamped to 0…100. At 0 subsequent utterances
+    /// are dropped (never synthesized or played).
+    func setVolume(percent: Double) {
+        let v = Float(max(0, min(100, percent)) / 100)
+        cond.lock(); _volume = v; cond.unlock()
     }
 
     /// Cancel everything: flush the pending queue and cancel the current utterance.
@@ -342,13 +363,14 @@ final class SpeechService: @unchecked Sendable {
             return KokoroUtterance(
                 text: item.text, voice: item.voice, synth: synthesizer,
                 makePlayback: makePlayback, makeSay: makeUtterance,
-                sayFallbackArgs: sayArgs(voice: item.sayFallbackVoice, rate: item.rate, text: item.text),
-                tempWriter: tempWriter,
+                sayFallbackArgs: sayArgs(voice: item.sayFallbackVoice, rate: item.rate,
+                                         text: item.text, volume: item.volume),
+                tempWriter: tempWriter, volume: item.volume,
                 onFallback: { [weak self] err in self?.armCooldown(err) })
         }
         // say backend (or kokoro requested but cooling down): pick the right voice for say.
         let v = (item.backend == .kokoro) ? item.sayFallbackVoice : item.voice
-        return makeUtterance(sayArgs(voice: v, rate: item.rate, text: item.text))
+        return makeUtterance(sayArgs(voice: v, rate: item.rate, text: item.text, volume: item.volume))
     }
 
     private func armCooldown(_ err: Error) {
@@ -358,13 +380,29 @@ final class SpeechService: @unchecked Sendable {
         cond.unlock()
     }
 
-    /// Build the `say` argv (voice/rate flags + the untrusted text as its own single argv slot).
-    private func sayArgs(voice: String?, rate: Int?, text: String) -> [String] {
+    /// Build the `say` argv (voice/rate flags + the untrusted text as its own single argv slot). When
+    /// `volume` < 1 the text carries a `[[volm <volume>]]` inline command prefix (say's own volume
+    /// control); the game text stays a single argv element, never shell-parsed.
+    private func sayArgs(voice: String?, rate: Int?, text: String, volume: Float = 1) -> [String] {
         var args: [String] = []
         if let voice, !voice.isEmpty { args += ["-v", voice] }
         if let rate, rate > 0 { args += ["-r", String(rate)] }
-        args.append(text)
+        let body = volume < 1 ? "[[volm \(Self.volumeString(volume))]] \(text)" : text
+        args.append(body)
         return args
+    }
+
+    /// afplay argv for a WAV `path` at `volume`. Below full volume, prepends `-v <volume>` (afplay's
+    /// playback-gain flag); at full volume it's just the path (keeps the default argv minimal).
+    static func afplayArgs(path: String, volume: Float) -> [String] {
+        volume < 1 ? ["-v", volumeString(volume), path] : [path]
+    }
+
+    /// Format a 0…1 volume for a CLI flag: shortest clean decimal (0.5, 0.35), never scientific.
+    static func volumeString(_ v: Float) -> String {
+        let clamped = max(0, min(1, v))
+        if clamped == clamped.rounded() { return String(Int(clamped)) }   // 0 -> "0", 1 -> "1"
+        return String(clamped)
     }
 
     // MARK: - Temp file

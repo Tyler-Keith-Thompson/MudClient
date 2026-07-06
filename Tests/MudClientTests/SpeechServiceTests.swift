@@ -216,6 +216,78 @@ private final class ArgLog: @unchecked Sendable {
     #expect(rec.spokenText.isEmpty)      // nothing ever played (no afplay, no say fallback)
 }
 
+// MARK: - Volume
+
+/// At TTS volume 0 an utterance must be DROPPED at `speak()` time: no synthesis (no HTTP to Kokoro)
+/// and no playback (no afplay, no say). This is what makes a master `volume 0` truly silence voices.
+@Test func volumeZeroSkipsSynthAndPlaybackEntirely() {
+    let rec = Recorder()
+    let sayLog = ArgLog()
+    let playLog = ArgLog()
+    let synth = FakeSynthesizer(result: .success(Data(count: 200)))
+    let service = SpeechService(
+        makeUtterance: { args in sayLog.add(args); return FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        voiceListing: { "" },
+        synthesizer: synth,
+        makePlayback: { args in playLog.add(args); return FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        tempWriter: { _ in "/tmp/never.wav" })
+
+    service.setVolume(percent: 0)                       // muted
+    service.speak(text: "you should not hear this", voice: "af_heart",
+                  backend: .kokoro, sayFallbackVoice: "Samantha")
+
+    Thread.sleep(forTimeInterval: 0.2)                  // give any (wrongly-spawned) worker time to run
+    #expect(synth.lastText == nil)                      // NEVER synthesized (no HTTP attempted)
+    #expect(playLog.all.isEmpty)                        // NEVER played via afplay
+    #expect(sayLog.all.isEmpty)                         // NEVER fell back to say
+    #expect(rec.spokenText.isEmpty)                     // nothing spoke at all
+}
+
+/// At a partial volume the kokoro playback passes afplay a `-v <0..1>` gain flag (here 50% -> "0.5").
+@Test func volumeHalfPassesGainToAfplay() {
+    let rec = Recorder()
+    let playLog = ArgLog()
+    let synth = FakeSynthesizer(result: .success(Data(count: 200)))
+    let service = SpeechService(
+        makeUtterance: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        voiceListing: { "" },
+        synthesizer: synth,
+        makePlayback: { args in playLog.add(args); return FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        tempWriter: { _ in "/tmp/mudclient_test_tts.wav" })
+
+    service.setVolume(percent: 50)
+    service.speak(text: "half volume", voice: "af_heart", backend: .kokoro, sayFallbackVoice: "Samantha")
+    rec.waitForCount(1)
+
+    #expect(playLog.all == [["-v", "0.5", "/tmp/mudclient_test_tts.wav"]])
+    for u in rec.utterances { u.release() }
+}
+
+/// The `say` backend carries volume as a `[[volm <0..1>]]` inline prefix on the text (single argv slot).
+@Test func volumeHalfPrefixesSayText() {
+    let rec = Recorder()
+    let sayLog = ArgLog()
+    let service = SpeechService(
+        makeUtterance: { args in sayLog.add(args); return FakeUtterance(text: args.last ?? "", onStart: rec.record) },
+        voiceListing: { "" })
+
+    service.setVolume(percent: 50)
+    service.speak(text: "half say", voice: "Samantha", backend: .say)
+    rec.waitForCount(1)
+
+    #expect(sayLog.all == [["-v", "Samantha", "[[volm 0.5]] half say"]])
+    for u in rec.utterances { u.release() }
+}
+
+/// Full volume (the default) leaves both argv paths untouched — no `-v` for afplay, no prefix for say.
+@Test func fullVolumeLeavesArgsUnchanged() {
+    #expect(SpeechService.afplayArgs(path: "/tmp/a.wav", volume: 1) == ["/tmp/a.wav"])
+    #expect(SpeechService.afplayArgs(path: "/tmp/a.wav", volume: 0.5) == ["-v", "0.5", "/tmp/a.wav"])
+    #expect(SpeechService.volumeString(0.5) == "0.5")
+    #expect(SpeechService.volumeString(0) == "0")
+    #expect(SpeechService.volumeString(1) == "1")
+}
+
 @Test func kokoroRequestBodyIsCorrect() throws {
     let req = KokoroHTTPSynthesizer.makeRequest(base: "http://127.0.0.1:8880",
                                                 text: "true fishing is awesome", voice: "am_adam", timeout: 3)

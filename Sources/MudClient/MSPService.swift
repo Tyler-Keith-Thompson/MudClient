@@ -209,7 +209,26 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
     let cache = AsynchronousUnitOfWorkCache()
     let lock = NSRecursiveLock()
     var players = [AVAudioPlayer]()
-    
+
+    /// Service-level master for MSP sound effects (0…1). Multiplied into every effect's own volume when
+    /// it starts, so a global `volume`/`msp_volume` change scales all NEW effects; at 0, effects are
+    /// silent. Guarded by `lock`.
+    private var _serviceVolume: Float = 1
+
+    /// Set the MSP effects master from a 0-100 percentage. Clamped to 0…100. Applies to effects started
+    /// afterward (already-playing looping ambience keeps its level until it restarts).
+    func setVolume(percent: Double) {
+        let v = Float(max(0, min(100, percent)) / 100)
+        lock.lock(); _serviceVolume = v; lock.unlock()
+    }
+
+    /// An effect's `base` volume scaled by the service master. At service-volume 0 this is 0 (silent).
+    /// Exposed (non-private) so a test can assert the scaling without needing a real audio file/URL.
+    func scaledVolume(_ base: Float) -> Float {
+        lock.lock(); defer { lock.unlock() }
+        return base * _serviceVolume
+    }
+
     func _player(data: Data, hint: String? = nil) throws -> AudioPlayer {
         let player = try AVAudioPlayer(data: data, fileTypeHint: hint.flatMap { UTType(filenameExtension: $0) }?.identifier)
         player.delegate = self
@@ -218,12 +237,12 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
         lock.unlock()
         return AudioPlayer(player: player)
     }
-    
+
     func player(_ url: URL, volume: Float = 1, loops: Int = 0) -> some AsynchronousUnitOfWork<AudioPlayer> {
         downloadOrRetrieve(url)
             .tryMap { hash, data in
                 let player = try self._player(data: data, hint: url.pathExtension)
-                player.volume = volume
+                player.volume = self.scaledVolume(volume)
                 player.numberOfLoops = loops
                 return player
             }
