@@ -10,7 +10,7 @@ local S = T.state
 -- to the `say` backend for deterministic voice picks unless a case opts into kokoro.
 local function reset()
   S.speakers = {}; S.spoken = {}; S.classified = {}
-  S.enabled = true; S.emotes = true; S.connect_at = nil; S.mute_until = nil
+  S.enabled = true; S.emote_style = "narrate"; S.connect_at = nil; S.mute_until = nil
   S.backend = "say"                        -- deterministic backend for most cases
   T.cfg.backend = "say"
   T.cfg.classify.enabled = false           -- default OFF for deterministic assignment cases
@@ -367,32 +367,72 @@ test("parse_social: rejects lookalikes that merely contain a social verb", funct
   expect(T.parse_social("")):eq(nil)
 end)
 
-test("social sounds: every curated verb (base + third person) maps to a short utterance", function()
-  local n = 0
-  for base, sound in pairs(T.social_sounds) do
-    n = n + 1
-    expect(type(sound)):eq("string"); expect(#sound > 0):truthy(); expect(#sound < 40):truthy()
+test("social verbs: all 11 curated verbs narratable; sounds are a vetted real-word subset", function()
+  local bases = { "chuckle", "laugh", "giggle", "snicker", "cackle", "sigh", "groan", "gasp",
+                  "cry", "scream", "snort" }
+  for _, base in ipairs(bases) do
     local third = (base == "cry") and "cries" or (base .. "s")
-    expect(T.social_verbs[third]):eq(base)           -- third-person form round-trips
+    expect(T.social_verbs[third]):eq(base)           -- parseable third-person form
+    expect(T.social_third[base]):eq(third)           -- narratable back to third person
   end
-  expect(n >= 11):truthy()                            -- chuckle/laugh/giggle/snicker/cackle/sigh/groan/gasp/cry/scream/snort
+  for base, sound in pairs(T.social_sounds) do
+    expect(T.social_third[base] ~= nil):truthy()     -- every sound belongs to a curated verb
+    expect(type(sound)):eq("string"); expect(#sound > 0):truthy(); expect(#sound < 20):truthy()
+    expect(sound:find("heh")):eq(nil)                 -- the stilted spellings are gone
+    expect(sound:find("hmph")):eq(nil)
+    expect(sound:find("sob")):eq(nil)
+  end
+  -- Verbs with no natural-sounding rendering are OUT of the sound map (they narrate instead).
+  expect(T.social_sounds.snicker):eq(nil)
+  expect(T.social_sounds.cackle):eq(nil)
+  expect(T.social_sounds.snort):eq(nil)
 end)
 
-test("emotes: speak the vocalization in the emoter's assigned voice", function()
+test("emotes narrate (default): verb phrase in the emoter's voice — no name, lowercase, tail kept", function()
   reset(); T.set_pools({ "Alex" }, nil)
   local calls = {}
   local real_speak, real_live = speak, is_live
   speak = function(text, voice) calls[#calls + 1] = { text = text, voice = voice } end
   is_live = function() return true end
   T.speak_emote("Mouserat chuckles.")
-  expect(#calls):eq(1)
-  expect(calls[1].text):eq(T.social_sounds.chuckle)   -- the curated sound, never the raw line
+  expect(calls[1].text):eq("chuckles")                -- verb only: the voice identity says who
   expect(calls[1].voice):eq("Alex")                   -- the speaker's assigned voice
   expect(S.speakers["mouserat"].say):eq("Alex")       -- and it registered like a chat sighting
+  T.speak_emote("Mario sighs somberly.")
+  expect(calls[2].text):eq("sighs somberly")          -- short tail narrated too
+  T.speak_emote("You laugh out loud.")                 -- own char: third-person narration, your voice
+  expect(calls[3].text):eq("laughs out loud")
+  expect(S.speakers["you"] ~= nil):truthy()
+  T.speak_emote("Gwen laughs at Lokar.")
+  expect(calls[4].text):eq("laughs at lokar")          -- lowercased throughout
   speak, is_live = real_speak, real_live
 end)
 
-test("emotes: obey is_live, the toggle, and dedupe", function()
+test("emotes sound mode: vetted onomatopoeia; dropped verbs fall back to narration", function()
+  reset(); T.set_pools({ "Alex" }, nil)
+  S.emote_style = "sound"
+  local calls = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text) calls[#calls + 1] = text end
+  is_live = function() return true end
+  T.speak_emote("Mouserat chuckles.")
+  expect(calls[1]):eq(T.social_sounds.chuckle)         -- "ha ha"
+  T.speak_emote("Lokar snorts.")                       -- no vetted sound for snort
+  expect(calls[2]):eq("snorts")                        -- narrated fallback, even in sound mode
+  speak, is_live = real_speak, real_live
+end)
+
+test("voice.emotes: mode switching incl. legacy on/off aliases", function()
+  reset()
+  voice.emotes("sound");   expect(S.emote_style):eq("sound")
+  voice.emotes("narrate"); expect(S.emote_style):eq("narrate")
+  voice.emotes("off");     expect(S.emote_style):eq("off")
+  voice.emotes("on");      expect(S.emote_style):eq("narrate")   -- legacy alias
+  voice.emotes("OFF");     expect(S.emote_style):eq("off")
+  voice.emotes("bogus");   expect(S.emote_style):eq("off")       -- rejected, unchanged
+end)
+
+test("emotes: obey is_live, off mode, and dedupe", function()
   reset(); T.set_pools({ "Alex" }, nil)
   local said = {}
   local real_speak, real_live = speak, is_live
@@ -401,15 +441,42 @@ test("emotes: obey is_live, the toggle, and dedupe", function()
   T.speak_emote("Mouserat chuckles.")                 -- replayed history: silent
   expect(#said):eq(0)
   is_live = function() return true end
-  S.emotes = false
-  T.speak_emote("Mouserat chuckles.")                 -- toggled off: silent
+  S.emote_style = "off"
+  T.speak_emote("Mouserat chuckles.")                 -- off: silent
   expect(#said):eq(0)
-  S.emotes = true
+  S.emote_style = "narrate"
   T.speak_emote("Mouserat chuckles.")
   T.speak_emote("Mouserat chuckles.")                 -- repeat within the window: deduped
   expect(#said):eq(1)
   T.speak_emote("Mouserat laughs.")                   -- different social: speaks
   expect(#said):eq(2)
+  speak, is_live = real_speak, real_live
+end)
+
+-- ---------------------------------------------------------------- emoji / emoticon hygiene
+test("clean_spoken_text: strips ASCII emoticons and unicode emoji, collapses spaces", function()
+  expect(T.clean_spoken_text("gratz! :)")):eq("gratz!")
+  expect(T.clean_spoken_text("nice one :D <3")):eq("nice one")
+  expect(T.clean_spoken_text("well :/ ok then ;-)")):eq("well ok then")
+  expect(T.clean_spoken_text("so funny xD lol")):eq("so funny lol")
+  expect(T.clean_spoken_text("gratz! \240\159\142\137")):eq("gratz!")          -- 🎉
+  expect(T.clean_spoken_text("love it \226\157\164\239\184\143 really")):eq("love it really")  -- ❤️ + VS16
+  expect(T.clean_spoken_text("this game is awesome ^_^")):eq("this game is awesome")
+  expect(T.clean_spoken_text("plain text stays untouched")):eq("plain text stays untouched")
+end)
+
+test("clean_spoken_text: an all-emoji message cleans to empty and is never spoken", function()
+  expect(T.clean_spoken_text(":) :P <3")):eq("")
+  expect(T.clean_spoken_text("\240\159\152\128\240\159\152\128")):eq("")        -- 😀😀
+  reset()
+  local said = {}
+  local real_speak, real_live = speak, is_live
+  speak = function(text) said[#said + 1] = text end
+  is_live = function() return true end
+  T.speak_line("Mouserat gossips, ':) :P'")            -- only emoticons -> skipped entirely
+  expect(#said):eq(0)
+  T.speak_line("Mouserat gossips, 'gratz! :)'")        -- mixed -> spoken clean
+  expect(said[1]):eq("Mouserat: gratz!")
   speak, is_live = real_speak, real_live
 end)
 

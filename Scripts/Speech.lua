@@ -19,7 +19,8 @@
 --
 -- Repeats: an identical (speaker, message) pair is never spoken twice within cfg.dedupe_window — this
 -- silences the game's `replay` command (whose output is byte-identical to live chat). Curated socials
--- ("Mouserat chuckles.") speak a short vocalization in the emoter's voice (cfg.emotes/voice.emotes).
+-- ("Mouserat chuckles.") speak in the emoter's voice — narrated verb phrase by default, vetted
+-- onomatopoeia in "sound" mode (voice.emotes). Emoji/emoticons are stripped before anything is spoken.
 --
 -- Controls: voice.on()/off() · voice.list() · voice.set("name","af_heart") · voice.test("af_heart") ·
 -- voice.backend("kokoro"|"say") · voice.forget("name") · voice.reset() · voice.emotes("on"|"off") ·
@@ -39,9 +40,15 @@ local cfg = {
   -- impossible and recency-dedupe is the correct gate. Bounded LRU (dedupe_max entries).
   dedupe_window = 180,
   dedupe_max = 200,
-  -- Speak short vocalizations for a curated set of socials ("Mouserat chuckles." -> "heh heh" in
-  -- Mouserat's voice). Non-vocal socials (waves, nods) and free-form emotes stay silent.
-  emotes = true,
+  -- How curated socials are spoken (voice.emotes to switch):
+  --   "narrate" (default) — speak the emote as short narration in the emoter's voice: just the verb
+  --                         phrase, lowercase ("chuckles", "sighs somberly"). Plain words, so TTS
+  --                         pronunciation can never sound broken.
+  --   "sound"             — onomatopoeia mode ("ha ha ha!", "ugh"): only empirically TTS-friendly
+  --                         renderings; verbs with no natural-sounding form narrate instead.
+  --   "off"               — socials are silent.
+  -- Non-vocal socials (waves, nods) and free-form emotes never speak in any mode.
+  emote_style = "narrate",
   home = os.getenv("HOME") or "",
   -- Say the speaker's name before the message on these channels (public chatter reads better with an
   -- attribution; private tells/says are quieter without one). Keyed by canonical channel.
@@ -81,8 +88,10 @@ local S = _SPEECH
 -- Recently-spoken dedupe LRU: sig -> os.time(), plus an insertion-order queue for the size cap.
 -- Deliberately reset on EVERY (re)load — a reload should never carry over suppression state.
 S.recent, S.recent_q = {}, {}
--- Emote toggle survives reload (kept in S, seeded from cfg the first time).
-if S.emotes == nil then S.emotes = cfg.emotes end
+-- Emote style survives reload (kept in S, seeded from cfg the first time). Migrates the old boolean
+-- S.emotes from a pre-style session: false -> "off", true/absent -> the cfg default.
+if S.emote_style == nil then S.emote_style = (S.emotes == false) and "off" or cfg.emote_style end
+S.emotes = nil
 
 local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
 -- Canonical speaker key: lowercased, whitespace collapsed. So "Mouserat" and "mouserat " map together.
@@ -560,18 +569,24 @@ end
 local function clear_dedupe() S.recent, S.recent_q = {}, {} end
 
 -- ============================ socials / emotes ============================
--- Curated VOCALIZABLE socials -> the short sound spoken in the emoter's voice. Kokoro renders these
--- interjections well; keep them SHORT. Anything not in this map (waves, nods, dances, free-form emote
--- text) is deliberately silent — an emote line can say literally anything.
+-- Curated VOCALIZABLE socials. Anything not listed (waves, nods, dances, free-form emote text) is
+-- deliberately silent — an emote line can say literally anything.
+local SOCIAL_BASES = { "chuckle", "laugh", "giggle", "snicker", "cackle", "sigh", "groan", "gasp",
+                       "cry", "scream", "snort" }
+-- "sound"-mode onomatopoeia, EMPIRICALLY vetted against the Kokoro server (real-word-ish forms render
+-- naturally; spelled interjections like "heh heh"/"hmph"/"aaaah!" come out as stilted literal
+-- pronunciation). Verbs with no natural-sounding form are ABSENT here and fall back to narration even
+-- in sound mode (snicker, cackle, snort).
 local SOCIAL_SOUNDS = {
-  chuckle = "heh heh", laugh = "ha ha ha!", giggle = "hee hee hee!", snicker = "heh",
-  cackle = "heh heh heh!", sigh = "hhhh, sigh", groan = "ughhh", gasp = "gasp!",
-  cry = "sob... sob...", scream = "aaaah!", snort = "hmph",
+  chuckle = "ha ha", laugh = "ha ha ha!", giggle = "hee hee", sigh = "ohh...",
+  groan = "ugh", gasp = "ah!", cry = "oh no", scream = "aah!",
 }
--- Third-person verb form -> base ("chuckles" -> "chuckle", "cries" -> "cry").
-local SOCIAL_VERBS = {}
-for base in pairs(SOCIAL_SOUNDS) do
-  SOCIAL_VERBS[(base == "cry") and "cries" or (base .. "s")] = base
+-- Third-person verb form maps: "chuckles" -> "chuckle" (parse) and "chuckle" -> "chuckles" (narrate).
+local SOCIAL_VERBS, SOCIAL_THIRD = {}, {}
+for _, base in ipairs(SOCIAL_BASES) do
+  local third = (base == "cry") and "cries" or (base .. "s")
+  SOCIAL_VERBS[third] = base
+  SOCIAL_THIRD[base] = third
 end
 
 -- A social line's tail after the verb: empty, or a SHORT unpunctuated clause ("somberly", "out loud",
@@ -586,10 +601,11 @@ local function social_tail_ok(rest)
   return n <= 3
 end
 
--- parse_social(line) -> { speaker, verb, is_self } for a curated-social line, else nil. Anchored on the
--- verbatim wire shapes from human-traces.jsonl: "You chuckle." · "You laugh out loud." ·
+-- parse_social(line) -> { speaker, verb, tail, is_self } for a curated-social line, else nil. Anchored
+-- on the verbatim wire shapes from human-traces.jsonl: "You chuckle." · "You laugh out loud." ·
 -- "Mario sighs somberly." · "A baby water elemental giggles." — and rejects quoted lines
--- ("You scream '…'"), long clauses, and non-vocal socials. Pure (unit-tested).
+-- ("You scream '…'"), long clauses, and non-vocal socials. `tail` is the short trailing clause
+-- ("out loud", "somberly", "at Lokar"; possibly ""), used by narrate mode. Pure (unit-tested).
 local function parse_social(line)
   line = trim(line)
   if line == "" or line:find("'", 1, true) then return nil end   -- quoted = speech, not a social
@@ -597,17 +613,43 @@ local function parse_social(line)
   if not body or body:find("[.!,]") then return nil end          -- one short sentence only
   -- Your own: "You chuckle[ tail]"
   local verb, rest = body:match("^You (%a+)(.*)$")
-  if verb and SOCIAL_SOUNDS[verb] and social_tail_ok(rest) then
-    return { speaker = "you", verb = verb, is_self = true }
+  if verb and SOCIAL_THIRD[verb] and social_tail_ok(rest) then
+    return { speaker = "you", verb = verb, tail = trim(rest), is_self = true }
   end
   -- Third person: "<Name> <verbs>[ tail]" — the name may be multi-word ("A baby water elemental").
   for third, base in pairs(SOCIAL_VERBS) do
     local who, rest2 = body:match("^(.-) " .. third .. "(.*)$")
     if who and trim(who) ~= "" and social_tail_ok(rest2 or "") then
-      return { speaker = trim(who), verb = base }
+      return { speaker = trim(who), verb = base, tail = trim(rest2 or "") }
     end
   end
   return nil
+end
+
+-- ============================ emoji / emoticon hygiene ============================
+-- Chat is full of "gratz! :)" and "nice one 🎉" — TTS pronouncing ":)" or an emoji codepoint sounds
+-- broken. Strip unicode emoji (byte-range match on the UTF-8 sequences) and whole ASCII-emoticon
+-- tokens, collapsing whitespace. A message that was ONLY emoji/emoticons cleans to "" (caller skips it).
+local function is_emoticon_token(t)
+  if t:match("^[:;=8Xx][%-'^o]*[%)%(DdPpOo03/\\|%*%]%[<>]+$") then return true end -- :) ;-P =D x) :'( :/ :3
+  if t:match("^</?3+$") then return true end                                        -- <3 </3 <33
+  if t:match("^[Xx][Dd]+$") then return true end                                    -- xD XD xDD
+  if t == "^^" or t == "^_^" or t == "-_-" or t == "-.-" or t == "T_T"
+     or t == "o.O" or t == "O.o" or t == "\\o/" then return true end
+  return false
+end
+
+local function clean_spoken_text(msg)
+  msg = tostring(msg or "")
+  msg = msg:gsub("\240\159[\128-\191][\128-\191]", "")   -- U+1F000–1FFFF: emoji, incl. skin tones
+  msg = msg:gsub("\226[\152-\158][\128-\191]", "")        -- U+2600–27BF: misc symbols, ❤, ✨, ☀ …
+  msg = msg:gsub("\239\184\143", "")                       -- U+FE0F variation selector
+  msg = msg:gsub("\226\128\141", "")                       -- U+200D zero-width joiner
+  local parts = {}
+  for tok in msg:gmatch("%S+") do
+    if not is_emoticon_token(tok) then parts[#parts + 1] = tok end
+  end
+  return table.concat(parts, " ")                          -- also collapses doubled spaces
 end
 
 -- ============================ speaking ============================
@@ -630,7 +672,9 @@ local function speak_line(line)
   local key = c.is_self and "you" or norm(c.speaker)
   if key == "" then return end
   local display = c.is_self and nil or c.speaker
-  local msg = trim(c.message)
+  -- Emoji/emoticon hygiene: "gratz! :)" speaks as "gratz!"; an all-emoji message speaks not at all.
+  local msg = clean_spoken_text(trim(c.message))
+  if msg == "" then return end
   -- Recency dedupe: an identical (speaker, message) pair within the window is a repeat — most notably
   -- the game's `replay` command re-printing recent channel history in the exact live format.
   if recently_spoken(key, msg) then return end
@@ -650,11 +694,14 @@ local function speak_line(line)
   if speak then speak(text, voice, cfg.rate, backend, say_fallback) end
 end
 
--- The gate every social/emote-shaped line passes through. Speaks a SHORT curated vocalization in the
--- emoter's assigned voice; same live/mute/dedupe gates as chat (a chuckle in replayed history or a
--- repeated chuckle within the window stays silent).
+-- The gate every social/emote-shaped line passes through. Depending on S.emote_style, speaks either a
+-- short NARRATION in the emoter's voice ("chuckles", "sighs somberly" — the verb phrase, no name: the
+-- voice identity already says who) or, in "sound" mode, a vetted onomatopoeia (narrating any verb with
+-- no natural sound). Same live/mute/dedupe gates as chat (a chuckle in replayed history or a repeated
+-- chuckle within the window stays silent).
 local function speak_emote(line)
-  if not S.enabled or not S.emotes then return end
+  local style = S.emote_style or cfg.emote_style
+  if not S.enabled or style == "off" then return end
   if is_live and not is_live() then return end
   if is_muted() then return end
   local e = parse_social(line)
@@ -662,13 +709,19 @@ local function speak_emote(line)
   local key = e.is_self and "you" or norm(e.speaker)
   if key == "" then return end
   if recently_spoken(key, "emote:" .. e.verb) then return end
+  local text = (style == "sound") and SOCIAL_SOUNDS[e.verb] or nil
+  if not text then                                        -- narrate mode, or no vetted sound
+    text = SOCIAL_THIRD[e.verb]
+    if e.tail and e.tail ~= "" then text = text .. " " .. e.tail end
+    text = text:lower()
+  end
   local display = e.is_self and nil or e.speaker
   local backend = active_backend()
   local voice = assign_voice(key, display, backend)
   local say_fallback = (backend == "kokoro") and assign_voice(key, display, "say") or nil
   S.spoken[key] = true
   record_spoken(key, "emote:" .. e.verb)
-  if speak then speak(SOCIAL_SOUNDS[e.verb], voice, cfg.rate, backend, say_fallback) end
+  if speak then speak(text, voice, cfg.rate, backend, say_fallback) end
 end
 
 -- ============================ triggers ============================
@@ -771,13 +824,20 @@ function voice.reset()
   echo(string.format("[voice] reset — dropped %d speaker assignment(s) (say + kokoro); fresh voices on next sighting", n))
 end
 
--- Toggle (or report) the curated social vocalizations ("Mouserat chuckles." -> "heh heh").
+-- Set (or report) how curated socials are spoken: "narrate" (verb phrase, default), "sound"
+-- (vetted onomatopoeia), or "off". Legacy on/off still work: on -> narrate, off -> off.
 function voice.emotes(v)
   if v == nil or v == "" then
-    return echo("[voice] emotes " .. (S.emotes and "ON" or "OFF"))
+    return echo("[voice] emotes: " .. (S.emote_style or cfg.emote_style))
   end
-  S.emotes = (v == true or v == "on" or v == "ON")
-  echo("[voice] emotes " .. (S.emotes and "ON" or "OFF"))
+  local m = tostring(v):lower()
+  if m == "on" or m == "true" then m = "narrate" end
+  if m == "false" then m = "off" end
+  if m ~= "narrate" and m ~= "sound" and m ~= "off" then
+    return echo("[voice] usage: voice.emotes(\"narrate\" | \"sound\" | \"off\")", "yellow")
+  end
+  S.emote_style = m
+  echo("[voice] emotes: " .. m)
 end
 
 function voice.mute(seconds)
@@ -824,9 +884,9 @@ doc(voice.forget, { name = "voice.forget", sig = "voice.forget(name)", group = "
 doc(voice.reset, { name = "voice.reset", sig = "voice.reset()", group = "speech",
   text = "Wipe ALL speaker voice assignments (say + kokoro), in memory and on disk, plus the recently-spoken dedupe memory. Every speaker gets a fresh pick from the current voice pools the next time they speak.",
   example = "voice.reset()" })
-doc(voice.emotes, { name = "voice.emotes", sig = "voice.emotes([\"on\"|\"off\"])", group = "speech",
-  text = "Toggle (or report, with no arg) spoken vocalizations for curated socials: chuckle/laugh/giggle/snicker/cackle/sigh/groan/gasp/cry/scream/snort speak a short sound (e.g. \"heh heh\") in the emoter's voice. Non-vocal socials and free-form emotes are never spoken.",
-  example = "voice.emotes(\"off\")" })
+doc(voice.emotes, { name = "voice.emotes", sig = "voice.emotes([\"narrate\"|\"sound\"|\"off\"])", group = "speech",
+  text = "How curated socials (chuckle/laugh/giggle/snicker/cackle/sigh/groan/gasp/cry/scream/snort) are spoken, in the emoter's voice. \"narrate\" (default): the short verb phrase — \"chuckles\", \"sighs somberly\". \"sound\": vetted onomatopoeia (\"ha ha ha!\", \"ugh\"); verbs with no natural sound narrate instead. \"off\": silent. Legacy \"on\" maps to narrate. No arg reports the current mode. Non-vocal socials and free-form emotes are never spoken.",
+  example = "voice.emotes(\"sound\")" })
 doc(voice.mute, { name = "voice.mute", sig = "voice.mute([seconds])", group = "speech",
   text = "Silence speech for N seconds (default 10) and flush anything queued. Handy during a flood.",
   example = "voice.mute(30)" })
@@ -860,6 +920,8 @@ _SPEECH_TEST = {
   speak_line = speak_line,
   speak_emote = speak_emote,
   parse_social = parse_social,
+  social_third = SOCIAL_THIRD,
+  clean_spoken_text = clean_spoken_text,
   gender_from_name = gender_from_name,
   pick_candidates = pick_candidates,
   pick_you_voice = pick_you_voice,
