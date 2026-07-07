@@ -936,7 +936,7 @@ local function install_scan_triggers()
   trigger([[^You are using:]],   function() S.scan.mode = "eq";  S.scan.eq = {} end,  { class = "eq" })
   trigger([[^You are wearing:]], function() S.scan.mode = "eq";  S.scan.eq = {} end,  { class = "eq" })
   trigger([[^You are carrying:]], function() S.scan.mode = "inv"; S.scan.inv = {} end, { class = "eq" })
-  trigger([[contains:]], function(line)
+  trigger([[^.+ contains:$]], function(line)   -- anchored: a player's say "…bag contains:'" (quoted) can't spoof it
     local cname = parse_container_header(line)
     S.scan.mode = "cont"; S.scan.curcont = cname or "a container"
     S.scan.containers[S.scan.curcont] = S.scan.containers[S.scan.curcont] or {}
