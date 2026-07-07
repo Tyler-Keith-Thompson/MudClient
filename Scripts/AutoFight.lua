@@ -211,7 +211,7 @@ local function hit_mana()
   F.no_mana[F.busy_spell] = true
   F.busy, F.busy_spell = false, nil
 end
-local function hit_fail()  fail_again() end            -- fizzle / "cast that on yourself" — retry the same spell
+local function hit_fail()  fail_again() end            -- "You fail to cast the spell '…'." — fizzled, retry
 
 local function hit_soulsteal_ok()
   -- The soul was pulled; the enemy is about to die. Stop casting; the DEAD line ends the fight.
@@ -255,7 +255,6 @@ if trigger then
   trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
   trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
   trigger([[^You fail to cast the spell]], function() hit_fail() end)
-  trigger([[^If you really want to cast that on yourself]], function() hit_fail() end)
   trigger([[^.+ is DEAD!$]], function() hit_dead() end)
 end
 
