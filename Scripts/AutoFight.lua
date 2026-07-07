@@ -16,16 +16,15 @@
 --                        intervene; it resumes after cfg.resume_after seconds of no manual input, or when
 --                        the fight ends.
 --
--- PACING (the important bit — never spam): after sending a cast we set `busy` and refuse to send the
--- next cast until that cast RESOLVES. Resolution = the spell's landed line, a resist, an out-of-mana
--- line, a change in the enemy health %, OR a fallback timeout (cfg.cast_timeout) so we never deadlock
--- waiting on a signal the game didn't send.
+-- PACING (the important bit — NEVER spam, and NEVER timed): after we send a cast we set `busy` and send
+-- NOTHING until we SEE that spell's own success line (it LANDED) — then we cast the next. If the cast
+-- FAILS ("You fail to cast…", or it resisted), we retry the SAME spell (up to cfg.max_tries). The enemy
+-- health bar (kxwt_fighting) updates several times a second and must NEVER trigger a cast — casting on
+-- every tick was the command-spam bug. Out-of-mana marks the spell and we WAIT (no retry, no spam).
 --
--- ROBUSTNESS: earth wall (a Druid spell) and tarrants may not be known by this character. Openers are
--- cast exactly once and the machine MOVES ON when they resolve by ANY signal (incl. the timeout and a
--- "You fail to cast" line) — it never retries an opener, so the shards/shower/soulsteal core still runs
--- even if the buffs fail. Out-of-mana on a spell marks it unaffordable for the rest of the fight (we
--- wait rather than spam it).
+-- NOTE: earth wall's landed line is known; `c tarrants`'s is NOT yet, so tarrants is currently SKIPPED
+-- (earthwall → shards) rather than risk stalling `busy` forever on a line we can't detect. Add its
+-- success line to the triggers + next_phase to re-enable it.
 --
 -- Wire strings below are VERBATIM from the player's raw logs (mud_raw_copy.log / mud_raw_nomelee.log),
 -- not invented. See Scripts/tests/autofight_spec.lua, which replays a real Gnomian-guard fight.
@@ -35,7 +34,11 @@
 state = state or {}   -- defensive: this file may load before AlterAeon.lua under the directory loader.
 
 local cfg = {
-  cast_timeout  = 2.5,   -- seconds: fallback that clears `busy` if no resolution line is seen
+  -- PACING IS PURELY EVENT-DRIVEN, NEVER TIMED. After we send a cast we go `busy` and send NOTHING
+  -- until we see that SPELL's own success line (it LANDED) or a failure line (retry). The enemy
+  -- health-bar (kxwt_fighting) updates many times a second and must NEVER trigger a cast — that was
+  -- the spam bug. There is no timeout.
+  max_tries     = 4,     -- consecutive failures on one spell before we give up on it and move on
   resume_after  = 6,     -- seconds of no manual input before the script resumes after a user command
   soulsteal_pct = 15,    -- enemy health % at/below which we switch to soulsteal ("nearly dead")
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
@@ -66,8 +69,8 @@ local function clear_sent() for i = #sent, 1, -1 do sent[i] = nil end end
 
 local function say(s) if echo then echo("\27[1;35m[autofight]\27[0m " .. s) end end
 
--- Forward declarations (mutually recursive: advance ⇄ cast ⇄ resolve).
-local advance, cast, resolve
+-- Forward declarations (mutually recursive).
+local fire, cast, succeed, fail_again
 
 -- Send a command the SCRIPT chose. Flag it in self_sent so the echoed-back on_user_input (send loops
 -- through the input observer, exactly like the pilot) doesn't mistake our own command for the user's.
@@ -77,58 +80,67 @@ local function af_send(cmd)
   if send then send(cmd) end
 end
 
--- Send `cmd` as spell `spell`, then go busy until it resolves. Skips the send (but not the phase, which
--- the caller already advanced) if we've learned the spell is unaffordable — we WAIT rather than spam it.
+-- Send the cast for `spell` and go `busy`. NO timer — we stay busy until we SEE that spell's own
+-- success line (succeed) or a failure line (fail_again). `busy` is the only thing gating sends, so we
+-- can never have two casts outstanding and can never spam.
 cast = function(cmd, spell)
-  if F.no_mana[spell] then return end
   F.busy, F.busy_spell, F.busy_pct = true, spell, F.pct
-  if F.busy_timer and cancel then cancel(F.busy_timer) end
-  F.busy_timer = after and after(cfg.cast_timeout, function() resolve("timeout") end) or nil
   af_send(cmd)
 end
 
--- A cast resolved (any of: landed line / resist / out-of-mana / health-% change / timeout / fail).
--- Clear busy, apply the resolution's side effects, then let the machine take its next step.
-resolve = function(reason)
-  if not F.busy then return end
-  local spell = F.busy_spell
-  F.busy, F.busy_spell = false, nil
-  if F.busy_timer and cancel then cancel(F.busy_timer); F.busy_timer = nil end
-  if reason == "mana" then F.no_mana[spell] = true end                 -- stop casting the unaffordable spell
-  if reason == "resist" and spell == "soulsteal" then F.phase = "renuke" end
-  advance()
+-- Advance the phase to the next spell in the routine. (nuke stays nuke — keep nuking the winner;
+-- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed".)
+local function next_phase()
+  local p = F.phase
+  if     p == "earthwall" then F.phase = "shards"    -- TODO tarrants: skipped until we have its landed line
+  elseif p == "tarrants"  then F.phase = "shards"
+  elseif p == "shards"    then F.phase = "shower"
+  elseif p == "shower"    then F.phase = "decide"
+  elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
+  end
 end
 
--- The single place that decides the next SEND, purely from phase + the pacing/suspend guards. Every
--- event (health-% update, resolution line, resume) funnels back here.
-advance = function()
+-- Send exactly ONE cast for the current phase. Retry-safe: it does NOT advance the phase — SUCCESS does
+-- that. Handles the two send-free transitions (decide → pick winner; nuke → soulsteal when nearly dead)
+-- inline. This is the ONLY function that sends, and it only runs from start_fight, succeed, fail_again,
+-- and resume — never from a health-% update.
+fire = function()
   if not F.on or not F.fighting or F.suspended or F.busy then return end
-  local p = F.phase
-  if p == "earthwall" then
-    F.phase = "tarrants"; cast(cfg.opener_earthwall, "earthwall")     -- opener, cast once; move on regardless
-  elseif p == "tarrants" then
-    F.phase = "shards";   cast(cfg.opener_tarrants, "tarrants")       -- opener, cast once
-  elseif p == "shards" then
-    F.phase = "shower";   F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")   -- probe #1
-  elseif p == "shower" then
-    F.phase = "decide";   F.last_damage_spell = "shower"; cast(cfg.shower_cmd, "shower")   -- probe #2
-  elseif p == "decide" then
+  if F.phase == "decide" then
     -- Coarse winner pick: whichever probe dropped the enemy health % more. Ties → shards.
     if F.shards_drop >= F.shower_drop then F.winner, F.winner_spell = cfg.shards_cmd, "shards"
     else F.winner, F.winner_spell = cfg.shower_cmd, "shower" end
-    F.phase = "nuke"; advance()                                       -- act on the new phase now
-  elseif p == "nuke" then
-    if F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct then
-      F.phase = "soulsteal"; advance()                               -- nearly dead → finish it
-    else
-      F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
-    end
-  elseif p == "renuke" then
-    -- One winner nuke after a soulsteal resist, then (once it resolves) back to soulsteal.
-    F.phase = "soulsteal"; F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
-  elseif p == "soulsteal" then
-    cast(cfg.soulsteal_cmd, "soulsteal")
+    F.phase = "nuke"
   end
+  if F.phase == "nuke" and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct then F.phase = "soulsteal" end
+  local p = F.phase
+  if     p == "earthwall"              then cast(cfg.opener_earthwall, "earthwall")
+  elseif p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
+  elseif p == "shards"                 then F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")
+  elseif p == "shower"                 then F.last_damage_spell = "shower"; cast(cfg.shower_cmd, "shower")
+  elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
+  elseif p == "soulsteal"              then cast(cfg.soulsteal_cmd, "soulsteal")
+  end   -- "done"/"idle": nothing to send
+end
+
+-- The spell we were casting LANDED (its own success line). `spell` must match what we're casting, so a
+-- straggler line for a previous cast is ignored. Advance the phase and fire the next spell.
+succeed = function(spell)
+  if not F.busy or (spell and F.busy_spell ~= spell) then return end
+  F.busy, F.busy_spell, F.tries = false, nil, 0
+  next_phase()
+  fire()
+end
+
+-- The current cast FAILED ("You fail to cast", or a damage spell resisted). Try the SAME spell again,
+-- up to cfg.max_tries; after that give up on it and move on so a spell the character can't cast (e.g. an
+-- unknown opener) doesn't stall the whole routine forever. Out-of-mana is handled separately (we wait).
+fail_again = function()
+  if not F.busy then return end
+  F.busy, F.busy_spell = false, nil
+  F.tries = (F.tries or 0) + 1
+  if F.tries >= cfg.max_tries then F.tries = 0; next_phase() end
+  fire()
 end
 
 -- ---- fight lifecycle -----------------------------------------------------------------------------
@@ -144,7 +156,7 @@ local function start_fight(pct, name)
   if F.busy_timer and cancel then cancel(F.busy_timer); F.busy_timer = nil end
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
   clear_sent()
-  advance()
+  fire()
 end
 
 local function end_fight()
@@ -169,7 +181,9 @@ local function on_fight(pct, name)
     if     F.last_damage_spell == "shards" then F.shards_drop = F.shards_drop + d
     elseif F.last_damage_spell == "shower" then F.shower_drop = F.shower_drop + d end
   end
-  if F.busy and prev ~= pct then resolve("pct") else advance() end
+  -- A health-% change updates the winner comparison ONLY. It NEVER triggers a cast — casting is driven
+  -- solely by a spell's landed line (or a failure). This is the fix for the command-spam bug: the health
+  -- bar ticks several times a second, and the old code cast on every tick.
 end
 
 local function on_fight_end()
@@ -179,40 +193,33 @@ end
 -- ---- combat line resolutions ---------------------------------------------------------------------
 -- Each hit_* is what a trigger fires; on_line() (the test seam) classifies a verbatim line and calls the
 -- same hit_*, so triggers and tests share one implementation.
-local function hit_shards()  resolve("landed") end
-local function hit_shower()  resolve("landed") end
-local function hit_resist()  resolve("resist") end
-local function hit_mana()    resolve("mana")   end
-local function hit_fail()    resolve("fail")   end   -- "You fail to cast the spell '…'." — cast fizzled
+local function hit_shards()     succeed("shards")    end   -- "You create and magically throw white shards…"
+local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs…"
+local function hit_earthwall()  succeed("earthwall") end   -- "You drop to one knee… a protective wall!"
+local function hit_resist()
+  -- soulsteal resisting → re-nuke once, then retry soulsteal. A DAMAGE spell resisting is just a miss → retry.
+  if F.busy and F.busy_spell == "soulsteal" then
+    F.busy, F.busy_spell, F.tries = false, nil, 0
+    F.phase = "renuke"; fire()
+  else
+    fail_again()
+  end
+end
+local function hit_mana()
+  -- Out of mana: DON'T retry and DON'T spam. Mark it and stop; we resume next time we're free to cast.
+  if not F.busy then return end
+  F.no_mana[F.busy_spell] = true
+  F.busy, F.busy_spell = false, nil
+end
+local function hit_fail()  fail_again() end            -- fizzle / "cast that on yourself" — retry the same spell
 
 local function hit_soulsteal_ok()
   -- The soul was pulled; the enemy is about to die. Stop casting; the DEAD line ends the fight.
-  if F.busy_timer and cancel then cancel(F.busy_timer); F.busy_timer = nil end
   F.busy, F.busy_spell, F.phase = false, nil, "done"
 end
 
 local function hit_dead()
   end_fight()
-end
-
--- Classify ONE verbatim game line and dispatch. Ordered most-specific first. VERBATIM patterns:
---   "You cast the spell to separate soul from body, and pull <name>'s essence into a red soulstone!"
---   "You create and magically throw white shards of crystal at <target>!"
---   "A shower of <color> sparks suddenly engulfs <target>!"
---   "<name> resists the spell."
---   "You don't have enough mana."
---   "You fail to cast the spell 'shards'."
---   "<name> is DEAD!"
-local function on_line(l)
-  l = l or ""
-  if l:find("separate soul from body", 1, true) then hit_soulsteal_ok(); return "soulsteal_ok" end
-  if l:find("white shards of crystal at", 1, true) then hit_shards(); return "shards" end
-  if l:match("A shower of .- sparks suddenly engulfs") then hit_shower(); return "shower" end
-  if l:find("resists the spell", 1, true) then hit_resist(); return "resist" end
-  if l:find("enough mana", 1, true) then hit_mana(); return "mana" end
-  if l:find("You fail to cast the spell", 1, true) then hit_fail(); return "fail" end
-  if l:match("^.- is DEAD!") then hit_dead(); return "dead" end
-  return nil
 end
 
 -- ---- manual-input suspend (step 6) ---------------------------------------------------------------
@@ -226,7 +233,7 @@ local function observe_input(cmd)
   F.suspended = true
   if F.suspend_timer and cancel then cancel(F.suspend_timer) end
   F.suspend_timer = after and after(cfg.resume_after, function()
-    F.suspend_timer = nil; F.suspended = false; advance()
+    F.suspend_timer = nil; F.suspended = false; fire()
   end) or nil
 end
 
@@ -237,13 +244,19 @@ end
 if trigger then
   trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, pct, name) on_fight(tonumber(pct), name) end)
   trigger([[^kxwt_fighting -1$]], function() on_fight_end() end)
-  trigger([[separate soul from body]], function() hit_soulsteal_ok() end)
-  trigger([[white shards of crystal at]], function() hit_shards() end)
-  trigger([[A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
-  trigger([[resists the spell]], function() hit_resist() end)
-  trigger([[don't have enough mana]], function() hit_mana() end)
-  trigger([[You fail to cast the spell]], function() hit_fail() end)
-  trigger([[ is DEAD!]], function() hit_dead() end)
+  -- ALL anchored to ^ (and $ where the message is a whole line) so another player's say/tell/channel
+  -- text — e.g. someone chatting "the guard resists the spell." — can NEVER trip a resolution. Those
+  -- lines start with the speaker ("Bob says, '…'"), so ^ excludes them. The messages that begin with a
+  -- variable mob name (resist / DEAD) also anchor the tail with $ so a quoted say ("…DEAD!'") is excluded.
+  trigger([[^You cast the spell to separate soul from body]], function() hit_soulsteal_ok() end)
+  trigger([[^You create and magically throw white shards of crystal at]], function() hit_shards() end)
+  trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
+  trigger([[^You drop to one knee.*force the ground into a protective wall]], function() hit_earthwall() end)
+  trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
+  trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
+  trigger([[^You fail to cast the spell]], function() hit_fail() end)
+  trigger([[^If you really want to cast that on yourself]], function() hit_fail() end)
+  trigger([[^.+ is DEAD!$]], function() hit_dead() end)
 end
 
 -- Observe typed input non-destructively by CHAINING the existing on_user_input (AIPilot defines one; we
@@ -268,7 +281,7 @@ autofight = {}
 function autofight.on()
   F.on = true
   say("armed — earth wall → tarrants → shards/shower probe → nuke winner → soulsteal")
-  if F.fighting and not F.busy then advance() end
+  if F.fighting and not F.busy then fire() end
 end
 
 function autofight.off()
@@ -299,21 +312,22 @@ setmetatable(autofight, { __call = function(_, rest)
 end })
 
 -- ---- test seam -----------------------------------------------------------------------------------
--- Drives the ACTUAL state machine from Scripts/tests/autofight_spec.lua. on_line/on_fight are the same
--- handlers the live triggers call; expire_cast/expire_resume fire the fallback timers deterministically
--- (the CLI harness never auto-fires `after`).
+-- The spec drives the state machine by calling the SAME handlers the live triggers call — there is no
+-- second line-matching path to drift. on_fight is the kxwt_fighting handler; shards/shower/… are the
+-- resolution handlers each trigger dispatches to.
 _AF_TEST = {
   cfg           = cfg,
   sent          = sent,                                   -- captured send sequence (shared table)
   state         = function() return F end,
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
-  on_line       = on_line,
   on_input      = observe_input,
-  expire_cast   = function() resolve("timeout") end,
+  shards        = hit_shards,      shower       = hit_shower,      earthwall = hit_earthwall,
+  resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
+  soulsteal_ok  = hit_soulsteal_ok, dead        = hit_dead,
   expire_resume = function()
     if F.suspend_timer and cancel then cancel(F.suspend_timer) end
-    F.suspend_timer, F.suspended = nil, false; advance()
+    F.suspend_timer, F.suspended = nil, false; fire()
   end,
   reset = function()                                      -- clean pre-fight state, armed, for a test
     F.on = true

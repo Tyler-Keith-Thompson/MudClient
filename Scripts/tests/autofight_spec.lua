@@ -1,43 +1,18 @@
 -- Specs for AutoFight.lua — the deterministic auto-fight state machine.
 --
--- These drive the ACTUAL state machine (via the _AF_TEST seam: the same on_fight/on_line/observe_input
--- handlers the live kxwt triggers and on_user_input call) and assert the exact SEND sequence, the
--- pacing (never a second cast before the prior one resolves), the manual-input suspend, and the
--- shards-vs-shower winner pick.
+-- These drive the ACTUAL state machine by calling the SAME resolution handlers the live Swift triggers
+-- dispatch to (AF.shards/AF.shower/AF.resist/… via _AF_TEST) plus the kxwt_fighting handler (AF.on_fight)
+-- and the input observer (AF.on_input). The trigger REGEXES live in one place — the trigger() block in
+-- AutoFight.lua — and run in Swift; there is no second Lua line-matcher to drift, so the specs test the
+-- state-machine LOGIC, not the matching.
 --
--- Every game LINE fed below is VERBATIM from the player's raw logs. The anchor fight is the Gnomian
--- guard in mud_raw_copy.log (a real shards + soulsteal kill with a live kxwt_fighting health bar):
---   "kxwt_fighting 90 male a Gnomian guard"                                               (copy.log:1208)
---   "You create and magically throw white shards of crystal at a Gnomian guard!"          (copy.log:1200)
---   "A shower of brilliant white sparks suddenly engulfs a Gnomian guard!"                (copy.log:2351)
---   "You cast the spell to separate soul from body, and pull a Gnomian guard's essence
---        into a yellow soulstone!"                                                        (copy.log:1561)
---   "A Gnomian guard is DEAD!"                                                            (copy.log:1565)
---   "You don't have enough mana."                                                        (copy.log:2618)
---   "<name> resists the spell."  (real format, copy.log:4038 "Corupius … resists the spell.")
--- The kxwt_fighting health-% values are injected as the corresponding state.fight_pct updates (the
--- anchor fight is nomelee-adjacent; the % ladder is real kxwt numbers). Since the health-% signal is
--- how the winner is measured, the winner-pick specs drive the drop cleanly via the % updates.
+-- PACING RULE under test: a cast goes out, then NOTHING until that spell's own landed line (or a fail).
+-- The enemy health bar (on_fight / kxwt_fighting) ticks many times a second and must send NOTHING.
 
 local AF = _AF_TEST
-
 local ENEMY = "a Gnomian guard"
 
--- VERBATIM resolution lines used across the specs.
-local L_SHARDS_LAND = "You create and magically throw white shards of crystal at a Gnomian guard!"
-local L_SHOWER_LAND = "A shower of brilliant white sparks suddenly engulfs a Gnomian guard!"
-local L_RESIST      = "a Gnomian guard resists the spell."
-local L_MANA        = "You don't have enough mana."
-local L_SOULSTEAL_OK= "You cast the spell to separate soul from body, and pull a Gnomian guard's essence into a yellow soulstone!"
-local L_DEAD        = "A Gnomian guard is DEAD!"
-local L_NOISE       = "A skeleton's slice wounds a Gnomian guard."   -- a melee line: NOT a resolution
-
-local function seq()
-  local t = {}
-  for i, v in ipairs(AF.sent) do t[i] = v end
-  return t
-end
-
+local function seq() local t = {}; for i, v in ipairs(AF.sent) do t[i] = v end; return t end
 local function expect_seq(got, want)
   expect(#got):eq(#want)
   for i = 1, #want do
@@ -48,170 +23,156 @@ local function expect_seq(got, want)
   end
 end
 
--- Advance the openers deterministically: earth wall + tarrants aren't known here, so each resolves by
--- the fallback timeout (they never retry). After this, "c shards" has just been sent and we're busy.
-local function run_openers()
+-- Get to "c shards in flight": start the fight (casts earth wall), land earth wall → shards. (tarrants
+-- is skipped until we have its landed line.)
+local function to_shards()
   AF.reset()
-  AF.on_fight(90, ENEMY)   -- combat start → casts "cast earth wall"
-  AF.expire_cast()         -- earth wall timed out → casts "c tarrants"
-  AF.expire_cast()         -- tarrants timed out → casts "c shards"
+  AF.on_fight(90, ENEMY)   -- combat start → "cast earth wall"
+  AF.earthwall()           -- earth wall LANDED → "c shards"
 end
 
--- ---- (a) full command sequence of a real fight ---------------------------------------------------
-test("full fight replay: earth wall → tarrants → shards/shower probe → nuke winner → soulsteal(resist→re-nuke→retry)", function()
-  run_openers()                                   -- sent: cast earth wall, c tarrants, c shards
-  AF.on_fight(70, ENEMY)                           -- shards dropped 90→70 (Δ20) → resolves → casts "c shower"
-  AF.on_fight(65, ENEMY)                           -- shower dropped 70→65 (Δ5) → shards wins → nuke "c shards"
-  AF.on_fight(50, ENEMY)                           -- nuke resolves → "c shards"
-  AF.on_fight(35, ENEMY)                           -- nuke resolves → "c shards"
-  AF.on_fight(20, ENEMY)                           -- nuke resolves → "c shards"
-  AF.on_fight(10, ENEMY)                           -- ≤15% nearly dead → "c soulsteal"
-  AF.on_line(L_RESIST)                             -- soulsteal RESISTED → re-nuke once → "c shards"
-  AF.on_line(L_SHARDS_LAND)                         -- re-nuke landed → retry → "c soulsteal"
-  AF.on_line(L_SOULSTEAL_OK)                        -- soulsteal landed → done (no further sends)
-  AF.on_line(L_DEAD)                               -- enemy dead → fight ends
+-- ---- (a) full fight command sequence -------------------------------------------------------------
+test("full fight: earth wall → shards/shower probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
+  to_shards()                        -- sent: cast earth wall, c shards
+  AF.on_fight(70, ENEMY)             -- shards Δ20 — a % change NEVER casts
+  AF.shards()                        -- shards LANDED → "c shower"
+  AF.on_fight(65, ENEMY)             -- shower Δ5
+  AF.shower()                        -- shower LANDED → decide (shards wins) → nuke "c shards"
+  AF.on_fight(50, ENEMY); AF.shards()  -- landed → "c shards"
+  AF.on_fight(35, ENEMY); AF.shards()  -- landed → "c shards"
+  AF.on_fight(20, ENEMY); AF.shards()  -- landed → "c shards"
+  AF.on_fight(10, ENEMY); AF.shards()  -- landed, now ≤15% → "c soulsteal"
+  AF.resist()                        -- soulsteal RESISTED → re-nuke → "c shards"
+  AF.shards()                        -- re-nuke landed → "c soulsteal"
+  AF.soulsteal_ok()                  -- landed → done (no further sends)
+  AF.dead()                          -- enemy dead → fight ends
 
   expect_seq(seq(), {
-    "cast earth wall", "c tarrants",               -- openers, once each
-    "c shards", "c shower",                        -- probes
-    "c shards", "c shards", "c shards", "c shards", -- winner (shards) nuked to near-death (65→50→35→20→10)
-    "c soulsteal",                                 -- finish attempt
-    "c shards",                                    -- re-nuke after the resist
-    "c soulsteal",                                 -- retry — lands
+    "cast earth wall",
+    "c shards", "c shower",                          -- probes
+    "c shards", "c shards", "c shards", "c shards",  -- winner nuked (65→50→35→20→10)
+    "c soulsteal",                                   -- finish attempt
+    "c shards",                                      -- re-nuke after the resist
+    "c soulsteal",                                   -- retry — lands
   })
   local F = AF.state()
   expect(F.winner_spell):eq("shards")
-  expect(F.fighting):eq(false)                     -- the DEAD line ended it
+  expect(F.fighting):eq(false)
   expect(F.phase):eq("idle")
 end)
 
--- ---- (b) pacing: no second cast before the prior cast resolves -----------------------------------
-test("pacing: stays busy (no new send) until a resolution line, then advances", function()
-  run_openers()
-  local F = AF.state()
-  expect(F.busy):eq(true)                          -- "c shards" is in flight
-  expect(F.busy_spell):eq("shards")
-  local n = #AF.sent                               -- 3 sends so far (earth wall, tarrants, shards)
-
-  AF.on_line(L_NOISE)                              -- a non-resolution combat line…
-  expect(#AF.sent):eq(n)                           -- …emits NOTHING and…
-  expect(AF.state().busy):eq(true)                 -- …leaves us busy
-
-  AF.on_line(L_SHARDS_LAND)                         -- the shards LANDED line resolves the cast…
-  expect(#AF.sent):eq(n + 1)                       -- …and only NOW does the next cast go out
-  expect(AF.sent[n + 1]):eq("c shower")
-  expect(AF.state().busy):eq(true)                 -- (and we're immediately busy on the shower probe)
-end)
-
-test("pacing: a health-% change also resolves the busy cast", function()
-  run_openers()
+-- ---- (b) THE SPAM GUARD: a flood of health-% updates while busy sends nothing --------------------
+test("spam guard: a burst of health-% updates in flight sends ZERO commands", function()
+  to_shards()                        -- "c shards" in flight (busy)
   local n = #AF.sent
-  AF.on_fight(80, ENEMY)                           -- % ticked 90→80: a resolution signal
+  expect(AF.state().busy):eq(true)
+  -- the real health bar from the spam log: many kxwt_fighting ticks per second.
+  for _, p in ipairs({ 88, 72, 71, 68, 67, 58, 57, 46, 45, 35, 24, 15, 8, 5, 3 }) do
+    AF.on_fight(p, ENEMY)
+  end
+  expect(#AF.sent):eq(n)             -- NOT ONE extra command — this was the bug
+  expect(AF.state().busy):eq(true)   -- still waiting on the shards landed line
+  AF.shards()                        -- only the actual LANDED line releases the next cast
   expect(#AF.sent):eq(n + 1)
   expect(AF.sent[n + 1]):eq("c shower")
 end)
 
-test("pacing: the fallback timeout resolves so we never deadlock", function()
-  run_openers()                                    -- run_openers itself relies on the timeout twice
+-- ---- (c) pacing + retry --------------------------------------------------------------------------
+test("pacing: a non-resolution line sends nothing; the landed line advances", function()
+  to_shards()
   local n = #AF.sent
-  AF.expire_cast()                                 -- no game signal ever arrived for "c shards"
+  AF.on_fight(80, ENEMY)             -- a % tick: nothing
+  expect(#AF.sent):eq(n)
+  AF.shards()                        -- shards landed → next cast
   expect(#AF.sent):eq(n + 1)
-  expect(AF.sent[n + 1]):eq("c shower")            -- moved on regardless
+  expect(AF.sent[n + 1]):eq("c shower")
 end)
 
--- ---- (c) manual-input suspend --------------------------------------------------------------------
+test("a FAILED cast retries the SAME spell (not the next)", function()
+  to_shards()                        -- "c shards" in flight
+  local n = #AF.sent
+  AF.fail()                          -- "You fail to cast the spell 'shards'." → retry
+  expect(#AF.sent):eq(n + 1)
+  expect(AF.sent[n + 1]):eq("c shards")   -- same spell
+end)
+
+test("an opener that keeps failing is given up after max_tries — never stalls", function()
+  AF.reset(); AF.on_fight(90, ENEMY)       -- "cast earth wall"
+  for _ = 1, AF.cfg.max_tries do AF.fail() end   -- fizzles max_tries times (each after a fail line)
+  expect(AF.sent[#AF.sent]):eq("c shards")       -- gave up on earth wall, moved on
+end)
+
+-- ---- (d) manual-input suspend --------------------------------------------------------------------
 test("suspend: a user-typed command halts sends until the resume window", function()
-  AF.reset()
-  AF.on_fight(90, ENEMY)                           -- casts "cast earth wall" (busy)
+  AF.reset(); AF.on_fight(90, ENEMY)       -- "cast earth wall" (busy)
   expect(#AF.sent):eq(1)
-
-  AF.on_input("kick guard")                        -- the USER intervenes (we never sent this)
+  AF.on_input("kick guard")                -- the USER intervenes
   expect(AF.state().suspended):eq(true)
-
-  AF.expire_cast()                                 -- earth wall resolves, but…
-  expect(#AF.sent):eq(1)                           -- …suspended → no "c tarrants"
-  AF.on_fight(85, ENEMY)                           -- a further game event…
-  expect(#AF.sent):eq(1)                           -- …still nothing while suspended
-
-  AF.expire_resume()                               -- resume window elapses
+  AF.earthwall()                           -- earth wall lands, but suspended → no "c shards"
+  expect(#AF.sent):eq(1)
+  AF.expire_resume()                       -- resume window elapses
   expect(AF.state().suspended):eq(false)
-  expect(#AF.sent):eq(2)                           -- machine resumes: casts "c tarrants"
-  expect(AF.sent[2]):eq("c tarrants")
+  expect(#AF.sent):eq(2)
+  expect(AF.sent[2]):eq("c shards")
 end)
 
 test("suspend: our OWN sends echoing back do NOT suspend", function()
-  AF.reset()
-  AF.on_fight(90, ENEMY)                           -- we send "cast earth wall" (flagged self_sent)
-  AF.on_input("cast earth wall")                   -- its echo comes back through the input observer
-  expect(AF.state().suspended):eq(false)           -- recognized as ours — not treated as user input
+  AF.reset(); AF.on_fight(90, ENEMY)       -- we send "cast earth wall"
+  AF.on_input("cast earth wall")           -- its echo returns through the input observer
+  expect(AF.state().suspended):eq(false)
 end)
 
--- ---- (d) winner pick: bigger %-drop wins ---------------------------------------------------------
+-- ---- (e) winner pick: bigger %-drop wins ---------------------------------------------------------
 test("winner pick: shards drops more than shower → nuke with shards", function()
-  AF.reset()
-  AF.on_fight(100, ENEMY); AF.expire_cast(); AF.expire_cast()   -- → "c shards" in flight
-  AF.on_fight(70, ENEMY)                           -- shards Δ30 → resolves, casts "c shower"
-  AF.on_fight(65, ENEMY)                           -- shower Δ5  → decide
+  to_shards()
+  AF.on_fight(70, ENEMY); AF.shards()      -- shards Δ20 → "c shower"
+  AF.on_fight(65, ENEMY); AF.shower()      -- shower Δ5  → decide → nuke
   local F = AF.state()
-  expect(F.shards_drop):eq(30)
+  expect(F.shards_drop):eq(20)
   expect(F.shower_drop):eq(5)
   expect(F.winner_spell):eq("shards")
-  expect(AF.sent[#AF.sent]):eq("c shards")         -- the first nuke uses the winner
+  expect(AF.sent[#AF.sent]):eq("c shards")
 end)
 
 test("winner pick: shower drops more than shards → nuke with shower", function()
-  AF.reset()
-  AF.on_fight(100, ENEMY); AF.expire_cast(); AF.expire_cast()   -- → "c shards" in flight
-  AF.on_fight(95, ENEMY)                           -- shards Δ5  → resolves, casts "c shower"
-  AF.on_fight(70, ENEMY)                           -- shower Δ25 → decide
+  to_shards()
+  AF.on_fight(85, ENEMY); AF.shards()      -- shards Δ5  → "c shower"
+  AF.on_fight(60, ENEMY); AF.shower()      -- shower Δ25 → decide → nuke
   local F = AF.state()
-  expect(F.shards_drop):eq(5)
   expect(F.shower_drop):eq(25)
   expect(F.winner_spell):eq("shower")
   expect(AF.sent[#AF.sent]):eq("c shower")
 end)
 
--- ---- robustness: out-of-mana and terminal lines --------------------------------------------------
-test("out-of-mana stops casting that spell (no spam)", function()
-  AF.reset()
-  AF.on_fight(100, ENEMY); AF.expire_cast(); AF.expire_cast()   -- openers done, "c shards" busy
-  AF.on_fight(70, ENEMY)                           -- shards resolves → "c shower"
-  AF.on_fight(60, ENEMY)                           -- shower resolves → winner shards → nuke "c shards"
+-- ---- (f) robustness ------------------------------------------------------------------------------
+test("out-of-mana stops that spell (no spam) and waits", function()
+  to_shards()
+  AF.on_fight(70, ENEMY); AF.shards()      -- → "c shower"
+  AF.on_fight(60, ENEMY); AF.shower()      -- → winner shards → nuke "c shards"
   local n = #AF.sent
-  AF.on_line(L_MANA)                               -- "You don't have enough mana." resolves the nuke…
-  expect(AF.state().no_mana["shards"]):eq(true)    -- …and marks shards unaffordable
-  expect(#AF.sent):eq(n)                           -- no further shards sent (we WAIT, don't spam)
-  AF.on_fight(55, ENEMY)                           -- even a later event won't re-cast the broke spell
+  AF.mana()                                -- "You don't have enough mana."
+  expect(AF.state().no_mana["shards"]):eq(true)
+  expect(#AF.sent):eq(n)                   -- nothing more sent
+  AF.on_fight(55, ENEMY)                   -- a later % tick doesn't re-cast the broke spell
   expect(#AF.sent):eq(n)
 end)
 
 test("soulsteal success line ends the routine cleanly", function()
-  AF.reset()
-  AF.on_fight(100, ENEMY); AF.expire_cast(); AF.expire_cast()
-  AF.on_fight(70, ENEMY); AF.on_fight(60, ENEMY)   -- probes → winner shards
-  AF.on_fight(8, ENEMY)                            -- nearly dead → "c soulsteal"
+  to_shards()
+  AF.on_fight(70, ENEMY); AF.shards()
+  AF.on_fight(60, ENEMY); AF.shower()      -- winner shards → nuke
+  AF.on_fight(8, ENEMY);  AF.shards()      -- landed, ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   local n = #AF.sent
-  AF.on_line(L_SOULSTEAL_OK)                        -- soul pulled
+  AF.soulsteal_ok()
   expect(AF.state().phase):eq("done")
-  expect(#AF.sent):eq(n)                           -- nothing more sent
+  expect(#AF.sent):eq(n)                   -- nothing more
 end)
 
 test("DEAD line ends the fight from any phase", function()
-  AF.reset()
-  AF.on_fight(100, ENEMY)                          -- mid-openers
+  AF.reset(); AF.on_fight(100, ENEMY)
   expect(AF.state().fighting):eq(true)
-  AF.on_line(L_DEAD)
+  AF.dead()
   expect(AF.state().fighting):eq(false)
   expect(AF.state().phase):eq("idle")
-end)
-
-test("shower LANDED line matches the color-varying verbatim format", function()
-  -- Ensure the "A shower of <color> sparks suddenly engulfs <target>!" classifier fires on real colors.
-  AF.reset()
-  AF.on_fight(100, ENEMY); AF.expire_cast(); AF.expire_cast()   -- "c shards" busy
-  AF.on_fight(70, ENEMY)                           -- → "c shower" busy
-  local n = #AF.sent
-  AF.on_line("A shower of fiery blue sparks suddenly engulfs Bozonose!")   -- verbatim (copy.log:1761)
-  expect(#AF.sent):eq(n + 1)                       -- resolved the shower probe → decide → nuke
 end)
