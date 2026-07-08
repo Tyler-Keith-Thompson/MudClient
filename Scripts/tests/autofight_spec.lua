@@ -391,32 +391,55 @@ test("aoe 'on' frostflowers immediately — skips the single-target opener and p
   expect(AF.aoe_active()):eq(true)
 end)
 
-test("aoe 'auto': single-target until a kill rolls onto another enemy, THEN frostflower", function()
-  AF.reset()                                   -- aoe_mode auto, pack false
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → c shards (probe)
-  expect(AF.sent[1]):eq("c tarrants")
-  expect(AF.sent[2]):eq("c shards")
-  AF.on_fight(72, "a crimson topaz")           -- rollover (no -1) ⇒ pack → restart in AOE
-  expect(AF.sent[1]):eq("c frostflower")       -- start_fight cleared sent; AOE skips opener/probe
-  expect(#AF.sent):eq(1)
-  expect(AF.aoe_active()):eq(true)
-end)
-
-test("aoe 'off' never AOEs, even after a pack rollover", function()
-  AF.reset(); AF.state().aoe_mode = "off"
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants, c shards
-  AF.on_fight(72, "a crimson topaz")           -- rollover → pack true, but AOE off
-  expect(AF.sent[1]):eq("c tarrants")          -- restarts single-target, not frostflower
+test("aoe 'auto': a rollover ALONE does not AOE — AOE is driven by the crowd COUNT", function()
+  AF.reset()                                   -- aoe_mode auto, no crowd counted
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → c shards
+  AF.on_fight(72, "a crimson topaz")           -- rollover, no count set → still single-target
+  expect(AF.sent[1]):eq("c tarrants")          -- fresh single-target opener on the new enemy
   expect(AF.aoe_active()):eq(false)
 end)
 
-test("pack belief resets when combat truly ends (kxwt -1)", function()
+test("aoe 'auto': crowd whittled to the last one drops back to single target (the exit fix)", function()
+  AF.reset()
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → c shards in flight
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- look: 2 hostiles → AOE
+  expect(AF.aoe_active()):eq(true)
+  expect(AF.state().enemy_est):eq(2)
+  AF.mdeath("A dire ape")                      -- one dies → estimate 1 → below pack size
+  expect(AF.state().enemy_est):eq(1)
+  expect(AF.aoe_active()):eq(false)            -- back to single target
+  expect(AF.state().phase ~= "aoe"):eq(true)   -- and the plan is a single-target spell again
+end)
+
+test("aoe 'off' never AOEs, even with a pack-sized crowd count", function()
+  AF.reset(); AF.state().aoe_mode = "off"
+  AF.on_fight(90, ENEMY); AF.tarrants()
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
+  expect(AF.state().enemy_est):eq(3)
+  expect(AF.aoe_active()):eq(false)            -- forced off regardless of the count
+end)
+
+test("crowd count + AOE reset when combat truly ends (kxwt -1)", function()
   AF.reset()
   AF.on_fight(90, ENEMY); AF.tarrants()
-  AF.on_fight(72, "a crimson topaz")           -- pack detected
-  expect(AF.state().pack):eq(true)
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
+  expect(AF.aoe_active()):eq(true)
   AF.on_fight_end()                            -- -1 → combat over
   expect(AF.state().pack):eq(false)
+  expect(AF.state().enemy_est):eq(0)
+end)
+
+test("a hostile mdeath below the count doesn't go negative; our minion's death doesn't count", function()
+  AF.reset()
+  AF.on_fight(90, ENEMY); AF.tarrants()
+  state.name, state.group = "Vaelith", { { name = "A skeletal spider" } }
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- est 2 → AOE
+  AF.mdeath("A skeletal spider")               -- our minion — NOT counted
+  expect(AF.state().enemy_est):eq(2)
+  expect(AF.aoe_active()):eq(true)
+  AF.mdeath("A dire ape"); AF.mdeath("A dire ape"); AF.mdeath("A dire ape")  -- floors at 0
+  expect(AF.state().enemy_est):eq(0)
+  state.name, state.group = nil, nil
 end)
 
 test("aoe 'auto': a look showing multiple enemies fighting flips to AOE WITHOUT a kill", function()

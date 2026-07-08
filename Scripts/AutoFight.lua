@@ -88,7 +88,8 @@ F.soul_latched      = F.soul_latched or false  -- dormant soulsteal latched; kee
 -- combat truly ends. See aoe_active().
 F.aoe_mode          = F.aoe_mode or "auto"
 F.pack              = F.pack or false
-F.room_seen         = F.room_seen or 0      -- rolling tally of hostile "is here, fighting" room lines
+F.room_seen         = F.room_seen or 0      -- tally of hostile "is here, fighting" lines in the current burst
+F.enemy_est         = F.enemy_est or 0      -- estimated engaged hostiles: set by a look, counted down by deaths
 
 -- Command capture, always on (cheap, cleared each fight) so the test harness can read the exact send
 -- sequence without stubbing the host `send`. `_AF_TEST.sent` aliases this table.
@@ -297,10 +298,15 @@ local function end_fight()
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
 end
 
--- We now believe there are multiple enemies. Remember it (F.pack) and, if we're already mid single-
--- target fight, SWITCH to the AOE rotation immediately rather than waiting for a kill — set phase=aoe
--- and cast now if we're free (otherwise the in-flight cast lands first, then next_phase keeps AOEing).
--- No-op once already in pack mode.
+-- ---- AOE crowd tracking --------------------------------------------------------------------------
+-- F.enemy_est = our running estimate of how many hostiles are engaged. It's SET from a room listing
+-- (a look/auto-look) and COUNTED DOWN as enemies die (kxwt_mdeath). AOE is on (in "auto") whenever the
+-- estimate is pack-sized; the moment a death drops it below the threshold we fall back to single target
+-- — no second look needed. The estimate only needs to tell "pack (>= aoe_min)" from "not"; undercounting
+-- the last one to 0 still yields single target, which is what we want.
+
+-- Enter AOE: remember it and, if we're mid single-target fight, switch to frostflower NOW (cast if free,
+-- else the in-flight cast lands first and next_phase keeps AOEing). No-op once already AOEing.
 local function enter_pack_mode()
   if F.pack then return end
   F.pack = true
@@ -310,21 +316,45 @@ local function enter_pack_mode()
   end
 end
 
--- Count the enemies a room listing shows as engaged. On a `look` (or a room-entry auto-look) each
--- creature present prints its OWN "<X> is here, fighting <Y>." line — so counting the lines whose
--- SUBJECT is a hostile (not one of your minions/self) counts same-named packs that a name-keyed tracker
--- can't. We tally within a short burst window (a look emits them all at once); >= cfg.aoe_min engaged
--- hostiles ⇒ we're in a pack, switch to AOE right away. Only while WE'RE fighting, so a peaceful look
--- can't arm it.
+-- Leave AOE: the crowd thinned below pack size, so resume single target on the CURRENT enemy (its known
+-- winner, else re-probe from shards). No-op if we weren't AOEing (or AOE is force-"on", which pins it).
+local function exit_pack_mode()
+  if not F.pack then return end
+  F.pack = false
+  if F.on and F.fighting and not aoe_active() and F.phase == "aoe" then
+    F.phase = F.known_winner and "nuke" or "shards"
+    if not F.busy then fire() end
+  end
+end
+
+-- Apply the current estimate: pack-sized ⇒ AOE, else single target.
+local function reeval_pack()
+  if (F.enemy_est or 0) >= cfg.aoe_min then enter_pack_mode() else exit_pack_mode() end
+end
+
+-- A room listing is our authoritative crowd snapshot. On a look/auto-look each engaged creature prints
+-- its OWN "<X> is here, fighting <Y>." line, so counting hostile SUBJECTS counts same-named packs a
+-- name-keyed tracker can't. The first hostile line after a quiet gap starts a fresh tally; each line in
+-- the burst adds to it; we keep the running total as the estimate and re-evaluate each line (so AOE arms
+-- mid-burst, and a look showing just one enemy drops us back out). Only while WE'RE fighting.
 local function note_room_fighter(subject)
   if not F.on or not F.fighting then return end
-  if is_ally and is_ally(subject) then return end        -- our pet/self fighting a mob — not an enemy
+  if is_ally and is_ally(subject) then return end        -- our minion/self fighting a mob — not an enemy
+  if not F.room_burst_timer then F.room_seen = 0 end      -- new burst → fresh count
   F.room_seen = F.room_seen + 1
-  if F.room_seen >= cfg.aoe_min then enter_pack_mode() end
+  F.enemy_est = F.room_seen
+  reeval_pack()
   if F.room_burst_timer and cancel then cancel(F.room_burst_timer) end
-  F.room_burst_timer = after and after(cfg.room_burst, function()
-    F.room_seen, F.room_burst_timer = 0, nil
-  end) or nil
+  F.room_burst_timer = after and after(cfg.room_burst, function() F.room_burst_timer = nil end) or nil
+end
+
+-- An enemy died (kxwt_mdeath). Count it off the estimate and re-evaluate — THIS is what drops us out of
+-- AOE onto single target when a pack is whittled to the last one. Our own minions also emit mdeath, so
+-- exclude allies.
+local function note_mdeath(name)
+  if is_ally and is_ally(name) then return end
+  if (F.enemy_est or 0) > 0 then F.enemy_est = F.enemy_est - 1 end
+  reeval_pack()
 end
 
 -- kxwt_fighting <pct> <gender> <name> — the enemy health bar. Combat start = not-fighting → fighting.
@@ -345,7 +375,10 @@ local function on_fight(pct, name)
   -- Detected authoritatively from the health bar: the NAME changed, or it jumped UP past a regen margin
   -- (a target we're already on only trends down).
   if name ~= prevname or (prev and pct >= prev + cfg.new_target_jump) then
-    F.pack = true   -- a kill rolled straight onto another enemy (no -1) ⇒ we're in a pack → AOE in "auto"
+    -- NOTE: a rollover no longer flips AOE on by itself — AOE is driven by the crowd COUNT (a look sets
+    -- the estimate, each kxwt_mdeath decrements it), so the routine drops back to single target when the
+    -- pack is down to the last one. start_fight reads the current pack state, so if we're still pack-
+    -- sized it stays AOE across the swap, otherwise it single-targets the new enemy.
     start_fight(pct, name); return
   end
   if prev and pct < prev then
@@ -360,7 +393,7 @@ end
 
 local function on_fight_end()
   local was_engaged_fight = F.fighting and F.on_dead
-  F.pack = false                                         -- combat truly over → next fight re-evaluates
+  F.pack, F.enemy_est = false, 0                         -- combat truly over → next fight re-evaluates
   if F.fighting then end_fight() end
   -- The fight we started via engage() is over (mob dead or fled): fire on_dead exactly once. Guarded on
   -- was-fighting so a stray -1 while we're still trying to land the opener (F.engaging) doesn't resolve.
@@ -475,9 +508,11 @@ if trigger then
   -- the hostile subjects (note_room_fighter filters out our minions/self) — a look mid-fight now flips us
   -- to AOE without waiting for a kill. ^-anchored; the subject is captured, the opponent wildcarded.
   trigger([[^(.+) is here, fighting .+$]], function(_, subject) note_room_fighter(subject) end)
+  -- Each enemy death counts down the crowd estimate — this is what drops us out of AOE onto the last one.
+  trigger([[^kxwt_mdeath (.+)$]], function(_, name) note_mdeath(name) end)
   -- Leaving the room ends this crowd belief (a stationary fight never re-sends rvnum; combat-end -1 also
   -- clears it). Fires BEFORE the new room's auto-look lines, so the fresh tally starts clean.
-  trigger([[^kxwt_rvnum ]], function() F.pack, F.room_seen = false, 0 end)
+  trigger([[^kxwt_rvnum ]], function() F.pack, F.room_seen, F.enemy_est = false, 0, 0 end)
 end
 
 -- Observe typed input non-destructively by CHAINING the existing on_user_input (AIPilot defines one; we
@@ -634,6 +669,7 @@ _AF_TEST = {
   on_input      = observe_input,
   shards        = hit_shards,      scorch       = hit_scorch,      tarrants  = hit_tarrants,
   frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
+  mdeath        = note_mdeath,
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
@@ -648,7 +684,8 @@ _AF_TEST = {
     F.on = true
     end_fight()
     F.self_sent = {}
-    F.aoe_mode, F.pack, F.room_seen = "auto", false, 0   -- hermetic: default AOE prefs, no pack carried over
+    F.aoe_mode, F.pack, F.room_seen, F.enemy_est = "auto", false, 0, 0   -- hermetic: default AOE prefs
+    F.room_burst_timer = nil
     clear_sent()
     _AUTOFIGHT.winners = {}   -- hermetic tests: no learned winners bleeding across cases
   end,

@@ -390,3 +390,17 @@ test("active_promises is a GLOBAL (the HUD widget looks it up by that name)", fu
   expect(type(active_promises)):eq("function")       -- bare global lookup — nil if the export regressed
   expect(type(__track_promise)):eq("function")
 end)
+
+test("a second recover() supersedes the first (old promise rejects, doesn't dangle)", function()
+  with_recover_state(function()
+    local a = recover(90); a.__start()          -- first recovery in progress
+    expect(state.recover):truthy()
+    local a_err
+    a.catch(function(e) a_err = e end)
+    local b = recover(95); b.__start()          -- second recover() takes over the singleton recovery
+    expect(a.state):eq("failed")                -- old one settled (not left pending)
+    expect(a_err):eq("superseded")
+    expect(b.state):eq("running")               -- the new one owns the recovery now
+    expect(_AA_TEST.recovery.pct):eq(0.95)
+  end)
+end)

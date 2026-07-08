@@ -1172,6 +1172,10 @@ function recover(target)
   if frac > 1 then frac = 1 end
   return __promise(function(resolve, reject, onCancel)
     if ready(frac) then echo("Already recovered — vitals at target."); resolve(); return end
+    -- A recovery is a singleton (one `recovery.settle` slot). If one is already pending — e.g. you typed
+    -- `recover`, then `recover | explore` — the newer call takes over: reject the old promise as
+    -- superseded so it settles (and leaves the promise widget) instead of dangling forever, orphaned.
+    if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
     recovery.settle = { resolve = resolve, reject = reject }
     begin_recovery(frac)
     onCancel(function()
@@ -1201,7 +1205,7 @@ alias([[^recover$]], function()
   elseif ready() then
     echo("Already recovered — all vitals at 90%+.")
   else
-    begin_recovery(READY_PCT)
+    recover()   -- go through the promise (not begin_recovery) so the recovery shows in the promise widget
   end
 end)
 -- `recover off` — the only way to end an in-progress recovery (bare `recover` no longer toggles).
