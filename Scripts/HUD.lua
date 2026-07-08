@@ -246,6 +246,22 @@ end
 
 -- ============================ TOP PANEL (reference) ============================
 
+-- Middle-truncate to `max` VISIBLE columns with an ellipsis, keeping both ends. UTF-8 safe: the "·"
+-- track separator is multibyte, so we slice on CHARACTER offsets (utf8.offset), never bytes — a byte
+-- slice could split a "·" and print garbage. Used to keep the ♪ now-playing line bounded when several
+-- soundtracks are layered.
+local function truncate_middle(s, max)
+  local n = utf8.len(s)
+  if not n or n <= max or max < 2 then return s end
+  local keep = max - 1                          -- one column for the ellipsis
+  local left = math.floor(keep / 2)
+  local right = keep - left
+  local lend = utf8.offset(s, left + 1) - 1     -- last byte of the first `left` characters
+  local rstart = utf8.offset(s, n - right + 1)  -- first byte of the last `right` characters
+  return s:sub(1, lend) .. "…" .. s:sub(rstart)
+end
+local MUSIC_NAMES_MAX = 36                       -- max width of the joined track list on the ♪ line
+
 -- span-list builders for the reference block (packed onto flex lines)
 local function place_spans()
   local b = {}
@@ -283,7 +299,8 @@ local function env_spans()
   end
   if #playing > 0 then
     table.sort(playing)
-    b[#b + 1] = { text = "  ♪ " .. table.concat(playing, " · "), fg = "brightmagenta" }
+    b[#b + 1] = { text = "  ♪ " .. truncate_middle(table.concat(playing, " · "), MUSIC_NAMES_MAX),
+                  fg = "brightmagenta" }
   end
   return b
 end
@@ -486,4 +503,5 @@ end
 _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next_level,
               exp_spans = exp_spans, compass = compass, group_member_row = group_member_row,
               append_col = append_col, opponent_bars = opponent_bars,
-              target_cell = target_cell, cond_word = cond_word, in_fight = in_fight }
+              target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
+              truncate_middle = truncate_middle }

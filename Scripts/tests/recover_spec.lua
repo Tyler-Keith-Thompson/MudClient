@@ -71,3 +71,44 @@ test("already sleeping never re-sends (deeper than any target)", function()
   with_posture(40, 40, 40, "sleeping", function(sent) choose(); expect(#sent):eq(0) end)  -- want sleep
   with_posture(90, 50, 90, "sleeping", function(sent) choose(); expect(#sent):eq(0) end)  -- want rest, don't downgrade
 end)
+
+-- ---- rvnum: a `look` (same room) must NOT abort recovery; a real move must ----------------------
+
+local note_room = _AA_TEST.note_room
+
+-- Recovering in a known room; capture whether the recovery's promise settle gets rejected.
+local function with_recovering_room(fn)
+  local saved = state
+  state = { hp = 50, maxhp = 100, mana = 50, maxmana = 100, stam = 50, maxstam = 100,
+            recover = true, room_id = 100, room_coord = { 5, 6, 7, 0 } }
+  local rejected
+  _AA_TEST.recovery.settle = { resolve = function() end, reject = function(r) rejected = r end }
+  local ok, err = pcall(function() fn(function() return rejected end) end)
+  state = saved
+  _AA_TEST.recovery.settle, _AA_TEST.recovery.pct = nil, _AA_TEST.READY_PCT
+  if not ok then error(err, 2) end
+end
+
+test("rvnum with the SAME room (a look) does not end recovery", function()
+  with_recovering_room(function(rej)
+    note_room(100, 5, 6, 7, 0)                 -- identical id + coords → it's a look, not a move
+    expect(state.recover):truthy()             -- still recovering
+    expect(rej()):eq(nil)                      -- promise not rejected
+  end)
+end)
+
+test("rvnum with a DIFFERENT room (a real move) ends recovery", function()
+  with_recovering_room(function(rej)
+    note_room(101, 5, 6, 7, 0)                 -- different room id → a move
+    expect(state.recover):falsy()
+    expect(rej()):eq("moved")
+  end)
+end)
+
+test("rvnum with the same id but different COORDS also counts as a move", function()
+  with_recovering_room(function(rej)
+    note_room(100, 5, 6, 8, 0)                 -- z changed
+    expect(state.recover):falsy()
+    expect(rej()):eq("moved")
+  end)
+end)

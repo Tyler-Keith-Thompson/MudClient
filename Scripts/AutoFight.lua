@@ -510,9 +510,9 @@ if trigger then
   trigger([[^(.+) is here, fighting .+$]], function(_, subject) note_room_fighter(subject) end)
   -- Each enemy death counts down the crowd estimate — this is what drops us out of AOE onto the last one.
   trigger([[^kxwt_mdeath (.+)$]], function(_, name) note_mdeath(name) end)
-  -- Leaving the room ends this crowd belief (a stationary fight never re-sends rvnum; combat-end -1 also
-  -- clears it). Fires BEFORE the new room's auto-look lines, so the fresh tally starts clean.
-  trigger([[^kxwt_rvnum ]], function() F.pack, F.room_seen, F.enemy_est = false, 0, 0 end)
+  -- (No rvnum reset: the server re-sends rvnum on a plain `look`, so resetting here would flicker us out
+  -- of AOE on every look. Leaving a room ends combat (kxwt_fighting -1), and on_fight_end already zeroes
+  -- the crowd estimate — so the authoritative combat-end signal covers the "walked away" case.)
 end
 
 -- Observe typed input non-destructively by CHAINING the existing on_user_input (AIPilot defines one; we

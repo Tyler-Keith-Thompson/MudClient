@@ -156,3 +156,26 @@ test("on_update paints the vitals from state (end-to-end smoke)", function()
   state = saved                       -- always restore the live state
   expect(ok):truthy()
 end)
+
+-- ---- middle truncation (the ♪ now-playing line) --------------------------------------------------
+
+local tm = _HUD_TEST.truncate_middle
+
+test("truncate_middle leaves short strings alone", function()
+  expect(tm("combat_01", 36)):eq("combat_01")
+end)
+
+test("truncate_middle keeps both ends with an ellipsis, to the exact visible width", function()
+  local s = "combat_01 · jungle_night · dungeon_ambient · cavern_drip"
+  local out = tm(s, 20)
+  expect(utf8.len(out)):eq(20)                 -- exactly the budget, in visible columns
+  expect(out:sub(1, 4)):eq("comb")             -- kept the start
+  expect(out:find("…") ~= nil):eq(true)        -- middle replaced
+  expect(out:sub(-4)):eq("drip")               -- kept the end
+end)
+
+test("truncate_middle is UTF-8 safe across the multibyte '·' separator", function()
+  -- 12 chars: "aa · bb · cc" — force a cut that lands near the separators
+  local out = tm("aa · bb · cc", 7)
+  expect(utf8.len(out)):eq(7)                  -- valid UTF-8, correct visible length (no split bytes)
+end)

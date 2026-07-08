@@ -228,12 +228,23 @@ trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, p, name)
   end_recovery(false, "combat started")           -- a fight cancels (and rejects) any recovery
 end)
 
--- Room. rvnum carries id + (x y z plane); rshort the name; area the zone. Moving cancels recovery.
+-- Update the current room from an rvnum. Ends recovery ONLY on a REAL move: the server re-sends rvnum on
+-- a plain `look` (same id + coords), and a look mid-rest must not abort the recovery. Pure + exposed via
+-- _AA_TEST so the move-vs-look decision is unit-tested (the trigger regex itself runs in Swift).
+local function note_room(nid, nx, ny, nz, np)
+  local oc = state.room_coord
+  local moved = (state.room_id ~= nid)
+      or not oc or oc[1] ~= nx or oc[2] ~= ny or oc[3] ~= nz or oc[4] ~= np
+  state.room_id = nid
+  state.room_coord = { nx, ny, nz, np }
+  if moved then end_recovery(false, "moved") end   -- a real move cancels (and rejects) any recovery
+end
+
+-- Room. rvnum carries id + (x y z plane); rshort the name; area the zone.
 trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
-  state.room_id = tonumber(vnum)
-  state.room_coord = { tonumber(x), tonumber(y), tonumber(z), tonumber(plane) }
-  end_recovery(false, "moved")                     -- moving cancels (and rejects) any recovery
+  note_room(tonumber(vnum), tonumber(x), tonumber(y), tonumber(z), tonumber(plane))
 end)
+if _AA_TEST then _AA_TEST.note_room = note_room end
 trigger([[^kxwt_rshort (.+)$]], function(_, n) state.room_name = n end)
 
 -- Exits are NOT a kxwt field — they print as a plain "[Exits: east west ]" line at the end of the
@@ -1024,6 +1035,7 @@ function in_combat() return engaged() end
 -- teeth are full / you lack the skill (that reply both advances us and guarantees the loot response
 -- has already arrived, so the empty/dirty decision is never made early).
 local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil, killed = false }
+if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the loot/sacrifice decision is unit-tested
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
 
 -- `killed` = a mob actually DIED this fight (kxwt_mdeath), so combat ending means we have corpses to
@@ -1103,6 +1115,13 @@ trigger([[^You don't see that here]], function() if corpse.active then corpse_do
 -- has items, even when we then take them all, and mis-flagging it made fully-looted corpses get skipped
 -- (and probe a phantom next index) instead of sacrificed.
 trigger([[^You can't carry that many items]], function() if corpse.active then corpse.dirty = true end end)
+-- A BINDING object (glow/quest gear) can't be taken by a generic `get all` — it needs `get <name>` to
+-- bind it, so it's LEFT in the corpse. That produced no "can't carry" line, so the old code sacrificed
+-- the corpse and destroyed the item. Treat "must get it by name" / "is a binding object" as dirty too:
+-- never sacrifice a corpse still holding loot we couldn't auto-take. (Over-marking dirty is safe — it
+-- only leaves a corpse un-sacrificed; the harmful direction is destroying loot, which this prevents.)
+trigger([[^.+ is a binding object\b]], function() if corpse.active then corpse.dirty = true end end)
+trigger([[You must get it by name]], function() if corpse.active then corpse.dirty = true end end)
 
 -- Harvest terminal lines (^-anchored so another player can't fire them). Success-complete OR the
 -- instant "full"/"no skill" rejection — either way the harvest step is finished, so advance.
