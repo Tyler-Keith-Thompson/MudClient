@@ -87,7 +87,7 @@ end
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/AutoFight.lua",
                      "Scripts/ChatDecode.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
-                     "Scripts/Sequence.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
+                     "Scripts/Promise.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end

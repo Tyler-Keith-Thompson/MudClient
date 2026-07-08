@@ -1,12 +1,12 @@
--- Specs for the promise/sequencing layer (Scripts/Sequence.lua) and its two builders: recover([pct])
+-- Specs for the promise layer (Scripts/Promise.lua) and its two builders: recover([pct])
 -- (AlterAeon.lua) and attack(target) (AutoFight.lua).
 --
 -- The CLI harness's `after` stub records callbacks but NEVER fires them (there's no event loop), so
 -- auto-start never happens on its own — every promise here is started explicitly with __start(). That's
 -- exactly what we want: fully deterministic control over when each link runs.
 
-local new_promise = _SEQ_TEST.new_promise
-local coerce      = _SEQ_TEST.coerce
+local new_promise = _PROMISE_TEST.new_promise
+local coerce      = _PROMISE_TEST.coerce
 
 -- A promise whose settle we hold, so the test decides when it resolves/rejects.
 local function deferred(log, tag)

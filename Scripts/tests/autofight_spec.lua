@@ -1,7 +1,7 @@
 -- Specs for AutoFight.lua — the deterministic auto-fight state machine.
 --
 -- These drive the ACTUAL state machine by calling the SAME resolution handlers the live Swift triggers
--- dispatch to (AF.shards/AF.shower/AF.resist/… via _AF_TEST) plus the kxwt_fighting handler (AF.on_fight)
+-- dispatch to (AF.shards/AF.scorch/AF.resist/… via _AF_TEST) plus the kxwt_fighting handler (AF.on_fight)
 -- and the input observer (AF.on_input). The trigger REGEXES live in one place — the trigger() block in
 -- AutoFight.lua — and run in Swift; there is no second Lua line-matcher to drift, so the specs test the
 -- state-machine LOGIC, not the matching.
@@ -31,12 +31,12 @@ local function to_shards()
 end
 
 -- ---- (a) full fight command sequence -------------------------------------------------------------
-test("full fight: tarrants → shards/shower probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
+test("full fight: tarrants → shards/scorch probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
   to_shards()                        -- sent: c tarrants, c shards
   AF.on_fight(70, ENEMY)             -- shards Δ20 — a % change NEVER casts
-  AF.shards()                        -- shards LANDED → "c shower"
-  AF.on_fight(65, ENEMY)             -- shower Δ5
-  AF.shower()                        -- shower LANDED → decide (shards wins) → nuke "c shards"
+  AF.shards()                        -- shards LANDED → "c scorch"
+  AF.on_fight(65, ENEMY)             -- scorch Δ5
+  AF.scorch()                        -- scorch LANDED → decide (shards wins) → nuke "c shards"
   AF.on_fight(50, ENEMY); AF.shards()  -- landed → "c shards"
   AF.on_fight(35, ENEMY); AF.shards()  -- landed → "c shards"
   AF.on_fight(20, ENEMY); AF.shards()  -- landed → "c shards"
@@ -48,7 +48,7 @@ test("full fight: tarrants → shards/shower probe → nuke winner → soulsteal
 
   expect_seq(seq(), {
     "c tarrants",
-    "c shards", "c shower",                          -- probes
+    "c shards", "c scorch",                          -- probes
     "c shards", "c shards", "c shards", "c shards",  -- winner nuked (65→50→35→20→10)
     "c soulsteal",                                   -- finish attempt
     "c shards",                                      -- re-nuke after the resist
@@ -73,7 +73,7 @@ test("spam guard: a burst of health-% updates in flight sends ZERO commands", fu
   expect(AF.state().busy):eq(true)   -- still waiting on the shards landed line
   AF.shards()                        -- only the actual LANDED line releases the next cast
   expect(#AF.sent):eq(n + 1)
-  expect(AF.sent[n + 1]):eq("c shower")
+  expect(AF.sent[n + 1]):eq("c scorch")
 end)
 
 -- ---- (c) pacing + retry --------------------------------------------------------------------------
@@ -84,7 +84,7 @@ test("pacing: a non-resolution line sends nothing; the landed line advances", fu
   expect(#AF.sent):eq(n)
   AF.shards()                        -- shards landed → next cast
   expect(#AF.sent):eq(n + 1)
-  expect(AF.sent[n + 1]):eq("c shower")
+  expect(AF.sent[n + 1]):eq("c scorch")
 end)
 
 test("a FAILED cast retries the SAME spell (not the next)", function()
@@ -122,32 +122,32 @@ test("suspend: our OWN sends echoing back do NOT suspend", function()
 end)
 
 -- ---- (e) winner pick: bigger %-drop wins ---------------------------------------------------------
-test("winner pick: shards drops more than shower → nuke with shards", function()
+test("winner pick: shards drops more than scorch → nuke with shards", function()
   to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()      -- shards Δ20 → "c shower"
-  AF.on_fight(65, ENEMY); AF.shower()      -- shower Δ5  → decide → nuke
+  AF.on_fight(70, ENEMY); AF.shards()      -- shards Δ20 → "c scorch"
+  AF.on_fight(65, ENEMY); AF.scorch()      -- scorch Δ5  → decide → nuke
   local F = AF.state()
   expect(F.shards_drop):eq(20)
-  expect(F.shower_drop):eq(5)
+  expect(F.scorch_drop):eq(5)
   expect(F.winner_spell):eq("shards")
   expect(AF.sent[#AF.sent]):eq("c shards")
 end)
 
-test("winner pick: shower drops more than shards → nuke with shower", function()
+test("winner pick: scorch drops more than shards → nuke with scorch", function()
   to_shards()
-  AF.on_fight(85, ENEMY); AF.shards()      -- shards Δ5  → "c shower"
-  AF.on_fight(60, ENEMY); AF.shower()      -- shower Δ25 → decide → nuke
+  AF.on_fight(85, ENEMY); AF.shards()      -- shards Δ5  → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- scorch Δ25 → decide → nuke
   local F = AF.state()
-  expect(F.shower_drop):eq(25)
-  expect(F.winner_spell):eq("shower")
-  expect(AF.sent[#AF.sent]):eq("c shower")
+  expect(F.scorch_drop):eq(25)
+  expect(F.winner_spell):eq("scorch")
+  expect(AF.sent[#AF.sent]):eq("c scorch")
 end)
 
 -- ---- (f) robustness ------------------------------------------------------------------------------
 test("out-of-mana stops that spell (no spam) and waits", function()
   to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()      -- → "c shower"
-  AF.on_fight(60, ENEMY); AF.shower()      -- → winner shards → nuke "c shards"
+  AF.on_fight(70, ENEMY); AF.shards()      -- → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- → winner shards → nuke "c shards"
   local n = #AF.sent
   AF.mana()                                -- "You don't have enough mana."
   expect(AF.state().no_mana["shards"]):eq(true)
@@ -159,7 +159,7 @@ end)
 test("soulsteal success line ends the routine cleanly", function()
   to_shards()
   AF.on_fight(70, ENEMY); AF.shards()
-  AF.on_fight(60, ENEMY); AF.shower()      -- winner shards → nuke
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner shards → nuke
   AF.on_fight(8, ENEMY);  AF.shards()      -- landed, ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   local n = #AF.sent
@@ -233,8 +233,8 @@ end)
 
 test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it fires", function()
   to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()      -- → "c shower"
-  AF.on_fight(60, ENEMY); AF.shower()      -- winner shards → nuke "c shards"
+  AF.on_fight(70, ENEMY); AF.shards()      -- → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner shards → nuke "c shards"
   AF.on_fight(8, ENEMY);  AF.shards()      -- landed, ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   AF.soul_latched()                        -- LATCHED (not stolen) → resume nuking the winner
@@ -255,12 +255,42 @@ end)
 
 test("a fresh fight clears the soul_latched flag", function()
   to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()       -- → shower
-  AF.on_fight(60, ENEMY); AF.shower()       -- decide → winner shards → nuke
+  AF.on_fight(70, ENEMY); AF.shards()       -- → scorch
+  AF.on_fight(60, ENEMY); AF.scorch()       -- decide → winner shards → nuke
   AF.on_fight(8, ENEMY);  AF.shards()       -- ≤15% → soulsteal
   AF.soul_latched()
   expect(AF.state().soul_latched):eq(true)
   AF.dead()                                 -- fight ends
   AF.reset(); AF.on_fight(100, ENEMY)       -- new fight
   expect(AF.state().soul_latched):eq(false)
+end)
+
+-- ---- dormant shower (kept, not probed) -----------------------------------------------------------
+-- shower is no longer a probe (scorch replaced it) but is kept DORMANT — cfg.shower_cmd + hit_shower()
+-- + its landed trigger stay in the file so a future feature (mana-aware spell switching) doesn't have
+-- to re-source the strings. It must never actually cast, and its handler must no-op if it fires.
+
+test("shower's command string is retained in cfg", function()
+  expect(AF.cfg.shower_cmd):eq("c shower")
+end)
+
+test("shower is never cast during a fight (dormant, not in the routine)", function()
+  to_shards()
+  AF.on_fight(70, ENEMY); AF.shards()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- decide → nuke
+  AF.on_fight(8, ENEMY);  AF.shards()      -- ≤15% → soulsteal
+  AF.soulsteal_ok(); AF.dead()
+  for _, cmd in ipairs(seq()) do
+    expect(cmd == AF.cfg.shower_cmd):eq(false)   -- "c shower" never appears
+  end
+end)
+
+test("the dormant shower handler no-ops (a stray shower line can't advance the routine)", function()
+  to_shards()                              -- "c shards" in flight (busy on shards)
+  local n = #AF.sent
+  local phase = AF.state().phase
+  AF.shower()                              -- the dead trigger fires → succeed('shower') → guard no-ops
+  expect(#AF.sent):eq(n)                   -- nothing sent
+  expect(AF.state().phase):eq(phase)       -- phase unchanged (busy_spell was 'shards', not 'shower')
+  expect(AF.state().busy):eq(true)         -- still waiting on the real shards landed line
 end)

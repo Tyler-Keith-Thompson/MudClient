@@ -79,7 +79,7 @@ local function maybe_complete_recovery()
   return false
 end
 
--- Exposed for the test harness (Scripts/tests/recover_spec.lua, sequence_spec.lua).
+-- Exposed for the test harness (Scripts/tests/recover_spec.lua, promise_spec.lua).
 _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              choose_recovery_position = choose_recovery_position,
              recovery = recovery, end_recovery = end_recovery,
@@ -366,7 +366,10 @@ doc(volume, { name = "volume", sig = "volume(['<0-100>' | '<music|sfx|voice> <0-
   example = "volume('0')  -- silence all; volume('voice 0')  -- mute only TTS" })
 
 function volume_command(args)
-  args = (args or ""):match("^%s*(.-)%s*$")
+  -- Coerce to string first: the typed bridge (`#volume music 40`) always passes a string, but a direct
+  -- Lua call can pass a NUMBER — volume(0) — and 0 is truthy, so `(args or "")` kept the number and the
+  -- `:match` below indexed a number value. tostring() makes volume(0) and volume('0') behave alike.
+  args = tostring(args or ""):match("^%s*(.-)%s*$")
   if args == "" then volume_readout(); return end
   -- bare number => MASTER
   if args:match("^%d+$") then
@@ -1136,7 +1139,7 @@ local function begin_recovery(frac)
   choose_recovery_position()
 end
 
--- recover([pct]) — start a recovery and return a PROMISE (Scripts/Sequence.lua) that resolves when
+-- recover([pct]) — start a recovery and return a PROMISE (Scripts/Promise.lua) that resolves when
 -- every vital reaches the target (default 90%; pass 95 or 0.95 for a custom threshold) and rejects if
 -- recovery is interrupted (you move, a fight starts, or you cancel). Chain the next action with
 -- .andThen, e.g.  #recover(95).andThen(attack('orc')).  The typed `recover` alias (below) is the

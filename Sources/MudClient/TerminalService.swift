@@ -403,10 +403,17 @@ final class TerminalService {
         if lastSignature != signature(l) { setupScreen() }     // band geometry changed → resize region (snaps to live)
 
         if scrollOffset > 0 {
-            // The user is reading history: don't scroll the live band out from under them. Record the
-            // new output, keep the same lines in view by bumping the offset by however many physical
-            // rows it added, and repaint the history at the new offset. The live write is deferred —
-            // snapping back to the tail repaints the whole band from the buffer anyway.
+            // The user is reading history: FREEZE the output band so a text selection they're dragging
+            // in it isn't disrupted by repaints. Record the new output and bump the offset by however
+            // many physical rows it added (so the same lines stay tail-relative for the next wheel), but
+            // DELIBERATELY do NOT repaint the band — the on-screen rows are left exactly as they are.
+            //
+            // This is provably consistent: while parked (offset > 0) every visible row is a COMPLETED,
+            // immutable scrollback line; only the tail (the pending partial line + the freshly appended
+            // lines) changes, and that always sits BELOW the viewport. Bumping the offset keeps the
+            // bottom-of-view mapped to the very same immutable row, so the frozen pixels already match
+            // what a repaint at the new offset would draw. Furniture (panels/dividers) still refreshes —
+            // it's outside the band and never touches a selection inside it — so the HUD stays live.
             let before = physicalRows(width: l.width).count
             recordOutput(payload)
             let rows = physicalRows(width: l.width)
@@ -414,8 +421,7 @@ final class TerminalService {
             let maxOffset = max(0, rows.count - outputHeight)
             scrollOffset = min(scrollOffset + (rows.count - before), maxOffset)
             drawFurniture(l)                                 // panels may have changed; never touches the band
-            paintRegion(l, rows: rows)                       // overwrite the band with history at the offset
-            paintScrollIndicator(l)                          // dim marker so the parked view is obvious
+            paintScrollIndicator(l)                          // update the "scrolled back N lines" marker
             drawInputLine(l, cursorColumn: cursor.column)    // return the physical cursor to the input line
             writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
             return

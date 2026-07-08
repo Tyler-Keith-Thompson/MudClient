@@ -51,6 +51,23 @@ test("volume('0') sets master 0 and pushes 0 to all three services", function()
   expect(rec.voice):eq(0)
 end)
 
+test("volume(0) — a NUMBER, not a string — sets master without erroring (regression)", function()
+  reset()
+  local rec = capture()
+  T.volume_command(0)              -- direct Lua call passes a number; must coerce, not index a number
+  rec.restore()
+  expect(state.volumes.master):eq(0)
+  expect(rec.calls):eq(3)
+end)
+
+test("volume(50) as a number sets master too", function()
+  reset()
+  local rec = capture()
+  T.volume_command(50)
+  rec.restore()
+  expect(state.volumes.master):eq(50)
+end)
+
 test("volume('50') sets master and pushes scaled effective levels", function()
   reset()
   local rec = capture()

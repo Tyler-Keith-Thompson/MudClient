@@ -1,4 +1,4 @@
--- Tiny promise/sequencing layer so asynchronous game actions chain readably:
+-- Tiny promise layer so asynchronous game actions chain readably:
 --
 --     recover(95).andThen(attack('orc')).andThen(recover())
 --
@@ -20,7 +20,7 @@
 -- resolves. Call a builder alone — `#attack('orc')` — and nothing cancels its auto-start, so it just
 -- runs next tick. This is what lets the ergonomic inline form work without any explicit "start" call.
 --
--- Hot-reloadable, pure-Lua, no host support beyond after()/cancel(). Tested in Scripts/tests/sequence_spec.lua.
+-- Hot-reloadable, pure-Lua, no host support beyond after()/cancel(). Tested in Scripts/tests/promise_spec.lua.
 
 local function is_promise(x) return type(x) == "table" and x.__is_promise == true end
 
@@ -97,4 +97,4 @@ end
 -- => internal by convention (doc-exempt); the user-facing surface is recover()/attack()/.andThen.
 __promise = new_promise
 
-_SEQ_TEST = { new_promise = new_promise, is_promise = is_promise, coerce = coerce }
+_PROMISE_TEST = { new_promise = new_promise, is_promise = is_promise, coerce = coerce }

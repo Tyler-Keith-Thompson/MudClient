@@ -4,7 +4,7 @@
 -- combat wire protocol with a fixed opener→probe→nuke→finish routine, opt-in and OFF by default.
 --
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
---   1. PROBE:            on COMBAT START, cast c shards (once) then c shower (once); compare how much each
+--   1. PROBE:            on COMBAT START, cast c shards (once) then c scorch (once); compare how much each
 --                        dropped the enemy's health %; the bigger drop WINS. (Coarse % heuristic — fine.)
 --   2. NUKE:             keep casting the WINNER until the enemy is dead.
 --   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
@@ -45,8 +45,12 @@ local cfg = {
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
   opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the one opener (see NOTE at top)
   shards_cmd       = "c shards",
-  shower_cmd       = "c shower",
+  scorch_cmd       = "c scorch",
   soulsteal_cmd    = "c soulsteal",
+  -- DORMANT: shower was the 2nd probe before scorch. Kept (with its landed trigger + hit_shower() below)
+  -- so its wire strings survive for a future feature — mana-aware spell switching as we run low. The
+  -- routine never casts it, so this string is unused today; nothing sends it.
+  shower_cmd       = "c shower",     -- shower of sparks
 }
 
 -- Survive pilot.reload(): keep the on/off toggle and any in-flight fight state in a global.
@@ -60,7 +64,7 @@ F.suspended         = F.suspended or false
 F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (echo/suspend disambiguation)
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
 F.shards_drop       = F.shards_drop or 0
-F.shower_drop       = F.shower_drop or 0
+F.scorch_drop       = F.scorch_drop or 0
 -- engage() state: initiating a fight from out of combat by casting the opener (`target x` alone doesn't
 -- aggro). `engaging` is true from the first opener cast until combat actually starts; `opener_primed`
 -- tells start_fight the tarrants opener was already thrown so it skips straight to the probe.
@@ -125,9 +129,9 @@ end
 -- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed".)
 local function next_phase()
   local p = F.phase
-  if     p == "tarrants"  then F.phase = "shards"    -- opener landed → start the shards/shower probe
-  elseif p == "shards"    then F.phase = "shower"
-  elseif p == "shower"    then F.phase = "decide"
+  if     p == "tarrants"  then F.phase = "shards"    -- opener landed → start the shards/scorch probe
+  elseif p == "shards"    then F.phase = "scorch"
+  elseif p == "scorch"    then F.phase = "decide"
   elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
   end
 end
@@ -140,8 +144,8 @@ fire = function()
   if not F.on or not F.fighting or F.suspended or F.busy then return end
   if F.phase == "decide" then
     -- Coarse winner pick: whichever probe dropped the enemy health % more. Ties → shards.
-    if F.shards_drop >= F.shower_drop then F.winner, F.winner_spell = cfg.shards_cmd, "shards"
-    else F.winner, F.winner_spell = cfg.shower_cmd, "shower" end
+    if F.shards_drop >= F.scorch_drop then F.winner, F.winner_spell = cfg.shards_cmd, "shards"
+    else F.winner, F.winner_spell = cfg.scorch_cmd, "scorch" end
     F.phase = "nuke"
   end
   -- Switch to soulsteal when nearly dead — UNLESS a dormant soulsteal is already latched (then we just
@@ -152,7 +156,7 @@ fire = function()
   local p = F.phase
   if     p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
   elseif p == "shards"                 then F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")
-  elseif p == "shower"                 then F.last_damage_spell = "shower"; cast(cfg.shower_cmd, "shower")
+  elseif p == "scorch"                 then F.last_damage_spell = "scorch"; cast(cfg.scorch_cmd, "scorch")
   elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
   elseif p == "soulsteal"              then cast(cfg.soulsteal_cmd, "soulsteal")
   end   -- "done"/"idle": nothing to send
@@ -181,12 +185,12 @@ end
 -- ---- fight lifecycle -----------------------------------------------------------------------------
 local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
-  -- If engage() already threw the opener, skip the tarrants phase and go straight to the shards/shower
+  -- If engage() already threw the opener, skip the tarrants phase and go straight to the shards/scorch
   -- probe; otherwise this is a normal fight and we open with tarrants as always.
   F.phase = F.opener_primed and "shards" or "tarrants"
   F.engaging, F.engage_busy, F.opener_primed = false, false, false
   F.busy, F.busy_spell = false, nil
-  F.shards_drop, F.shower_drop = 0, 0
+  F.shards_drop, F.scorch_drop = 0, 0
   F.winner, F.winner_spell, F.last_damage_spell = nil, nil, nil
   F.soul_latched = false
   F.no_mana = {}
@@ -218,7 +222,7 @@ local function on_fight(pct, name)
   if prev and pct < prev then
     local d = prev - pct
     if     F.last_damage_spell == "shards" then F.shards_drop = F.shards_drop + d
-    elseif F.last_damage_spell == "shower" then F.shower_drop = F.shower_drop + d end
+    elseif F.last_damage_spell == "scorch" then F.scorch_drop = F.scorch_drop + d end
   end
   -- A health-% change updates the winner comparison ONLY. It NEVER triggers a cast — casting is driven
   -- solely by a spell's landed line (or a failure). This is the fix for the command-spam bug: the health
@@ -240,7 +244,10 @@ end
 -- Each hit_* is what a trigger fires; on_line() (the test seam) classifies a verbatim line and calls the
 -- same hit_*, so triggers and tests share one implementation.
 local function hit_shards()     succeed("shards")    end   -- "You create and magically throw white shards…"
-local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs…"
+local function hit_scorch()     succeed("scorch")    end   -- "You throw an intense burst of <color> flames at <target>!"
+-- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so busy_spell is never "shower" and this
+-- succeed() always hits its guard and no-ops. Wired only to keep the "A shower of … sparks" string live.
+local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs <target>."
 local function hit_tarrants()
   -- Engage opener landed: combat is about to start (kxwt_fighting → start_fight); just clear the
   -- init-busy flag and let start_fight take over. Otherwise it's the normal in-combat opener.
@@ -321,6 +328,10 @@ if trigger then
   trigger([[^You cast the spell to separate soul from body]], function() hit_soulsteal_ok() end)
   trigger([[^You magically latch onto .+ soul and wait for .+ to weaken]], function() hit_soul_latched() end)
   trigger([[^You create and magically throw white shards of crystal at]], function() hit_shards() end)
+  -- scorch (replaced shower as the 2nd probe). Line from live play: "You throw an intense burst of
+  -- yellow flames at <target>!" — the flame COLOUR varies, so wildcard it; ^ anchors out say-spoofs.
+  trigger([[^You throw an intense burst of .* flames at ]], function() hit_scorch() end)
+  -- DORMANT shower trigger (see cfg.shower_cmd / hit_shower): fires but no-ops, kept only so the string stays live.
   trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
   trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
   trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
@@ -350,7 +361,7 @@ autofight = {}
 
 function autofight.on()
   F.on = true
-  say("armed — tarrants → shards/shower probe → nuke winner → soulsteal")
+  say("armed — tarrants → shards/scorch probe → nuke winner → soulsteal")
   if F.fighting and not F.busy then fire() end
 end
 
@@ -365,7 +376,7 @@ function autofight.status() if echo then echo(status_line()) end end
 -- engage(target[, on_dead][, on_fail]) — START a fight from out of combat. Sets the target and casts
 -- the opener (tarrants) to actually aggro it, retrying the opener until it lands (up to cfg.max_tries);
 -- once combat starts the normal routine takes over, skipping a second opener. on_dead() fires when the
--- fight ends; on_fail(reason) fires if the opener can't be landed. The sequence layer's attack() wraps
+-- fight ends; on_fail(reason) fires if the opener can't be landed. The promise layer's attack() wraps
 -- this into a promise; call it directly if you just want the callbacks.
 function autofight.engage(target, on_dead, on_fail)
   F.on = true
@@ -383,7 +394,7 @@ doc(autofight.engage, { name = "autofight.engage", sig = "autofight.engage(targe
       .. "routine. on_dead() fires when the fight ends; on_fail(reason) if the opener can't be landed. "
       .. "attack() wraps this into a chainable promise." })
 
--- attack(target) — the sequence-layer builder: engage `target` and return a PROMISE (Scripts/Sequence.lua)
+-- attack(target) — the promise-layer builder: engage `target` and return a PROMISE (Scripts/Promise.lua)
 -- that resolves when it dies and rejects if the fight can't be started. Chain it: recover(95).andThen(attack('orc')).
 function attack(target)
   return __promise(function(resolve, reject)
@@ -397,7 +408,7 @@ doc("attack", { sig = "attack(target) -> promise", group = "combat",
 
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
   text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes "
-      .. "shards vs shower and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
+      .. "shards vs scorch and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
       .. "dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by default; any command "
       .. "YOU type suspends it briefly so you can intervene." })
 doc(autofight.off, { name = "autofight.off", sig = "autofight.off()", group = "combat",
@@ -416,7 +427,7 @@ end })
 
 -- ---- test seam -----------------------------------------------------------------------------------
 -- The spec drives the state machine by calling the SAME handlers the live triggers call — there is no
--- second line-matching path to drift. on_fight is the kxwt_fighting handler; shards/shower/… are the
+-- second line-matching path to drift. on_fight is the kxwt_fighting handler; shards/scorch/… are the
 -- resolution handlers each trigger dispatches to.
 _AF_TEST = {
   cfg           = cfg,
@@ -425,7 +436,8 @@ _AF_TEST = {
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
-  shards        = hit_shards,      shower       = hit_shower,      tarrants  = hit_tarrants,
+  shards        = hit_shards,      scorch       = hit_scorch,      tarrants  = hit_tarrants,
+  shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
   expire_resume = function()

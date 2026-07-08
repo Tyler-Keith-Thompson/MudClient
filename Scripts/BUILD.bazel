@@ -14,7 +14,7 @@ filegroup(
         "Trivia.lua",
         "Equipment.lua",
         "Speech.lua",
-        "Sequence.lua",
+        "Promise.lua",
         "testing.lua",
     ] + glob(["tests/*.lua"]),
     visibility = ["//visibility:public"],
