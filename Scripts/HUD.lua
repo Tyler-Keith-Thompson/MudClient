@@ -411,6 +411,32 @@ local function append_col(row, cell)
   return { cols = { row, cell } }
 end
 
+-- Promise widget — sits UNDER the minimap (right column). One row per in-flight promise from
+-- active_promises(): the typed pipe line ("recover | explore") or the action's label, truncated to the
+-- column, dimmed while still cold, capped with a "+N more" tail. Empty when nothing's pending, so the
+-- widget simply isn't there. `width` matches the minimap so the columns line up.
+local PROMISE_CAP = 6
+local function promise_rows(width)
+  if not active_promises then return {} end          -- Promise.lua not loaded
+  local list = active_promises()
+  if #list == 0 then return {} end
+  local rows = { { spans = { { text = "  promises", fg = "cyan", dim = true } }, width = width } }
+  local textw = math.max(6, width - 4)               -- 2-space gutter + a little breathing room
+  local shown = math.min(#list, PROMISE_CAP)
+  for i = 1, shown do
+    local p = list[i]
+    local desc = p.desc or "?"
+    if #desc > textw then desc = desc:sub(1, textw - 1) .. "…" end
+    rows[#rows + 1] = { spans = { { text = "  " },
+                                  { text = desc, fg = "magenta", dim = (p.state == "cold") } }, width = width }
+  end
+  if #list > shown then
+    rows[#rows + 1] = { spans = { { text = string.format("  +%d more", #list - shown), dim = true } },
+                        width = width }
+  end
+  return rows
+end
+
 local function update_top()
   local left = {}
   local g = state.group or {}
@@ -428,13 +454,20 @@ local function update_top()
   -- Compose the minimap as a right-hand column, aligned row-for-row with the left content. EVERY left
   -- row gets a minimap cell of the SAME fixed width — a blank one where the map has no content — so the
   -- left columns (the group bars) keep identical widths whether or not the map reaches that row.
+  -- Right column = the minimap, then the promise widget beneath it. Width tracks the minimap (or a
+  -- default when there's no map) so both stay aligned with the left content.
   local mini = minimap_cells()
-  if not mini then panel.top(left); return end
-  local mw = (mini[1] and mini[1].width) or 0
+  local mw = (mini and mini[1] and mini[1].width) or 26
+  local right = {}
+  if mini then for _, m in ipairs(mini) do right[#right + 1] = m end end
+  local prows = promise_rows(mw)
+  if #prows > 0 and #right > 0 then right[#right + 1] = { text = "", width = mw } end   -- gap under the map
+  for _, r in ipairs(prows) do right[#right + 1] = r end
+  if #right == 0 then panel.top(left); return end
   local blank = { text = "", width = mw }
-  local rows, n = {}, math.max(#left, #mini)
+  local rows, n = {}, math.max(#left, #right)
   for i = 1, n do
-    local m = mini[i] or blank
+    local m = right[i] or blank
     if left[i] then rows[i] = append_col(left[i], m)
     else rows[i] = { cols = { { text = "" }, m } } end
   end

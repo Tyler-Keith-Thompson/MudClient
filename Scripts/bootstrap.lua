@@ -767,10 +767,20 @@ end
 -- `__`-prefixed => internal, doc-exempt.
 function __pipe(segments)
   if type(segments) ~= "table" or #segments == 0 then return end
-  local chain = pipe_run_segment(segments[1])
+  local head = pipe_run_segment(segments[1])
+  local chain = head
   for i = 2, #segments do
     local seg = segments[i]
     chain = chain.andThen(function() return pipe_run_segment(seg) end)
+  end
+  -- Promise widget: show the WHOLE pipe as ONE row (the typed line) for the chain's entire life. The
+  -- head auto-registered under its own label (e.g. "recover"); supersede it with the full line on the
+  -- final chain promise, which stays pending until the last step resolves.
+  if __untrack_promise then __untrack_promise(head) end
+  if __track_promise then
+    local parts = {}
+    for _, s in ipairs(segments) do parts[#parts + 1] = (s or ""):match("^%s*(.-)%s*$") end
+    __track_promise(chain, table.concat(parts, " | "))
   end
 end
 

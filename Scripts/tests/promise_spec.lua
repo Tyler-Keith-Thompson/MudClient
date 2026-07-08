@@ -353,3 +353,40 @@ test("a settled promise is not re-cancelled by cancel_all (left the registry)", 
   _PROMISE_TEST.cancel_all()
   expect(a.promise.state):eq("done")                 -- still done, not flipped to cancelled
 end)
+
+-- ---- promise widget registry (active_promises) ---------------------------------------------------
+
+local active = _PROMISE_TEST.active
+
+local function widget_has(desc)
+  for _, e in ipairs(active()) do if e.desc == desc then return e end end
+  return nil
+end
+
+test("a builder shows in the widget under its label while pending, and drops off when it settles", function()
+  local b = builder(function() end, "wtest-run")
+  b.__start()
+  expect(widget_has("wtest-run") ~= nil):eq(true)
+  expect(widget_has("wtest-run").state):eq("running")
+  b.__resolve()
+  expect(widget_has("wtest-run") == nil):eq(true)   -- settled → no longer pending → gone
+end)
+
+test("untrack removes a promise from the widget (used when a chain supersedes a head)", function()
+  local b = builder(function() end, "wtest-untrack"); b.__start()
+  expect(widget_has("wtest-untrack") ~= nil):eq(true)
+  _PROMISE_TEST.untrack(b)
+  expect(widget_has("wtest-untrack") == nil):eq(true)
+end)
+
+test("a cancelled promise drops off the widget", function()
+  local b = builder(function(_, _, onCancel) end, "wtest-cancel"); b.__start()
+  expect(widget_has("wtest-cancel") ~= nil):eq(true)
+  b.cancel()
+  expect(widget_has("wtest-cancel") == nil):eq(true)
+end)
+
+test("active_promises is a GLOBAL (the HUD widget looks it up by that name)", function()
+  expect(type(active_promises)):eq("function")       -- bare global lookup — nil if the export regressed
+  expect(type(__track_promise)):eq("function")
+end)

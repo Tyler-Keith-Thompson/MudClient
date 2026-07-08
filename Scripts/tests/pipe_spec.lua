@@ -90,3 +90,18 @@ test("| __pipe ignores an empty segment list", function()
   local ok = pcall(function() pipe({}) end)
   expect(ok):eq(true)
 end)
+
+-- ---- promise widget: a pipe is ONE row (the typed line), not per-segment ---------------------------
+
+test("__pipe registers the whole pipe as a single widget row and de-registers the head", function()
+  _G.wpipeA = function() return _PROMISE_TEST.builder(function() end, "A") end   -- head auto-tracks "A"
+  _G.wpipeB = function() return _PROMISE_TEST.make(function() end, "B") end
+  pipe({ "wpipeA", "wpipeB x" })
+  local function present(desc)
+    for _, e in ipairs(_PROMISE_TEST.active()) do if e.desc == desc then return true end end
+    return false
+  end
+  expect(present("wpipeA | wpipeB x")):eq(true)   -- the whole line, one row
+  expect(present("A")):eq(false)                  -- head superseded by the line (de-registered)
+  _G.wpipeA, _G.wpipeB = nil, nil
+end)

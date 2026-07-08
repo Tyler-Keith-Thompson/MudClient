@@ -86,6 +86,30 @@ local function cancel_all()
   return #snapshot
 end
 
+-- DISPLAY registry — the promises a HUD widget should show as one row each. Distinct from `live`: we
+-- want ONE row per user action, not every internal result/continuation. A builder auto-registers (so a
+-- bare recover()/attack() shows by its label); a promise is DE-registered the moment it's adopted as
+-- someone's continuation (it's now part of a chain, not its own row); and a pipe registers its final
+-- chain promise under the typed line (e.g. "recover | explore") after de-registering the head — so the
+-- whole chain shows as that one line for its entire life. Weak keys so nothing leaks.
+local tracked = setmetatable({}, { __mode = "k" })
+local seq = 0                                        -- creation order, for a stable widget row order
+local function track(p, desc)   if p then tracked[p] = true; if desc then p._track_desc = desc end end end
+local function untrack(p)       if p then tracked[p] = nil end end
+
+-- The in-flight tracked promises, oldest first, as { desc, state }. `desc` is the pipe line if set, else
+-- the promise's label. Only cold/running (i.e. genuinely pending) entries — settled/cancelled drop off.
+local function active_promises()
+  local out = {}
+  for p in pairs(tracked) do
+    if p.state == "cold" or p.state == "running" then
+      out[#out + 1] = { desc = p._track_desc or p.label or "?", state = p.state, seq = p._seq or 0 }
+    end
+  end
+  table.sort(out, function(a, b) return a.seq < b.seq end)
+  return out
+end
+
 -- Core constructor (no auto-start). `builder` (below) wraps this to add the next-tick auto-start that
 -- makes a bare `recover(95)` run on its own; result promises from andThen/finally/timeout use `make`
 -- directly and are driven by their parent, never a timer.
@@ -93,6 +117,7 @@ local function make(executor, label)
   local p = { __is_promise = true, state = "cold", label = label,
               _handlers = {}, _had_consumer = false }
   live[p] = true                                                    -- track until it settles/cancels
+  seq = seq + 1; p._seq = seq                                       -- creation order (widget row order)
 
   local run_handler   -- fwd
 
@@ -119,6 +144,7 @@ local function make(executor, label)
     if not result then return end
     if is_promise(ret) then
       cancel_timer(ret.__start_timer); ret.__start_timer = nil
+      untrack(ret)                                    -- it's a continuation now, not its own widget row
       ret._parent = result; result._adopted = ret
       ret._attach(function() result.__resolve() end, function(e) result.__reject(e) end)
       ret.__start()
@@ -221,10 +247,13 @@ local function make(executor, label)
   return p
 end
 
--- Builder: a promise that auto-starts on the next tick unless adopted as a continuation first.
+-- Builder: a promise that auto-starts on the next tick unless adopted as a continuation first. It's a
+-- top-level action (recover/attack/…), so it auto-registers for the promise widget under its label; a
+-- pipe/adoption de-registers it if it turns out to be part of a larger chain.
 local function builder(executor, label)
   local p = make(executor, label)
   p.__start_timer = after and after(0, function() p.__start_timer = nil; p.__start() end) or nil
+  track(p)
   return p
 end
 
@@ -248,5 +277,17 @@ doc("cancelPromises", { sig = "cancelPromises() -> count", group = "combat",
       .. "drop a queued send. Returns how many promises were cancelled.",
   example = "#cancelPromises()" })
 
+-- Promise-widget surface. `active_promises()` (global, like active_opponents) feeds the HUD row list.
+-- __track_promise/__untrack_promise let the pipe layer (bootstrap) name a whole chain as one row and
+-- drop the head it superseded. `__`-prefixed => internal/doc-exempt; active_promises is documented.
+_G.active_promises = active_promises   -- _G. is REQUIRED: `active_promises` is a local here, so a bare
+_G.__track_promise   = track           -- assignment would just rebind the local, never create the global
+_G.__untrack_promise = untrack         -- the HUD/pipe look up. (This was the "widget never shows" bug.)
+doc("active_promises", { sig = "active_promises() -> { {desc, state}, ... }", group = "combat",
+  text = "The in-flight promises for the HUD widget, oldest first: each is { desc, state } where desc "
+      .. "is the typed pipe line (e.g. \"recover | explore\") or the action's label, and state is "
+      .. "\"cold\"/\"running\". Settled/cancelled promises drop off." })
+
 _PROMISE_TEST = { make = make, builder = builder, normalize = normalize, is_promise = is_promise,
-                  live = live, cancel_all = cancel_all }
+                  live = live, cancel_all = cancel_all,
+                  active = active_promises, track = track, untrack = untrack }
