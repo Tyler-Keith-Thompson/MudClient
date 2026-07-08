@@ -41,9 +41,13 @@ local function pct(cur, max) if not cur or not max or max == 0 then return 0 end
 -- "Ready" = recovered enough to keep exploring: every vital at least 90%. Drives the `recover` alias's
 -- auto-stand and the AI's " (ready)" readiness label, so both share one definition.
 local READY_PCT = 0.90
-local function ready()
-  return pct(state.hp, state.maxhp) >= READY_PCT and pct(state.mana, state.maxmana) >= READY_PCT
-     and pct(state.stam, state.maxstam) >= READY_PCT
+-- ready([p]) — every vital at least p (fraction, default READY_PCT). recover([pct]) recovers to a
+-- caller-chosen threshold, so this takes an argument; the no-arg callers (AI readiness label, the typed
+-- `recover` alias) keep the 90% default.
+local function ready(p)
+  p = p or READY_PCT
+  return pct(state.hp, state.maxhp) >= p and pct(state.mana, state.maxmana) >= p
+     and pct(state.stam, state.maxstam) >= p
 end
 
 local function choose_recovery_position()
@@ -51,9 +55,35 @@ local function choose_recovery_position()
   if hp > 0.85 and mp < 1 and sp > 0.75 then send("rest") else send("sleep") end
 end
 
--- Exposed for the test harness (Scripts/tests/recover_spec.lua).
+-- Recovery-as-a-promise. `recovery.pct` is the current target threshold; `recovery.settle` holds the
+-- resolve/reject callbacks of the promise recover() returned, while one is waiting (nil otherwise).
+-- end_recovery() is the single settle point: it clears the flag, restores the default threshold, and
+-- resolves (completed) or rejects (interrupted: you moved, a fight started, you cancelled) the promise.
+local recovery = { pct = READY_PCT, settle = nil }
+local function end_recovery(completed, reason)
+  state.recover = false
+  local s = recovery.settle
+  recovery.settle, recovery.pct = nil, READY_PCT
+  if s then if completed then s.resolve() else s.reject(reason or "recovery interrupted") end end
+end
+
+-- Called from the kxwt_prompt trigger on every vitals update: stand + resolve once the target is met.
+-- Factored out (and exposed via _AA_TEST) so the spec can drive completion without the Swift trigger.
+local function maybe_complete_recovery()
+  if state.recover and (state.position == "sitting" or state.position == "sleeping") and ready(recovery.pct) then
+    echo("You have recovered and are ready to adventure!")
+    send("stand")
+    end_recovery(true)
+    return true
+  end
+  return false
+end
+
+-- Exposed for the test harness (Scripts/tests/recover_spec.lua, sequence_spec.lua).
 _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
-             choose_recovery_position = choose_recovery_position }
+             choose_recovery_position = choose_recovery_position,
+             recovery = recovery, end_recovery = end_recovery,
+             maybe_complete_recovery = maybe_complete_recovery }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -165,11 +195,7 @@ trigger([[^kxwt_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]], function(_, chp, m
   state.hp, state.maxhp = tonumber(chp), tonumber(mhp)
   state.mana, state.maxmana = tonumber(cm), tonumber(mm)
   state.stam, state.maxstam = tonumber(cs), tonumber(ms)
-  if state.recover and (state.position == "sitting" or state.position == "sleeping") and ready() then
-    echo("You have recovered and are ready to adventure!")
-    send("stand")
-    state.recover = false
-  end
+  maybe_complete_recovery()
 end)
 
 -- Position. Starting a recovery sits/sleeps as appropriate.
@@ -184,14 +210,14 @@ trigger([[^kxwt_fighting -1$]], function()
 end)
 trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, p, name)
   state.fighting, state.fight_pct, state.fight_name = true, tonumber(p), name
-  state.recover = false
+  end_recovery(false, "combat started")           -- a fight cancels (and rejects) any recovery
 end)
 
 -- Room. rvnum carries id + (x y z plane); rshort the name; area the zone. Moving cancels recovery.
 trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
   state.room_id = tonumber(vnum)
   state.room_coord = { tonumber(x), tonumber(y), tonumber(z), tonumber(plane) }
-  state.recover = false
+  end_recovery(false, "moved")                     -- moving cancels (and rejects) any recovery
 end)
 trigger([[^kxwt_rshort (.+)$]], function(_, n) state.room_name = n end)
 
@@ -590,7 +616,7 @@ trigger([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|dev
     if not enemy then return end                       -- bystander fight; not ours
     local now = os.time()
     state.engaged_until = now + ENGAGE_TTL
-    state.recover = false                              -- fights (kxwt-visible or not) cancel recovery
+    end_recovery(false, "combat started")             -- fights (kxwt-visible or not) cancel recovery
     opponent_note(state.opponents, enemy, nil, now, false)   -- name sighting; keeps any known pct
   end)
 trigger([[(near death|mortally wounded|awful|pretty hurt|nasty wounds|a few wounds|small wounds|few scratches|excellent)]],
@@ -1099,6 +1125,41 @@ RECOVER: 'rest' or 'sleep' to heal hp/mana/stamina; 'stand' or 'wake' when recov
 PROGRESS: at a trainer, 'level', 'train', and 'practice' improve you; 'slist' shows newly available spells/skills.]]
 end
 
+-- begin_recovery(frac) — start resting/sleeping toward the `frac` threshold. Shared by the typed
+-- `recover` alias (frac = 90%) and the recover([pct]) builder. The auto-stand lives in the kxwt_prompt
+-- trigger (maybe_complete_recovery), which watches ready(recovery.pct).
+local function begin_recovery(frac)
+  recovery.pct = frac
+  state.recover = true
+  echo(string.format("Recovering — resting/sleeping; I'll stand you up once every vital hits %d%%.",
+       math.floor(frac * 100 + 0.5)))
+  choose_recovery_position()
+end
+
+-- recover([pct]) — start a recovery and return a PROMISE (Scripts/Sequence.lua) that resolves when
+-- every vital reaches the target (default 90%; pass 95 or 0.95 for a custom threshold) and rejects if
+-- recovery is interrupted (you move, a fight starts, or you cancel). Chain the next action with
+-- .andThen, e.g.  #recover(95).andThen(attack('orc')).  The typed `recover` alias (below) is the
+-- fire-and-forget form; this returns a composable promise.
+function recover(target)
+  local frac = READY_PCT
+  if target ~= nil then
+    local n = tonumber(target)
+    if n and n > 0 then frac = (n > 1) and (n / 100) or n end   -- accept 95 or 0.95
+  end
+  if frac > 1 then frac = 1 end
+  return __promise(function(resolve, reject)
+    if ready(frac) then echo("Already recovered — vitals at target."); resolve(); return end
+    recovery.settle = { resolve = resolve, reject = reject }
+    begin_recovery(frac)
+  end, "recover")
+end
+doc("recover", { sig = "recover([pct]) -> promise", group = "combat",
+  text = "Start a recovery and return a promise that resolves once every vital reaches `pct` (95 or "
+      .. "0.95; default 90%) and rejects if interrupted (you move, a fight starts, you cancel). Chain "
+      .. "the next action with .andThen — e.g. recover(95).andThen(attack('orc')).",
+  example = "#recover(95).andThen(attack('orc'))" })
+
 -- Aliases: `state` dumps the snapshot; `recover` rests/sleeps until ready, then auto-stands.
 alias([[^state$]], function() echo(describe_state()) end)
 -- `recover` — sit/sleep to heal and STAND automatically once every vital is back to 90%+ (the auto-stand
@@ -1106,13 +1167,11 @@ alias([[^state$]], function() echo(describe_state()) end)
 -- already recovered it just says so. choose_recovery_position picks rest vs sleep for the situation.
 alias([[^recover$]], function()
   if state.recover then
-    echo("Ending recovery."); state.recover = false
+    echo("Ending recovery."); end_recovery(false, "cancelled")
   elseif ready() then
     echo("Already recovered — all vitals at 90%+.")
   else
-    echo("Recovering — resting/sleeping; I'll stand you up once every vital hits 90%.")
-    state.recover = true
-    choose_recovery_position()
+    begin_recovery(READY_PCT)
   end
 end)
 

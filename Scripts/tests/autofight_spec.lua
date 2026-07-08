@@ -175,3 +175,92 @@ test("DEAD line ends the fight from any phase", function()
   expect(AF.state().fighting):eq(false)
   expect(AF.state().phase):eq("idle")
 end)
+
+-- ---- engage(): starting a fight from OUT of combat (attack()'s core) -----------------------------
+-- `target x` alone doesn't aggro, so engage() casts the opener (tarrants) to start combat, retrying it
+-- until it lands; once combat starts the routine skips the opener and goes straight to the probe.
+
+test("engage: target + opener, retry opener on fail, then hand off to the probe on combat start", function()
+  AF.reset()
+  local dead, failed = false, nil
+  autofight.engage("orc", function() dead = true end, function(r) failed = r end)
+  expect_seq(seq(), { "target orc", "c tarrants" })   -- set target, throw the opener
+  expect(AF.state().engaging):eq(true)
+  AF.fail()                                            -- opener fizzled → retry the opener
+  expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
+  AF.tarrants()                                        -- opener LANDED → wait for combat to start (no send)
+  expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
+  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → "c shards"
+  expect(AF.state().engaging):eq(false)
+  expect(AF.state().phase):eq("shards")
+  expect(AF.sent[#AF.sent]):eq("c shards")
+  AF.on_fight_end()                                    -- fight over → on_dead fires once
+  expect(dead):eq(true)
+  expect(failed):eq(nil)
+end)
+
+test("engage: gives up (on_fail) after cfg.max_tries opener failures", function()
+  AF.reset()
+  local dead, failed = false, nil
+  autofight.engage("orc", function() dead = true end, function(r) failed = r end)
+  for _ = 1, AF.cfg.max_tries do AF.fail() end        -- opener never lands
+  expect(failed):eq("cast failed")
+  expect(dead):eq(false)
+  expect(AF.state().engaging):eq(false)
+end)
+
+test("engage: out of mana on the opener gives up immediately", function()
+  AF.reset()
+  local failed = nil
+  autofight.engage("orc", function() end, function(r) failed = r end)
+  AF.mana()                                            -- can't afford the opener → give up
+  expect(failed):eq("out of mana")
+  expect(AF.state().engaging):eq(false)
+end)
+
+test("engage: a stray fight-end while still landing the opener does NOT resolve on_dead", function()
+  AF.reset()
+  local dead = false
+  autofight.engage("orc", function() dead = true end)
+  AF.on_fight_end()                                    -- -1 before combat ever started
+  expect(dead):eq(false)
+end)
+
+-- ---- dormant soulsteal (latch) -------------------------------------------------------------------
+-- Soulsteal can LATCH instead of stealing outright ("You magically latch onto <x>'s soul and wait for
+-- <x> to weaken…") — the dread-portent/near-death dormant form. The soul isn't captured; if we stopped
+-- casting we'd stall. So we keep nuking the winner (never re-casting soulsteal) until the latch fires.
+
+test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it fires", function()
+  to_shards()
+  AF.on_fight(70, ENEMY); AF.shards()      -- → "c shower"
+  AF.on_fight(60, ENEMY); AF.shower()      -- winner shards → nuke "c shards"
+  AF.on_fight(8, ENEMY);  AF.shards()      -- landed, ≤15% → "c soulsteal"
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  AF.soul_latched()                        -- LATCHED (not stolen) → resume nuking the winner
+  expect(AF.state().soul_latched):eq(true)
+  expect(AF.state().phase):eq("nuke")
+  expect(AF.sent[#AF.sent]):eq("c shards") -- nuked again, NOT soulsteal
+  -- Still ≤15%, but the latch guard keeps us nuking — never flips back to soulsteal.
+  AF.on_fight(5, ENEMY); AF.shards()
+  expect(AF.sent[#AF.sent]):eq("c shards")
+  -- The latch finally activates: the steal success line, then DEAD, ends the fight cleanly.
+  AF.soulsteal_ok()
+  expect(AF.state().phase):eq("done")
+  local n = #AF.sent
+  AF.dead()
+  expect(AF.state().fighting):eq(false)
+  expect(#AF.sent):eq(n)                    -- nothing more sent after done
+end)
+
+test("a fresh fight clears the soul_latched flag", function()
+  to_shards()
+  AF.on_fight(70, ENEMY); AF.shards()       -- → shower
+  AF.on_fight(60, ENEMY); AF.shower()       -- decide → winner shards → nuke
+  AF.on_fight(8, ENEMY);  AF.shards()       -- ≤15% → soulsteal
+  AF.soul_latched()
+  expect(AF.state().soul_latched):eq(true)
+  AF.dead()                                 -- fight ends
+  AF.reset(); AF.on_fight(100, ENEMY)       -- new fight
+  expect(AF.state().soul_latched):eq(false)
+end)

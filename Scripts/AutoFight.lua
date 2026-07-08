@@ -9,7 +9,10 @@
 --   2. NUKE:             keep casting the WINNER until the enemy is dead.
 --   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
 --                        RESISTED, nuke once more with the winner then retry soulsteal — repeat until it
---                        lands or the enemy dies.
+--                        lands or the enemy dies. If instead soulsteal LATCHES ("You magically latch
+--                        onto <x>'s soul and wait for <x> to weaken…" — the dormant/dread-portent form),
+--                        the soul isn't captured yet: keep nuking the winner (do NOT re-cast soulsteal)
+--                        until the latch fires as the target drops.
 --   4. SUSPEND:          any command the USER types (not one WE sent) suspends the script so they can
 --                        intervene; it resumes after cfg.resume_after seconds of no manual input, or when
 --                        the fight ends.
@@ -58,6 +61,16 @@ F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
 F.shards_drop       = F.shards_drop or 0
 F.shower_drop       = F.shower_drop or 0
+-- engage() state: initiating a fight from out of combat by casting the opener (`target x` alone doesn't
+-- aggro). `engaging` is true from the first opener cast until combat actually starts; `opener_primed`
+-- tells start_fight the tarrants opener was already thrown so it skips straight to the probe.
+F.engaging          = F.engaging or false
+F.engage_busy       = F.engage_busy or false
+F.engage_tries      = F.engage_tries or 0
+F.opener_primed     = F.opener_primed or false
+F.on_dead           = F.on_dead or nil      -- called once when an engaged fight ends
+F.on_fail           = F.on_fail or nil      -- called if we can't get the opener to land
+F.soul_latched      = F.soul_latched or false  -- dormant soulsteal latched; keep nuking, don't re-cast it
 
 -- Command capture, always on (cheap, cleared each fight) so the test harness can read the exact send
 -- sequence without stubbing the host `send`. `_AF_TEST.sent` aliases this table.
@@ -75,6 +88,29 @@ local function af_send(cmd)
   F.self_sent[cmd] = (F.self_sent[cmd] or 0) + 1
   sent[#sent + 1] = cmd
   if send then send(cmd) end
+end
+
+-- ---- combat initiation (engage) -----------------------------------------------------------------
+-- Starting a fight from OUT of combat: `target x` sets the target but does NOT aggro, so we cast the
+-- opener (tarrants); a SUCCESSFUL cast is what actually starts combat. The opener can fail — we retry
+-- it up to cfg.max_tries, then give up. Once combat starts, kxwt_fighting fires start_fight (primed by
+-- opener_primed to skip re-casting the opener) and the normal routine takes over. These run only while
+-- F.engaging and not yet F.fighting; the in-combat handlers below are untouched.
+local function send_opener() F.engage_busy = true; af_send(cfg.opener_tarrants) end
+
+-- Opener fizzled/resisted before combat started: retry, or give up after max_tries.
+local engage_giveup   -- fwd
+local function engage_retry(reason)
+  F.engage_busy = false
+  F.engage_tries = F.engage_tries + 1
+  if F.engage_tries >= cfg.max_tries then engage_giveup(reason) else send_opener() end
+end
+
+engage_giveup = function(reason)
+  F.engaging, F.engage_busy, F.opener_primed = false, false, false
+  local cb = F.on_fail; F.on_fail, F.on_dead = nil, nil
+  say("couldn't start the fight (" .. reason .. ")")
+  if cb then cb(reason) end
 end
 
 -- Send the cast for `spell` and go `busy`. NO timer — we stay busy until we SEE that spell's own
@@ -108,7 +144,11 @@ fire = function()
     else F.winner, F.winner_spell = cfg.shower_cmd, "shower" end
     F.phase = "nuke"
   end
-  if F.phase == "nuke" and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct then F.phase = "soulsteal" end
+  -- Switch to soulsteal when nearly dead — UNLESS a dormant soulsteal is already latched (then we just
+  -- keep nuking to weaken the target so the latch fires; re-casting soulsteal would be wasted).
+  if F.phase == "nuke" and not F.soul_latched and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct then
+    F.phase = "soulsteal"
+  end
   local p = F.phase
   if     p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
   elseif p == "shards"                 then F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")
@@ -141,10 +181,14 @@ end
 -- ---- fight lifecycle -----------------------------------------------------------------------------
 local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
-  F.phase = "tarrants"
+  -- If engage() already threw the opener, skip the tarrants phase and go straight to the shards/shower
+  -- probe; otherwise this is a normal fight and we open with tarrants as always.
+  F.phase = F.opener_primed and "shards" or "tarrants"
+  F.engaging, F.engage_busy, F.opener_primed = false, false, false
   F.busy, F.busy_spell = false, nil
   F.shards_drop, F.shower_drop = 0, 0
   F.winner, F.winner_spell, F.last_damage_spell = nil, nil, nil
+  F.soul_latched = false
   F.no_mana = {}
   F.suspended = false
   F.self_sent = {}
@@ -182,7 +226,14 @@ local function on_fight(pct, name)
 end
 
 local function on_fight_end()
+  local was_engaged_fight = F.fighting and F.on_dead
   if F.fighting then end_fight() end
+  -- The fight we started via engage() is over (mob dead or fled): fire on_dead exactly once. Guarded on
+  -- was-fighting so a stray -1 while we're still trying to land the opener (F.engaging) doesn't resolve.
+  if was_engaged_fight then
+    local cb = F.on_dead; F.on_dead, F.on_fail = nil, nil
+    if cb then cb() end
+  end
 end
 
 -- ---- combat line resolutions ---------------------------------------------------------------------
@@ -190,8 +241,15 @@ end
 -- same hit_*, so triggers and tests share one implementation.
 local function hit_shards()     succeed("shards")    end   -- "You create and magically throw white shards…"
 local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs…"
-local function hit_tarrants()   succeed("tarrants")  end   -- "An ethereal hand appears and attacks … from behind!"
+local function hit_tarrants()
+  -- Engage opener landed: combat is about to start (kxwt_fighting → start_fight); just clear the
+  -- init-busy flag and let start_fight take over. Otherwise it's the normal in-combat opener.
+  if F.engaging and not F.fighting then F.engage_busy = false; return end
+  succeed("tarrants")
+end
 local function hit_resist()
+  -- Engage opener resisted before combat started: retry the opener.
+  if F.engaging and not F.fighting then return engage_retry("resisted") end
   -- soulsteal resisting → re-nuke once, then retry soulsteal. A DAMAGE spell resisting is just a miss → retry.
   if F.busy and F.busy_spell == "soulsteal" then
     F.busy, F.busy_spell, F.tries = false, nil, 0
@@ -201,16 +259,33 @@ local function hit_resist()
   end
 end
 local function hit_mana()
+  -- Can't afford the engage opener → combat will never start; give up initiating.
+  if F.engaging and not F.fighting then return engage_giveup("out of mana") end
   -- Out of mana: DON'T retry and DON'T spam. Mark it and stop; we resume next time we're free to cast.
   if not F.busy then return end
   F.no_mana[F.busy_spell] = true
   F.busy, F.busy_spell = false, nil
 end
-local function hit_fail()  fail_again() end            -- "You fail to cast the spell '…'." — fizzled, retry
+local function hit_fail()
+  if F.engaging and not F.fighting then return engage_retry("cast failed") end   -- engage opener fizzled → retry
+  fail_again()
+end                                                    -- "You fail to cast the spell '…'." — fizzled, retry
 
 local function hit_soulsteal_ok()
-  -- The soul was pulled; the enemy is about to die. Stop casting; the DEAD line ends the fight.
+  -- The soul was pulled ("…and pull <x>'s essence into a <color> soulstone!") — the enemy is about to
+  -- die. Stop casting; the DEAD line ends the fight. (Also fires when a latched steal finally activates.)
   F.busy, F.busy_spell, F.phase = false, nil, "done"
+end
+
+local function hit_soul_latched()
+  -- DORMANT soulsteal: "You magically latch onto <x>'s soul and wait for <x> to weaken…". The soul is
+  -- NOT captured yet — the spell lies in wait until the target is weak enough. If we stopped here we'd
+  -- stall (nothing weakens it). So mark it latched (which stops fire() re-casting soulsteal) and go back
+  -- to nuking the winner; the latch fires — the "separate soul from body" success line, then DEAD — as
+  -- the target drops. Verified against the human traces (player keeps nuking after this line).
+  F.soul_latched = true
+  F.busy, F.busy_spell, F.phase = false, nil, "nuke"
+  fire()
 end
 
 local function hit_dead()
@@ -244,6 +319,7 @@ if trigger then
   -- lines start with the speaker ("Bob says, '…'"), so ^ excludes them. The messages that begin with a
   -- variable mob name (resist / DEAD) also anchor the tail with $ so a quoted say ("…DEAD!'") is excluded.
   trigger([[^You cast the spell to separate soul from body]], function() hit_soulsteal_ok() end)
+  trigger([[^You magically latch onto .+ soul and wait for .+ to weaken]], function() hit_soul_latched() end)
   trigger([[^You create and magically throw white shards of crystal at]], function() hit_shards() end)
   trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
   trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
@@ -286,6 +362,39 @@ end
 
 function autofight.status() if echo then echo(status_line()) end end
 
+-- engage(target[, on_dead][, on_fail]) — START a fight from out of combat. Sets the target and casts
+-- the opener (tarrants) to actually aggro it, retrying the opener until it lands (up to cfg.max_tries);
+-- once combat starts the normal routine takes over, skipping a second opener. on_dead() fires when the
+-- fight ends; on_fail(reason) fires if the opener can't be landed. The sequence layer's attack() wraps
+-- this into a promise; call it directly if you just want the callbacks.
+function autofight.engage(target, on_dead, on_fail)
+  F.on = true
+  end_fight()                                            -- clear any stale fight/init state
+  F.on_dead, F.on_fail = on_dead, on_fail
+  F.engaging, F.engage_busy, F.engage_tries = true, false, 0
+  F.opener_primed = true                                 -- start_fight will skip re-casting the opener
+  say(string.format("engaging %s — casting the opener to start the fight", tostring(target)))
+  af_send("target " .. tostring(target))
+  send_opener()
+end
+doc(autofight.engage, { name = "autofight.engage", sig = "autofight.engage(target[, on_dead][, on_fail])",
+  group = "combat", text = "Start a fight from out of combat: set the target and cast the opener "
+      .. "(tarrants) to aggro it, retrying until it lands, then hand off to the normal auto-fight "
+      .. "routine. on_dead() fires when the fight ends; on_fail(reason) if the opener can't be landed. "
+      .. "attack() wraps this into a chainable promise." })
+
+-- attack(target) — the sequence-layer builder: engage `target` and return a PROMISE (Scripts/Sequence.lua)
+-- that resolves when it dies and rejects if the fight can't be started. Chain it: recover(95).andThen(attack('orc')).
+function attack(target)
+  return __promise(function(resolve, reject)
+    autofight.engage(target, function() resolve() end, function(reason) reject(reason) end)
+  end, "attack")
+end
+doc("attack", { sig = "attack(target) -> promise", group = "combat",
+  text = "Engage `target` (via autofight.engage) and return a promise that resolves when it dies and "
+      .. "rejects if the fight can't be started. Chain with .andThen — e.g. recover(95).andThen(attack('orc')).",
+  example = "#attack('orc')" })
+
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
   text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes "
       .. "shards vs shower and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
@@ -318,7 +427,7 @@ _AF_TEST = {
   on_input      = observe_input,
   shards        = hit_shards,      shower       = hit_shower,      tarrants  = hit_tarrants,
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
-  soulsteal_ok  = hit_soulsteal_ok, dead        = hit_dead,
+  soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
   expire_resume = function()
     if F.suspend_timer and cancel then cancel(F.suspend_timer) end
     F.suspend_timer, F.suspended = nil, false; fire()
