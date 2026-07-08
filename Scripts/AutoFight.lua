@@ -83,6 +83,53 @@ local function clear_sent() for i = #sent, 1, -1 do sent[i] = nil end end
 
 local function say(s) if echo then echo("\27[1;35m[autofight]\27[0m " .. s) end end
 
+-- ---- learned winners (per target NAME) -----------------------------------------------------------
+-- Remember which probe spell won against a given target so the next fight against the same name skips
+-- the shards/scorch probe and nukes the known winner straight away. Keyed by a normalized name (lower-
+-- cased, leading article stripped) so "a Gnomian guard" / "The Gnomian guard" collapse to one entry.
+-- Persisted to disk (mirrors AlterAeon's classes.lua) so it survives a relaunch; kept on _AUTOFIGHT so
+-- it also survives a live pilot.reload().
+local function winner_key(name)
+  if not name then return nil end
+  local k = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  k = k:gsub("^an? ", ""):gsub("^the ", "")     -- drop a leading "a "/"an "/"the "
+  return (k ~= "" and k) or nil
+end
+
+local WINNERS_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/autofight_winners.lua"
+local function save_winners()
+  local f = io.open(WINNERS_FILE, "w")
+  if not f then return end
+  local parts = {}
+  for name, spell in pairs(_AUTOFIGHT.winners) do parts[#parts + 1] = string.format("[%q]=%q", name, spell) end
+  f:write("return {" .. table.concat(parts, ",") .. "}")
+  f:close()
+end
+-- Debounce writes: coalesce a burst of updates into one save 2s after the last (same trick as classes).
+local winners_save_timer
+local function schedule_winners_save()
+  if cancel and winners_save_timer then cancel(winners_save_timer) end
+  winners_save_timer = after and after(2, save_winners) or nil
+end
+-- Load from disk ONCE per session (not on a live reload, where _AUTOFIGHT.winners already holds the
+-- current, possibly-newer table).
+if not _AUTOFIGHT.winners then
+  _AUTOFIGHT.winners = {}
+  local chunk = loadfile and loadfile(WINNERS_FILE)
+  if chunk then local ok, t = pcall(chunk); if ok and type(t) == "table" then _AUTOFIGHT.winners = t end end
+end
+
+-- Record (and persist) the probe's verdict for this target. Only writes on a real change.
+local function remember_winner(name, spell)
+  local key = winner_key(name)
+  if not key or (spell ~= "shards" and spell ~= "scorch") then return end
+  if _AUTOFIGHT.winners[key] ~= spell then
+    _AUTOFIGHT.winners[key] = spell
+    schedule_winners_save()
+    say(string.format("learned: %s → %s", key, spell))
+  end
+end
+
 -- Forward declarations (mutually recursive).
 local fire, cast, succeed, fail_again
 
@@ -129,7 +176,7 @@ end
 -- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed".)
 local function next_phase()
   local p = F.phase
-  if     p == "tarrants"  then F.phase = "shards"    -- opener landed → start the shards/scorch probe
+  if     p == "tarrants"  then F.phase = F.known_winner and "nuke" or "shards"   -- known → skip the probe
   elseif p == "shards"    then F.phase = "scorch"
   elseif p == "scorch"    then F.phase = "decide"
   elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
@@ -146,6 +193,7 @@ fire = function()
     -- Coarse winner pick: whichever probe dropped the enemy health % more. Ties → shards.
     if F.shards_drop >= F.scorch_drop then F.winner, F.winner_spell = cfg.shards_cmd, "shards"
     else F.winner, F.winner_spell = cfg.scorch_cmd, "scorch" end
+    remember_winner(F.name, F.winner_spell)   -- learn it so the next fight vs this name skips the probe
     F.phase = "nuke"
   end
   -- Switch to soulsteal when nearly dead — UNLESS a dormant soulsteal is already latched (then we just
@@ -185,13 +233,23 @@ end
 -- ---- fight lifecycle -----------------------------------------------------------------------------
 local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
-  -- If engage() already threw the opener, skip the tarrants phase and go straight to the shards/scorch
-  -- probe; otherwise this is a normal fight and we open with tarrants as always.
-  F.phase = F.opener_primed and "shards" or "tarrants"
+  -- Do we already know the winning spell for this target name? If so, skip the probe entirely.
+  local key = winner_key(name)
+  local known = key and _AUTOFIGHT.winners[key]
+  F.known_winner = (known == "shards" or known == "scorch") and known or nil
+  if F.known_winner then
+    F.winner, F.winner_spell = cfg[F.known_winner .. "_cmd"], F.known_winner
+    say(string.format("%s known → %s (skipping probe)", key, F.known_winner))
+  end
+  -- Phase: engage() may have already thrown the opener (opener_primed). The post-opener phase is the
+  -- nuke when we know the winner, otherwise the shards/scorch probe; a fresh fight opens with tarrants.
+  local post_opener = F.known_winner and "nuke" or "shards"
+  F.phase = F.opener_primed and post_opener or "tarrants"
   F.engaging, F.engage_busy, F.opener_primed = false, false, false
   F.busy, F.busy_spell = false, nil
   F.shards_drop, F.scorch_drop = 0, 0
-  F.winner, F.winner_spell, F.last_damage_spell = nil, nil, nil
+  if not F.known_winner then F.winner, F.winner_spell = nil, nil end   -- keep the known winner if set above
+  F.last_damage_spell = nil
   F.soul_latched = false
   F.no_mana = {}
   F.suspended = false
@@ -373,6 +431,37 @@ end
 
 function autofight.status() if echo then echo(status_line()) end end
 
+-- winners() — list the learned best-spell-per-target-name memory. forget([name]) — drop one learned
+-- entry (by name), or ALL of them when called with no name; both persist the change.
+function autofight.winners()
+  if not echo then return end
+  local keys = {}
+  for k in pairs(_AUTOFIGHT.winners) do keys[#keys + 1] = k end
+  table.sort(keys)
+  if #keys == 0 then echo("[autofight] no learned winners yet"); return end
+  echo(string.format("[autofight] learned winners (%d):", #keys))
+  for _, k in ipairs(keys) do echo(string.format("  %s → %s", k, _AUTOFIGHT.winners[k])) end
+end
+
+function autofight.forget(name)
+  if name == nil then
+    _AUTOFIGHT.winners = {}; schedule_winners_save(); say("forgot ALL learned winners"); return
+  end
+  local key = winner_key(name)
+  if key and _AUTOFIGHT.winners[key] then
+    _AUTOFIGHT.winners[key] = nil; schedule_winners_save(); say("forgot " .. key)
+  else
+    say("nothing learned for " .. (key or tostring(name)))
+  end
+end
+
+doc(autofight.winners, { name = "autofight.winners", sig = "autofight.winners()", group = "combat",
+  text = "List the learned best-spell-per-target memory: for each target name the script has probed, "
+      .. "which of shards/scorch won. Known names skip the probe on the next fight." })
+doc(autofight.forget, { name = "autofight.forget", sig = "autofight.forget([name])", group = "combat",
+  text = "Forget a learned winner so it re-probes next time: pass a target name to drop just that one, "
+      .. "or call with no argument to clear the whole memory. Persists the change." })
+
 -- engage(target[, on_dead][, on_fail]) — START a fight from out of combat. Sets the target and casts
 -- the opener (tarrants) to actually aggro it, retrying the opener until it lands (up to cfg.max_tries);
 -- once combat starts the normal routine takes over, skipping a second opener. on_dead() fires when the
@@ -397,8 +486,9 @@ doc(autofight.engage, { name = "autofight.engage", sig = "autofight.engage(targe
 -- attack(target) — the promise-layer builder: engage `target` and return a PROMISE (Scripts/Promise.lua)
 -- that resolves when it dies and rejects if the fight can't be started. Chain it: recover(95).andThen(attack('orc')).
 function attack(target)
-  return __promise(function(resolve, reject)
+  return __promise(function(resolve, reject, onCancel)
     autofight.engage(target, function() resolve() end, function(reason) reject(reason) end)
+    onCancel(function() autofight.off() end)   -- chain aborted: disarm auto-fight
   end, "attack")
 end
 doc("attack", { sig = "attack(target) -> promise", group = "combat",
@@ -417,11 +507,15 @@ doc(autofight.status, { name = "autofight.status", sig = "autofight.status()", g
   text = "Show whether auto-fight is armed, the current phase, the target/health%, and the chosen "
       .. "winner spell." })
 
--- Legacy typed `autofight on|off|status` still works via the command bridge.
+-- Legacy typed `autofight on|off|status|winners|forget [name]` still works via the command bridge.
 setmetatable(autofight, { __call = function(_, rest)
-  local verb = ((rest or ""):gsub("^%s+", ""):gsub("%s+$", "")):lower()
+  rest = (rest or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local verb, arg = rest:match("^(%S*)%s*(.*)$")
+  verb = (verb or ""):lower()
   if verb == "on" then autofight.on()
   elseif verb == "off" then autofight.off()
+  elseif verb == "winners" then autofight.winners()
+  elseif verb == "forget" then autofight.forget(arg ~= "" and arg or nil)
   else autofight.status() end
 end })
 
@@ -440,6 +534,9 @@ _AF_TEST = {
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
+  winner_key    = winner_key,
+  winners       = function() return _AUTOFIGHT.winners end,
+  remember      = remember_winner,
   expire_resume = function()
     if F.suspend_timer and cancel then cancel(F.suspend_timer) end
     F.suspend_timer, F.suspended = nil, false; fire()
@@ -449,6 +546,7 @@ _AF_TEST = {
     end_fight()
     F.self_sent = {}
     clear_sent()
+    _AUTOFIGHT.winners = {}   -- hermetic tests: no learned winners bleeding across cases
   end,
 }
 

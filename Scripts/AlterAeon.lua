@@ -1151,10 +1151,16 @@ function recover(target)
     if n and n > 0 then frac = (n > 1) and (n / 100) or n end   -- accept 95 or 0.95
   end
   if frac > 1 then frac = 1 end
-  return __promise(function(resolve, reject)
+  return __promise(function(resolve, reject, onCancel)
     if ready(frac) then echo("Already recovered — vitals at target."); resolve(); return end
     recovery.settle = { resolve = resolve, reject = reject }
     begin_recovery(frac)
+    onCancel(function()
+      -- Chain aborted: stand up and clear the recovery flag WITHOUT firing resolve/reject (the promise
+      -- is cancelled, not settled). A later kxwt_prompt then can't complete it (state.recover is false).
+      if state.recover then send("stand") end
+      recovery.settle, recovery.pct, state.recover = nil, READY_PCT, false
+    end)
   end, "recover")
 end
 doc("recover", { sig = "recover([pct]) -> promise", group = "combat",

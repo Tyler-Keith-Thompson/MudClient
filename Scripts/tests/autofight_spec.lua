@@ -294,3 +294,55 @@ test("the dormant shower handler no-ops (a stray shower line can't advance the r
   expect(AF.state().phase):eq(phase)       -- phase unchanged (busy_spell was 'shards', not 'shower')
   expect(AF.state().busy):eq(true)         -- still waiting on the real shards landed line
 end)
+
+-- ---- learned winners (per target name) -----------------------------------------------------------
+-- After the probe decides, the winner is remembered by target name; the NEXT fight against that name
+-- skips the probe and nukes the known winner straight from the opener.
+
+test("winner_key normalizes: lowercased, leading article stripped", function()
+  expect(AF.winner_key("a Gnomian guard")):eq("gnomian guard")
+  expect(AF.winner_key("The old fisherman Omno")):eq("old fisherman omno")
+  expect(AF.winner_key("An orc")):eq("orc")
+  expect(AF.winner_key(nil)):eq(nil)
+end)
+
+test("a decided probe is remembered under the target's name", function()
+  to_shards()                              -- reset() clears the winners table (hermetic)
+  AF.on_fight(85, ENEMY); AF.shards()      -- shards Δ5  → scorch
+  AF.on_fight(60, ENEMY); AF.scorch()      -- scorch Δ25 → decide → scorch wins → learned
+  expect(AF.winners()["gnomian guard"]):eq("scorch")
+end)
+
+test("a known winner SKIPS the probe: opener → straight to the known nuke", function()
+  AF.reset()                               -- clears memory…
+  AF.winners()["gnomian guard"] = "scorch" -- …then seed a known winner
+  AF.on_fight(90, ENEMY)                   -- combat start → "c tarrants" (no probe scheduled)
+  expect(AF.state().known_winner):eq("scorch")
+  AF.tarrants()                            -- opener landed → skip shards/scorch → nuke the known winner
+  expect(AF.state().phase):eq("nuke")
+  expect(AF.sent[#AF.sent]):eq("c scorch")
+  -- keep nuking scorch to the end; the probe spells never appear
+  AF.on_fight(40, ENEMY); AF.scorch()
+  for _, cmd in ipairs(seq()) do expect(cmd == "c shards"):eq(false) end
+end)
+
+test("engage() with a known winner goes opener → known nuke (no probe)", function()
+  AF.reset()
+  AF.winners()["gnomian guard"] = "shards"
+  autofight.engage(ENEMY)                  -- target + opener; opener_primed
+  AF.tarrants()                            -- opener landed (engaging)…
+  AF.on_fight(90, ENEMY)                   -- …combat starts → primed + known → straight to nuke
+  expect(AF.state().phase):eq("nuke")
+  expect(AF.sent[#AF.sent]):eq("c shards")
+end)
+
+test("forget(name) drops one entry; forget() clears all", function()
+  AF.reset()
+  AF.winners()["gnomian guard"] = "scorch"
+  AF.winners()["orc"] = "shards"
+  autofight.forget("a Gnomian guard")      -- normalized to "gnomian guard"
+  expect(AF.winners()["gnomian guard"]):eq(nil)
+  expect(AF.winners()["orc"]):eq("shards")
+  autofight.forget()                       -- clear all
+  expect(next(AF.winners())):eq(nil)
+end)
