@@ -222,6 +222,16 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("on_user_input", [.string(command)])
     }
 
+    /// Run a `|`-pipe: promise-sequenced commands like "recover 95 | attack rat | l". `segments` is the
+    /// already-tokenized line (see `InputService.pipeSegments` — Swift owns the split + escaping). Hands
+    /// the segments to the Lua `__pipe`, which builds and starts a promise chain where each segment waits
+    /// for the previous to resolve. The chaining lives in Lua because promises do (Promise.lua); Swift
+    /// only tokenizes. The caller has already established there are ≥2 segments.
+    func runPipe(_ segments: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("__pipe", [.table(segments.map { .string($0) }, [:])])
+    }
+
     /// Consult the optional Lua `on_send(cmd)` hook for one final, atomic outbound command (already
     /// past alias handling and `;` splitting) and return the commands that should actually be
     /// transmitted, in order. No hook defined → `[command]` unchanged. The hook's return value governs

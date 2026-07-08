@@ -61,6 +61,17 @@ extension AsyncSequence where Self: Sendable, Element == String {
             }
             // Let scripts observe the typed command without swallowing it (e.g. the AI pilot).
             interpreter.engine.notifyUserInput(input)
+            // A `|` sequences commands on promises ("recover 95 | attack rat | l"): each segment waits
+            // for the previous to resolve. Swift tokenizes (same escaping grammar as `;`); >1 segment
+            // means it's a pipe, so hand the segments to Lua's __pipe to build/run the chain and swallow
+            // the line. Gated on a cheap contains-check so pipe-free lines skip the parse entirely.
+            if input.contains("|") {
+                let segments = InputService.pipeSegments(input)
+                if segments.count > 1 {
+                    interpreter.engine.runPipe(segments)
+                    return nil
+                }
+            }
             // Otherwise let a script alias claim it.
             if interpreter.engine.processAlias(input) {
                 return nil

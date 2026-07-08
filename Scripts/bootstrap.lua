@@ -714,6 +714,70 @@ end
 _LOAD_TEST = { filter = load_filter, order = load_order, resolve = resolve_script,
                module_of = module_of }
 
+--------------------------------------------------------------------------------
+-- `|` pipe: sequence typed commands on promises
+--------------------------------------------------------------------------------
+--
+-- A `|` on the command line chains commands so each WAITS for the previous to finish:
+--
+--     recover 95 | attack rat | goto town
+--
+-- is `recover(95)` then — once vitals reach 95% — `attack("rat")`, then — once the rat dies —
+-- `goto("town")`. `|` is a sibling of `;`: `;` fires commands independently (no waiting), `|` waits.
+--
+-- The host tokenizes the line (InputService.pipeSegments — same swift-parsing escaping as `;`, so `\|`
+-- is a literal pipe) and hands us the ordered segment strings; we only build the promise chain, because
+-- promises are a Lua concept. Each segment becomes a promise: a segment whose FIRST WORD names a
+-- callable global — a function like recover/attack/goto or a callable table like eq/pilot — is CALLED
+-- as word("rest"); if that returns a promise (recover/attack do) the chain waits on it, otherwise it
+-- just resolves (nothing to await). Any other segment is an ordinary command: it's sent (through the
+-- normal alias pipeline, exactly as if you typed it) and resolves at once — so `l`, `kill rat`, and your
+-- aliases all work as pass-through steps. This is the same first-word-callable rule the REPL uses for
+-- `#word rest` (see legacyRewrite in Swift).
+--
+-- Chaining is deferred correctly: the head runs now, every later segment is only invoked when its
+-- predecessor's promise resolves — so a non-promise action (e.g. `volume 50`) still runs at its turn in
+-- the sequence, not eagerly.
+
+local function pipe_is_callable(v)
+  if type(v) == "function" then return true end
+  if type(v) == "table" then local mt = getmetatable(v); return mt ~= nil and mt.__call ~= nil end
+  return false
+end
+
+local function pipe_is_promise(x) return type(x) == "table" and x.__is_promise == true end
+
+-- Run ONE segment now and return a promise for its completion (always a promise, so the chain composes).
+local function pipe_run_segment(seg)
+  seg = (seg or ""):match("^%s*(.-)%s*$")
+  if seg == "" then return __promise(function(res) res() end, "pipe") end
+  local word, rest = seg:match("^(%S+)%s*(.-)$")
+  local fn = word and _G[word]
+  if pipe_is_callable(fn) then
+    local ok, r = pcall(fn, (rest ~= "" and rest or nil))
+    if not ok then return __promise(function(_, rej) rej(r) end, "pipe:" .. word) end
+    if pipe_is_promise(r) then return r end
+    return __promise(function(res) res() end, "pipe:" .. word)   -- non-promise action: done immediately
+  end
+  return __promise(function(res) send(seg); res() end, "pipe:" .. seg)  -- ordinary command
+end
+
+-- Host entry point (ScriptInterpreter → engine.runPipe). `segments` is the pre-split, pre-unescaped
+-- array from InputService.pipeSegments. Builds the promise chain and lets the head auto-start.
+-- `__`-prefixed => internal, doc-exempt.
+function __pipe(segments)
+  if type(segments) ~= "table" or #segments == 0 then return end
+  local chain = pipe_run_segment(segments[1])
+  for i = 2, #segments do
+    local seg = segments[i]
+    chain = chain.andThen(function() return pipe_run_segment(seg) end)
+  end
+end
+
+-- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder. (Splitting +
+-- escaping is Swift's job now — InputService.pipeSegments — tested on that side.)
+_PIPE_TEST = { run = pipe_run_segment, pipe = __pipe, callable = pipe_is_callable }
+
 -- scripts / documentation
 doc("load", { sig = "load(path)", group = "scripts",
   text = "Load a Lua script or directory, resolved relative to the launch CWD. A directory loads its top-level *.lua scripts (case-insensitive alphabetical) via require(); a single file (the `.lua` extension is assumed if absent) also routes through require but busts its cache first, so an interactive re-load re-runs it. Cross-script load-time deps are declared in-file with require(); the run-once cache means order emerges from dependencies, not a manifest. Shadows stdlib load — a non-string arg delegates to `loadchunk`. `#load {Name}` rewrites to `load(\"Scripts/Name\")`.",
