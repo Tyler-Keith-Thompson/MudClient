@@ -354,7 +354,19 @@ final class Lua: @unchecked Sendable {
 
     // MARK: - Stack marshalling
 
-    func decode(at idx: Int32) -> LuaValue {
+    /// Deepest table nesting decoded before we stop descending. A backstop against pathologically deep
+    /// (but acyclic) structures; `ancestors` below handles the common case — actual reference cycles.
+    private static let maxDecodeDepth = 64
+
+    func decode(at idx: Int32) -> LuaValue { decode(at: idx, ancestors: [], depth: 0) }
+
+    /// `ancestors` holds the table addresses on the current descent PATH (not all tables ever seen), so
+    /// a table that points back at one of its own ancestors is a cycle and is broken; a table merely
+    /// referenced by two siblings (a DAG, no cycle) is still decoded fully in each place. This is what
+    /// keeps a self-referential Lua table — e.g. a Promise whose result's `_parent` points back at it —
+    /// from recursing forever and blowing the native stack (an unrecoverable SIGBUS/SIGSEGV) the moment
+    /// it's returned to the REPL or passed to a builtin.
+    private func decode(at idx: Int32, ancestors: Set<UnsafeRawPointer>, depth: Int) -> LuaValue {
         switch lua_type(state, idx) {
         case LUA_TBOOLEAN:
             return .bool(lua_toboolean(state, idx) != 0)
@@ -371,7 +383,7 @@ final class Lua: @unchecked Sendable {
             let ref = luaL_ref(state, clua_registryindex())            // pops it, returns handle
             return .function(LuaFunctionRef(ref: ref, lua: self))
         case LUA_TTABLE:
-            return decodeTable(at: idx)
+            return decodeTable(at: idx, ancestors: ancestors, depth: depth)
         default:
             return .nil
         }
@@ -381,15 +393,26 @@ final class Lua: @unchecked Sendable {
     /// sequence; the dict part is every string key. Recurses for nested tables. The stack is left
     /// exactly as found. Every index is resolved to an absolute one up front so nested pushes (and
     /// the `lua_next` traversal) don't shift the table out from under us.
-    private func decodeTable(at idx: Int32) -> LuaValue {
+    ///
+    /// Cyclic/too-deep tables decode to an empty `.table` rather than recursing without bound — see
+    /// `decode(at:ancestors:depth:)`. `lua_topointer` gives each table a stable identity for the
+    /// on-path `ancestors` set.
+    private func decodeTable(at idx: Int32, ancestors: Set<UnsafeRawPointer>, depth: Int) -> LuaValue {
         let t = lua_absindex(state, idx)
+        let identity = lua_topointer(state, t)
+        if depth >= Self.maxDecodeDepth || (identity != nil && ancestors.contains(identity!)) {
+            return .table([], [:])                   // cycle or depth cap → stop descending
+        }
+        var nextAncestors = ancestors
+        if let identity { nextAncestors.insert(identity) }
+        let nextDepth = depth + 1
         var array: [LuaValue] = []
         let n = Int(lua_rawlen(state, t))
         if n > 0 {
             array.reserveCapacity(n)
             for i in 1...n {
                 lua_geti(state, t, lua_Integer(i))   // push t[i]
-                array.append(decode(at: -1))
+                array.append(decode(at: -1, ancestors: nextAncestors, depth: nextDepth))
                 lua_settop(state, -2)                // pop it
             }
         }
@@ -399,7 +422,7 @@ final class Lua: @unchecked Sendable {
             // Only take string keys. Guarding on the type first means the following lua_tolstring
             // can't mutate a numeric key in place (which would corrupt the lua_next traversal).
             if lua_type(state, -2) == LUA_TSTRING, let c = lua_tolstring(state, -2, nil) {
-                dict[String(cString: c)] = decode(at: -1)
+                dict[String(cString: c)] = decode(at: -1, ancestors: nextAncestors, depth: nextDepth)
             }
             lua_settop(state, -2)                    // pop value, keep key for the next lua_next
         }
