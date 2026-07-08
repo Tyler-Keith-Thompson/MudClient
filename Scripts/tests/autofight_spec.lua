@@ -349,11 +349,13 @@ end)
 
 -- ---- target change mid-combat WITHOUT a kxwt -1 (the "rolled onto the next mob" bug) --------------
 
--- start_fight clear_sent()s for a clean per-fight sequence, so after a restart AF.sent holds ONLY the
--- new fight: exactly the fresh opener. (#==1 distinguishes a real restart from "no restart, stale scorch
--- still the last thing sent".)
+-- These isolate the RESTART mechanism (bug fix), so they force aoe='off' to see the single-target
+-- opener; the pack→frostflower behaviour of a rollover under the default 'auto' is covered in the AOE
+-- section below. start_fight clear_sent()s for a clean per-fight sequence, so after a restart AF.sent
+-- holds ONLY the new fight: exactly the fresh opener. (#==1 distinguishes a real restart from "no
+-- restart, stale scorch still the last thing sent".)
 test("a NAME change mid-combat (no -1) starts the routine over on the new enemy", function()
-  to_shards()                                  -- c tarrants, c shards; probing ENEMY
+  to_shards(); AF.state().aoe_mode = "off"     -- c tarrants, c shards; probing ENEMY (single-target)
   AF.on_fight(70, ENEMY); AF.shards()          -- → c scorch (mid-probe, scorch in flight)
   AF.on_fight(72, "a crimson topaz")           -- DIFFERENT target, no -1 → start over
   expect(AF.sent[1]):eq("c tarrants")          -- fresh opener on the new enemy
@@ -361,7 +363,7 @@ test("a NAME change mid-combat (no -1) starts the routine over on the new enemy"
 end)
 
 test("a health bar that jumps UP (same name, new instance) also starts over", function()
-  to_shards()                                  -- c tarrants, c shards
+  to_shards(); AF.state().aoe_mode = "off"     -- c tarrants, c shards
   AF.on_fight(70, ENEMY); AF.shards()          -- c scorch
   AF.on_fight(6, ENEMY)                         -- previous ape nearly dead
   AF.on_fight(78, ENEMY)                        -- same name but 6→78 jump ⇒ new instance → start over
@@ -376,4 +378,77 @@ test("ordinary health drops (and a tiny up-bounce) never restart or cast", funct
   AF.on_fight(50, ENEMY)                        -- drop
   AF.on_fight(53, ENEMY)                        -- +3 bounce (< new_target_jump) — still the same enemy
   expect(#AF.sent):eq(before)                   -- health ticks send NOTHING; no spurious opener
+end)
+
+-- ---- AOE / frostflower (crowd handling) ----------------------------------------------------------
+
+test("aoe 'on' frostflowers immediately — skips the single-target opener and probe", function()
+  AF.reset(); AF.state().aoe_mode = "on"
+  AF.on_fight(90, ENEMY)                       -- start → straight to AOE
+  expect(AF.sent[1]):eq("c frostflower")
+  AF.frostflower()                             -- landed → cast again (repeat)
+  expect(AF.sent[2]):eq("c frostflower")
+  expect(AF.aoe_active()):eq(true)
+end)
+
+test("aoe 'auto': single-target until a kill rolls onto another enemy, THEN frostflower", function()
+  AF.reset()                                   -- aoe_mode auto, pack false
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → c shards (probe)
+  expect(AF.sent[1]):eq("c tarrants")
+  expect(AF.sent[2]):eq("c shards")
+  AF.on_fight(72, "a crimson topaz")           -- rollover (no -1) ⇒ pack → restart in AOE
+  expect(AF.sent[1]):eq("c frostflower")       -- start_fight cleared sent; AOE skips opener/probe
+  expect(#AF.sent):eq(1)
+  expect(AF.aoe_active()):eq(true)
+end)
+
+test("aoe 'off' never AOEs, even after a pack rollover", function()
+  AF.reset(); AF.state().aoe_mode = "off"
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants, c shards
+  AF.on_fight(72, "a crimson topaz")           -- rollover → pack true, but AOE off
+  expect(AF.sent[1]):eq("c tarrants")          -- restarts single-target, not frostflower
+  expect(AF.aoe_active()):eq(false)
+end)
+
+test("pack belief resets when combat truly ends (kxwt -1)", function()
+  AF.reset()
+  AF.on_fight(90, ENEMY); AF.tarrants()
+  AF.on_fight(72, "a crimson topaz")           -- pack detected
+  expect(AF.state().pack):eq(true)
+  AF.on_fight_end()                            -- -1 → combat over
+  expect(AF.state().pack):eq(false)
+end)
+
+test("aoe 'auto': a look showing multiple enemies fighting flips to AOE WITHOUT a kill", function()
+  AF.reset()
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- single-target: c tarrants → c shards in flight
+  expect(AF.aoe_active()):eq(false)
+  AF.room_fighter("A dire ape")                -- look: one engaged hostile
+  expect(AF.aoe_active()):eq(false)            -- one enemy is not a pack
+  AF.room_fighter("A dire ape")                -- a SECOND engaged hostile (own line) → pack!
+  expect(AF.aoe_active()):eq(true)
+  expect(AF.state().phase):eq("aoe")           -- plan switched immediately (still busy on shards)
+  AF.shards()                                  -- the in-flight shards lands → next cast is AOE
+  expect(AF.sent[#AF.sent]):eq("c frostflower")
+end)
+
+test("room crowd-count ignores our own minions/self — only hostiles count", function()
+  AF.reset()
+  AF.on_fight(90, ENEMY); AF.tarrants()
+  state.name  = "Vaelith"
+  state.group = { { name = "A skeletal spider" }, { name = "Vaelith" } }
+  AF.room_fighter("A skeletal spider")         -- our minion fighting a mob — not an enemy
+  AF.room_fighter("Vaelith")                   -- ourself — not an enemy
+  expect(AF.aoe_active()):eq(false)
+  AF.room_fighter("A dire ape")                -- two real hostiles
+  AF.room_fighter("A crimson topaz")
+  expect(AF.aoe_active()):eq(true)
+  state.name, state.group = nil, nil
+end)
+
+test("a peaceful look (not fighting) never arms AOE", function()
+  AF.reset()                                   -- not fighting
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
+  expect(AF.aoe_active()):eq(false)
+  expect(AF.state().pack):eq(false)
 end)

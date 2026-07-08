@@ -44,11 +44,14 @@ local cfg = {
   soulsteal_pct   = 15,  -- enemy health % at/below which we switch to soulsteal ("nearly dead")
   new_target_jump = 20,  -- a health bar that jumps UP by >= this many points mid-combat = a NEW target
                          -- (a mob we're already fighting only trends down); triggers a fresh start
+  aoe_min         = 2,   -- >= this many engaged enemies (seen in the room, e.g. on a look) = a pack → AOE
+  room_burst      = 2,   -- seconds: window to tally a room-listing burst's "X is here, fighting Y" lines
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
   opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the one opener (see NOTE at top)
   shards_cmd       = "c shards",
   scorch_cmd       = "c scorch",
   soulsteal_cmd    = "c soulsteal",
+  aoe_cmd          = "c frostflower",-- room AOE, used instead of the single-target probe/nuke on a pack
   -- DORMANT: shower was the 2nd probe before scorch. Kept (with its landed trigger + hit_shower() below)
   -- so its wire strings survive for a future feature — mana-aware spell switching as we run low. The
   -- routine never casts it, so this string is unused today; nothing sends it.
@@ -79,6 +82,13 @@ F.opener_primed     = F.opener_primed or false
 F.on_dead           = F.on_dead or nil      -- called once when an engaged fight ends
 F.on_fail           = F.on_fail or nil      -- called if we can't get the opener to land
 F.soul_latched      = F.soul_latched or false  -- dormant soulsteal latched; keep nuking, don't re-cast it
+-- AOE (crowd) handling. `aoe_mode` is a preference that survives reload: "auto" uses frostflower once we
+-- know it's a pack, "on" always AOEs, "off" never does. `pack` is this-combat belief that there are
+-- multiple enemies — set when a kill rolls straight onto another target (no kxwt -1), cleared when
+-- combat truly ends. See aoe_active().
+F.aoe_mode          = F.aoe_mode or "auto"
+F.pack              = F.pack or false
+F.room_seen         = F.room_seen or 0      -- rolling tally of hostile "is here, fighting" room lines
 
 -- Command capture, always on (cheap, cleared each fight) so the test harness can read the exact send
 -- sequence without stubbing the host `send`. `_AF_TEST.sent` aliases this table.
@@ -176,13 +186,24 @@ cast = function(cmd, spell)
   af_send(cmd)
 end
 
+-- Should we AOE (frostflower the whole room) rather than single-target this fight? "on"/"off" force it;
+-- "auto" (default) AOEs once we believe we're in a pack (F.pack — set when a kill rolls straight onto
+-- another enemy; see on_fight). A single-target fight uses the normal tarrants→probe→nuke→soulsteal.
+local function aoe_active()
+  if F.aoe_mode == "on"  then return true  end
+  if F.aoe_mode == "off" then return false end
+  return F.pack                                       -- "auto"
+end
+
 -- Advance the phase to the next spell in the routine. (nuke stays nuke — keep nuking the winner;
--- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed".)
+-- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed";
+-- aoe stays aoe — keep frostflowering the pack until combat ends or the target rolls over.)
 local function next_phase()
   local p = F.phase
-  if     p == "tarrants"  then F.phase = F.known_winner and "nuke" or "shards"   -- known → skip the probe
+  if     p == "tarrants"  then F.phase = aoe_active() and "aoe" or (F.known_winner and "nuke" or "shards")
   elseif p == "shards"    then F.phase = "scorch"
   elseif p == "scorch"    then F.phase = "decide"
+  elseif p == "aoe"       then F.phase = "aoe"
   elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
   end
 end
@@ -209,6 +230,7 @@ fire = function()
   if     p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
   elseif p == "shards"                 then F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")
   elseif p == "scorch"                 then F.last_damage_spell = "scorch"; cast(cfg.scorch_cmd, "scorch")
+  elseif p == "aoe"                    then F.last_damage_spell = "aoe"; cast(cfg.aoe_cmd, "frostflower")
   elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
   elseif p == "soulsteal"              then cast(cfg.soulsteal_cmd, "soulsteal")
   end   -- "done"/"idle": nothing to send
@@ -245,10 +267,13 @@ local function start_fight(pct, name)
     F.winner, F.winner_spell = cfg[F.known_winner .. "_cmd"], F.known_winner
     say(string.format("%s known → %s (skipping probe)", key, F.known_winner))
   end
-  -- Phase: engage() may have already thrown the opener (opener_primed). The post-opener phase is the
-  -- nuke when we know the winner, otherwise the shards/scorch probe; a fresh fight opens with tarrants.
+  -- Phase: AOE (a pack) skips the single-target opener AND probe — we're already in combat, so go
+  -- straight to frostflower. Otherwise engage() may have already thrown the opener (opener_primed); the
+  -- post-opener phase is the nuke when we know the winner, else the shards/scorch probe; a fresh
+  -- single-target fight opens with tarrants.
   local post_opener = F.known_winner and "nuke" or "shards"
-  F.phase = F.opener_primed and post_opener or "tarrants"
+  if aoe_active() then F.phase = "aoe"
+  else F.phase = F.opener_primed and post_opener or "tarrants" end
   F.engaging, F.engage_busy, F.opener_primed = false, false, false
   F.busy, F.busy_spell = false, nil
   F.shards_drop, F.scorch_drop = 0, 0
@@ -272,6 +297,36 @@ local function end_fight()
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
 end
 
+-- We now believe there are multiple enemies. Remember it (F.pack) and, if we're already mid single-
+-- target fight, SWITCH to the AOE rotation immediately rather than waiting for a kill — set phase=aoe
+-- and cast now if we're free (otherwise the in-flight cast lands first, then next_phase keeps AOEing).
+-- No-op once already in pack mode.
+local function enter_pack_mode()
+  if F.pack then return end
+  F.pack = true
+  if F.on and F.fighting and aoe_active() then
+    F.phase = "aoe"
+    if not F.busy then fire() end
+  end
+end
+
+-- Count the enemies a room listing shows as engaged. On a `look` (or a room-entry auto-look) each
+-- creature present prints its OWN "<X> is here, fighting <Y>." line — so counting the lines whose
+-- SUBJECT is a hostile (not one of your minions/self) counts same-named packs that a name-keyed tracker
+-- can't. We tally within a short burst window (a look emits them all at once); >= cfg.aoe_min engaged
+-- hostiles ⇒ we're in a pack, switch to AOE right away. Only while WE'RE fighting, so a peaceful look
+-- can't arm it.
+local function note_room_fighter(subject)
+  if not F.on or not F.fighting then return end
+  if is_ally and is_ally(subject) then return end        -- our pet/self fighting a mob — not an enemy
+  F.room_seen = F.room_seen + 1
+  if F.room_seen >= cfg.aoe_min then enter_pack_mode() end
+  if F.room_burst_timer and cancel then cancel(F.room_burst_timer) end
+  F.room_burst_timer = after and after(cfg.room_burst, function()
+    F.room_seen, F.room_burst_timer = 0, nil
+  end) or nil
+end
+
 -- kxwt_fighting <pct> <gender> <name> — the enemy health bar. Combat start = not-fighting → fighting.
 -- A health-% change is BOTH a pacing resolution AND the winner-comparison signal: while a probe is the
 -- most-recent damage spell, any drop is credited to it (coarse — a straggler drop can misattribute, and
@@ -280,7 +335,7 @@ local function on_fight(pct, name)
   if not F.on then return end
   local was, prev, prevname = F.fighting, F.pct, F.name
   F.pct, F.name = pct, name
-  if not was then start_fight(pct, name); return end
+  if not was then start_fight(pct, name); return end   -- fresh engagement (pack persists if a look set it)
   -- Target changed mid-combat WITHOUT a kxwt_fighting -1: a mob died and we rolled straight onto the
   -- next, or an add grabbed us — the server never said "not fighting", so `was` is still true, but this
   -- is a NEW enemy. Start the routine over on it (fresh opener/probe; clears a stuck busy flag and any
@@ -290,6 +345,7 @@ local function on_fight(pct, name)
   -- Detected authoritatively from the health bar: the NAME changed, or it jumped UP past a regen margin
   -- (a target we're already on only trends down).
   if name ~= prevname or (prev and pct >= prev + cfg.new_target_jump) then
+    F.pack = true   -- a kill rolled straight onto another enemy (no -1) ⇒ we're in a pack → AOE in "auto"
     start_fight(pct, name); return
   end
   if prev and pct < prev then
@@ -304,6 +360,7 @@ end
 
 local function on_fight_end()
   local was_engaged_fight = F.fighting and F.on_dead
+  F.pack = false                                         -- combat truly over → next fight re-evaluates
   if F.fighting then end_fight() end
   -- The fight we started via engage() is over (mob dead or fled): fire on_dead exactly once. Guarded on
   -- was-fighting so a stray -1 while we're still trying to land the opener (F.engaging) doesn't resolve.
@@ -318,6 +375,7 @@ end
 -- same hit_*, so triggers and tests share one implementation.
 local function hit_shards()     succeed("shards")    end   -- "You create and magically throw white shards…"
 local function hit_scorch()     succeed("scorch")    end   -- "You throw an intense burst of <color> flames at <target>!"
+local function hit_frostflower() succeed("frostflower") end -- "Spiked flowers of ice quickly form on everything in a ring around you!"
 -- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so busy_spell is never "shower" and this
 -- succeed() always hits its guard and no-ops. Wired only to keep the "A shower of … sparks" string live.
 local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs <target>."
@@ -404,6 +462,8 @@ if trigger then
   -- scorch (replaced shower as the 2nd probe). Line from live play: "You throw an intense burst of
   -- yellow flames at <target>!" — the flame COLOUR varies, so wildcard it; ^ anchors out say-spoofs.
   trigger([[^You throw an intense burst of .* flames at ]], function() hit_scorch() end)
+  -- frostflower (room AOE) landed line — the whole-line message, ^…$ anchored against say-spoofs.
+  trigger([[^Spiked flowers of ice quickly form on everything in a ring around you!$]], function() hit_frostflower() end)
   -- DORMANT shower trigger (see cfg.shower_cmd / hit_shower): fires but no-ops, kept only so the string stays live.
   trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
   trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
@@ -411,6 +471,13 @@ if trigger then
   trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
   trigger([[^You fail to cast the spell]], function() hit_fail() end)
   trigger([[^.+ is DEAD!$]], function() hit_dead() end)
+  -- Crowd detection: a room listing prints one "<X> is here, fighting <Y>." per engaged creature. Count
+  -- the hostile subjects (note_room_fighter filters out our minions/self) — a look mid-fight now flips us
+  -- to AOE without waiting for a kill. ^-anchored; the subject is captured, the opponent wildcarded.
+  trigger([[^(.+) is here, fighting .+$]], function(_, subject) note_room_fighter(subject) end)
+  -- Leaving the room ends this crowd belief (a stationary fight never re-sends rvnum; combat-end -1 also
+  -- clears it). Fires BEFORE the new room's auto-look lines, so the fresh tally starts clean.
+  trigger([[^kxwt_rvnum ]], function() F.pack, F.room_seen = false, 0 end)
 end
 
 -- Observe typed input non-destructively by CHAINING the existing on_user_input (AIPilot defines one; we
@@ -426,6 +493,7 @@ local function status_line()
   local bits = string.format("%s · phase=%s", F.on and "ON" or "OFF", F.phase)
   if F.fighting then bits = bits .. string.format(" · %s %s%%", F.name or "?", tostring(F.pct or "?")) end
   if F.winner then bits = bits .. " · winner=" .. F.winner end
+  bits = bits .. " · aoe=" .. F.aoe_mode .. (aoe_active() and "*" or "")   -- * = AOE active right now
   if F.suspended then bits = bits .. " · SUSPENDED (manual)" end
   return "[autofight] " .. bits
 end
@@ -445,6 +513,24 @@ function autofight.off()
 end
 
 function autofight.status() if echo then echo(status_line()) end end
+
+-- aoe([mode]) — control room-AOE (frostflower) use. "auto" (default): AOE once a pack is detected (a
+-- kill that rolls straight onto another enemy); "on": always AOE; "off": never. No arg reports current.
+function autofight.aoe(mode)
+  mode = (mode or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if mode == "" then
+    say(string.format("AOE mode: %s%s", F.aoe_mode, aoe_active() and " (active now)" or ""))
+  elseif mode == "on" or mode == "off" or mode == "auto" then
+    F.aoe_mode = mode
+    say("AOE mode → " .. mode .. (mode == "auto" and " (frostflower once a pack is detected)" or ""))
+  else
+    say("usage: autofight aoe on|off|auto")
+  end
+end
+doc(autofight.aoe, { name = "autofight.aoe", sig = "autofight.aoe(['on'|'off'|'auto'])", group = "combat",
+  text = "Control room-AOE. In a pack the routine casts frostflower on repeat instead of the "
+      .. "single-target probe/nuke. 'auto' (default) switches to AOE once a kill rolls straight onto "
+      .. "another enemy (no combat break); 'on' always AOEs; 'off' never does. No arg reports the mode." })
 
 -- winners() — list the learned best-spell-per-target-name memory. forget([name]) — drop one learned
 -- entry (by name), or ALL of them when called with no name; both persist the change.
@@ -529,6 +615,7 @@ setmetatable(autofight, { __call = function(_, rest)
   verb = (verb or ""):lower()
   if verb == "on" then autofight.on()
   elseif verb == "off" then autofight.off()
+  elseif verb == "aoe" then autofight.aoe(arg)
   elseif verb == "winners" then autofight.winners()
   elseif verb == "forget" then autofight.forget(arg ~= "" and arg or nil)
   else autofight.status() end
@@ -546,6 +633,7 @@ _AF_TEST = {
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
   shards        = hit_shards,      scorch       = hit_scorch,      tarrants  = hit_tarrants,
+  frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
@@ -560,6 +648,7 @@ _AF_TEST = {
     F.on = true
     end_fight()
     F.self_sent = {}
+    F.aoe_mode, F.pack, F.room_seen = "auto", false, 0   -- hermetic: default AOE prefs, no pack carried over
     clear_sent()
     _AUTOFIGHT.winners = {}   -- hermetic tests: no learned winners bleeding across cases
   end,

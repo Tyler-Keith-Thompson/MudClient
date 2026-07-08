@@ -538,8 +538,9 @@ doc(active_opponents, { name = "active_opponents", sig = "active_opponents([now]
   text = "Inferred list of the OTHER mobs you're fighting (not the current kxwt_fighting target), health estimated from the condition ladder. Returns an array of {name, pct, est} newest-first; prunes entries older than 30s." })
 
 -- Is `name` you or one of your groupmates/minions (so a combat line about them is NOT an enemy)?
--- "you"/"You" (the melee lines' pronoun for yourself) counts, as does your kxwt_myname.
-local function is_ally(name)
+-- "you"/"You" (the melee lines' pronoun for yourself) counts, as does your kxwt_myname. Global (like
+-- engaged/active_opponents) so other scripts — e.g. AutoFight's crowd detection — can classify names.
+function is_ally(name)
   if not name then return false end
   local low = name:lower()
   if low == "you" then return true end
@@ -547,6 +548,9 @@ local function is_ally(name)
   for _, m in ipairs(state.group or {}) do if m.name:lower() == low then return true end end
   return false
 end
+doc(is_ally, { name = "is_ally", sig = "is_ally(name) -> bool", group = "combat",
+  text = "True when `name` is you (incl. the \"you\" pronoun / your kxwt_myname) or a current group "
+      .. "member/minion — i.e. a combat line about them is friendly, not an enemy sighting." })
 
 -- ---- "engaged" (fighting without kxwt_fighting) ------------------------------------------------
 -- PROVEN BY THE RAW LOGS: with `nocombat` (nomelee) toggled on, the server does NOT send kxwt_fighting
