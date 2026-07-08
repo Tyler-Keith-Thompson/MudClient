@@ -201,7 +201,7 @@ test("parse_shop_list: recognizes the not-at-a-shop message", function()
 end)
 
 test("shortlist_shop: keeps the wearable necklace, skips wands/scrolls", function()
-  local kept, skipped = shortlist_shop(parse_shop_list(SHOP), 8)
+  local kept, skipped = shortlist_shop(parse_shop_list(SHOP))
   expect(#kept):eq(1)
   expect(kept[1].name):eq("a soapstone necklace")
   expect(#skipped):eq(3)
@@ -245,13 +245,165 @@ test("parse_shop_list: donation room parses rows and flags donation (not no_shop
 end)
 
 test("shortlist_shop: donation wearables are all kept (headers are worn slots)", function()
-  local kept = shortlist_shop(parse_shop_list(DONATE), 8)
+  local kept = shortlist_shop(parse_shop_list(DONATE))
   expect(#kept):eq(4)
   expect(kept[1].name):eq("a crown of finger bones")
 end)
 
+-- A many-item, many-slot donation listing (trimmed from the real log) — the old shortlist kept the
+-- first N in listing order and never looked past the first slot or two.
+local BIG_DONATE = [[The following items are currently up for grabs:
+
+   Worn on head ---------------------------------------
+ R (lvl  12) a crown of finger bones
+ R (lvl  13) a broad copper headband
+ R (lvl  15) a bronze helm
+ R (lvl  18) a jet black helmet
+
+   Worn on wrists ---------------------------------------
+ R (lvl  12) a mystical blue band
+ R (lvl  15) a bone armguard
+ R (lvl  15) a jade bracelet edged in silver
+
+   Worn on fingers ---------------------------------------
+ R (lvl  15) a hematite ring
+ R (lvl  16) a finger-bone ring
+ R (lvl  18) a silver serpent ring
+
+   Worn on body ---------------------------------------
+ R (lvl  14) a nightforge black tunic
+ R (lvl  22) a charred steel breastplate]]
+
+test("shortlist_shop: round-robins across slots so no slot is starved", function()
+  local parsed = parse_shop_list(BIG_DONATE)
+  local kept = shortlist_shop(parsed, nil, 4)   -- ceiling 4, 4 slots → exactly one from EACH slot
+  expect(#kept):eq(4)
+  local slots = {}
+  for _, r in ipairs(kept) do slots[r.category] = (slots[r.category] or 0) + 1 end
+  expect(slots["Worn on head"]):eq(1)
+  expect(slots["Worn on wrists"]):eq(1)
+  expect(slots["Worn on fingers"]):eq(1)
+  expect(slots["Worn on body"]):eq(1)
+  -- round 1 takes the FIRST row of each slot in listing order
+  expect(kept[1].name):eq("a crown of finger bones")
+  expect(kept[4].name):eq("a nightforge black tunic")
+end)
+
+test("shortlist_shop: no ceiling → evaluates every fitting wearable, breadth-first", function()
+  local kept = shortlist_shop(parse_shop_list(BIG_DONATE))   -- no fit filter, no ceiling
+  expect(#kept):eq(12)                      -- all 12 wearable rows across the 4 slots (4+3+3+2)
+  -- ordered round-robin: the first 4 are one-per-slot (round 1), then a second per slot, …
+  expect(kept[1].name):eq("a crown of finger bones")
+  expect(kept[5].name):eq("a broad copper headband")   -- head's 2nd
+end)
+
+test("shortlist_shop: drops items whose level requirement the character can't meet", function()
+  local kept = shortlist_shop(parse_shop_list(BIG_DONATE), { level = 15, total = 30 })
+  local names = {}
+  for _, r in ipairs(kept) do names[r.name] = true end
+  expect(names["a jet black helmet"]):eq(nil)            -- lvl 18 > 15 → dropped
+  expect(names["a charred steel breastplate"]):eq(nil)   -- lvl 22 > 15 → dropped
+  expect(names["a silver serpent ring"]):eq(nil)         -- lvl 18 > 15 → dropped
+  expect(names["a crown of finger bones"]):eq(true)      -- lvl 12 → kept
+  expect(names["a bone armguard"]):eq(true)              -- lvl 15 → kept (== best class level)
+end)
+
+test("shortlist_shop: filters (tot N) items against the character's TOTAL levels", function()
+  local TOT = [[The following items are currently up for grabs:
+
+   Held ---------------------------------------
+ R (tot  49) a lapis lazuli orb
+ R (tot  25) a chameleon ring
+ R (lvl  12) a plain glass marble]]
+  -- total 30: "tot 49" is out of reach → dropped; "tot 25" is met → kept; the lvl-12 item is fine.
+  local kept = shortlist_shop(parse_shop_list(TOT), { level = 18, total = 30 })
+  local names = {}
+  for _, r in ipairs(kept) do names[r.name] = true end
+  expect(names["a lapis lazuli orb"]):eq(nil)            -- tot 49 > 30 → dropped
+  expect(names["a chameleon ring"]):eq(true)             -- tot 25 ≤ 30 → kept
+  expect(names["a plain glass marble"]):eq(true)         -- lvl 12 ≤ 18 → kept
+  -- with a higher total, the orb comes back
+  local kept2 = shortlist_shop(parse_shop_list(TOT), { level = 18, total = 60 })
+  local n2 = {}; for _, r in ipairs(kept2) do n2[r.name] = true end
+  expect(n2["a lapis lazuli orb"]):eq(true)              -- tot 49 ≤ 60 → kept
+end)
+
+-- ---- per-slot prompts (used when a shop is too big for one call) ----------------------------------
+test("slot_for_category maps shop categories to worn slots", function()
+  expect(E.slot_for_category("Worn on head")):eq("head")
+  expect(E.slot_for_category("Worn on wrists")):eq("wrist")
+  expect(E.slot_for_category("Worn on fingers")):eq("finger")
+  expect(E.slot_for_category("Worn on hands")):eq("hands")   -- plural slot preserved, not de-pluralized
+  expect(E.slot_for_category("Worn about body")):eq("about body")
+  expect(E.slot_for_category("Wielded")):eq("weapon")
+  expect(E.slot_for_category("Held")):eq("held")
+  expect(E.slot_for_category("Shields")):eq("shield")
+  expect(E.slot_for_category("Miscellaneous")):eq(nil)       -- unknown → nil (no current-worn match)
+end)
+
+test("build_slot_prompt scopes to one slot: its worn item + only that slot's candidates", function()
+  E.reset()
+  local items = {
+    { name = "a crown of finger bones", category = "Worn on head", free = true, level = 12, level_kind = "lvl" },
+    { name = "a bronze helm", category = "Worn on head", free = true, level = 15, level_kind = "lvl" },
+  }
+  local worn = { { slot = "head", name = "a horned imp-hide hood" }, { slot = "neck", name = "a white ocarina" } }
+  local _, user = E.build_slot_prompt({ name = "T", gold = 5 }, "Worn on head", items, worn)
+  expect(user:find("SLOT: Worn on head", 1, true) ~= nil):eq(true)
+  expect(user:find("a horned imp-hide hood", 1, true) ~= nil):eq(true)   -- current HEAD item shown
+  expect(user:find("a white ocarina", 1, true)):eq(nil)                  -- other-slot worn NOT shown
+  expect(user:find("a crown of finger bones", 1, true) ~= nil):eq(true)
+  expect(user:find("a bronze helm", 1, true) ~= nil):eq(true)
+  expect(user:find("FREE", 1, true) ~= nil):eq(true)
+  expect(user:find("THIS slot only", 1, true) ~= nil):eq(true)
+end)
+
+-- ---- ambiguous `list <kw>` → ordinal retry (the game demands "list 1.helm") -----------------------
+test("ambiguous_list_arg: picks the target's position among the shown matches", function()
+  -- `list helm` showed: 1) a bronze helm, 2) a jet black helmet (game stems helm→helmet)
+  local shown = { "a bronze helm", "a jet black helmet" }
+  expect(E.ambiguous_list_arg(shown, "a jet black helmet", "helm")):eq("2.helm")
+  expect(E.ambiguous_list_arg(shown, "a bronze helm", "helm")):eq("1.helm")
+  -- `list bones` showed: 1) a crown of finger bones, 2) a bone armguard
+  local shown2 = { "a crown of finger bones", "a bone armguard" }
+  expect(E.ambiguous_list_arg(shown2, "a crown of finger bones", "bones")):eq("1.bones")
+  -- target not among the shown matches → safe fallback to 1.<kw>
+  expect(E.ambiguous_list_arg(shown, "a death mask", "mask")):eq("1.mask")
+end)
+
+-- A shop/donation `list <item>` block: identify format, but NO "You are wearing/carrying/wielding"
+-- line (you don't own it), so parse_identify never learns the display name on its own.
+local SHOP_DETAIL = {
+  "Item: 'brown scarf strip cloth'",
+  "Weight: 1  Size: 1'0\"  Level: 17  Item Quality: WELL CRAFTED",
+  "Type: CLOTHING   Composition: TEXTILE, FABRIC",
+  "Wear locations are:  NECK",
+  "Affects:  DEX by 1",
+  "Affects:  SAVING_COLD by 5%",
+  "a brown scarf is WELL CRAFTED in quality.",
+  "<100hp 200m 90mv>",   -- prompt line: the hard boundary that finalizes a no-display-line block
+}
+
+test("shop detail binds to the listing name via id_expect (fixes shop 'unidentified')", function()
+  E.reset()
+  -- Without a binding, the block caches under the KEYWORD name — a lookup by the listing name misses.
+  E.feed_id_stream(SHOP_DETAIL)
+  expect(resolve_item("a brown scarf").status):eq("unknown")
+  -- With id_expect set to the listing name (what eq.shop now does before each `list <item>`), the same
+  -- block binds to "a brown scarf" and resolves as identified with its stats.
+  E.reset()
+  E.set_id_expect(E.norm_name("a brown scarf"))
+  E.feed_id_stream(SHOP_DETAIL)
+  local r = resolve_item("a brown scarf")
+  expect(r.status):eq("session")   -- identified THIS session (bound via id_expect), not "unknown"
+  expect(r.variant.level):eq(17)
+  local has_dex = false
+  for _, a in ipairs(r.variant.affects) do if a.stat == "DEX" then has_dex = true end end
+  expect(has_dex):eq(true)
+end)
+
 test("build_shop_prompt: donation items render FREE + TAKE/SKIP task", function()
-  local kept = shortlist_shop(parse_shop_list(DONATE), 8)
+  local kept = shortlist_shop(parse_shop_list(DONATE))
   local _, user = build_shop_prompt({ name = "Tester" }, {}, kept)
   expect(user:find("FREE", 1, true) ~= nil):eq(true)
   expect(user:find("DONATION room", 1, true) ~= nil):eq(true)

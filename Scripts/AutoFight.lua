@@ -4,15 +4,13 @@
 -- combat wire protocol with a fixed opener→probe→nuke→finish routine, opt-in and OFF by default.
 --
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
---   1. On COMBAT START:  cast earth wall  (once — a buff opener)
---   2.                    c tarrants       (once — a buff opener)
---   3. PROBE:            c shards (once) then c shower (once); compare how much each dropped the
---                        enemy's health %; the bigger drop WINS. (Coarse % heuristic — that's fine.)
---   4. NUKE:             keep casting the WINNER until the enemy is dead.
---   5. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
+--   1. PROBE:            on COMBAT START, cast c shards (once) then c shower (once); compare how much each
+--                        dropped the enemy's health %; the bigger drop WINS. (Coarse % heuristic — fine.)
+--   2. NUKE:             keep casting the WINNER until the enemy is dead.
+--   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
 --                        RESISTED, nuke once more with the winner then retry soulsteal — repeat until it
 --                        lands or the enemy dies.
---   6. SUSPEND:          any command the USER types (not one WE sent) suspends the script so they can
+--   4. SUSPEND:          any command the USER types (not one WE sent) suspends the script so they can
 --                        intervene; it resumes after cfg.resume_after seconds of no manual input, or when
 --                        the fight ends.
 --
@@ -22,9 +20,9 @@
 -- health bar (kxwt_fighting) updates several times a second and must NEVER trigger a cast — casting on
 -- every tick was the command-spam bug. Out-of-mana marks the spell and we WAIT (no retry, no spam).
 --
--- NOTE: earth wall's landed line is known; `c tarrants`'s is NOT yet, so tarrants is currently SKIPPED
--- (earthwall → shards) rather than risk stalling `busy` forever on a line we can't detect. Add its
--- success line to the triggers + next_phase to re-enable it.
+-- NOTE: the single opener is `c tarrants` (tarrant's spectral hand — its landed line is "An ethereal
+-- hand appears and attacks <target> from behind!", confirmed against the help corpus + a live log). The
+-- earlier earth-wall opener was removed by request.
 --
 -- Wire strings below are VERBATIM from the player's raw logs (mud_raw_copy.log / mud_raw_nomelee.log),
 -- not invented. See Scripts/tests/autofight_spec.lua, which replays a real Gnomian-guard fight.
@@ -42,8 +40,7 @@ local cfg = {
   resume_after  = 6,     -- seconds of no manual input before the script resumes after a user command
   soulsteal_pct = 15,    -- enemy health % at/below which we switch to soulsteal ("nearly dead")
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
-  opener_earthwall = "cast earth wall",
-  opener_tarrants  = "c tarrants",
+  opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the one opener (see NOTE at top)
   shards_cmd       = "c shards",
   shower_cmd       = "c shower",
   soulsteal_cmd    = "c soulsteal",
@@ -92,8 +89,7 @@ end
 -- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed".)
 local function next_phase()
   local p = F.phase
-  if     p == "earthwall" then F.phase = "shards"    -- TODO tarrants: skipped until we have its landed line
-  elseif p == "tarrants"  then F.phase = "shards"
+  if     p == "tarrants"  then F.phase = "shards"    -- opener landed → start the shards/shower probe
   elseif p == "shards"    then F.phase = "shower"
   elseif p == "shower"    then F.phase = "decide"
   elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
@@ -114,8 +110,7 @@ fire = function()
   end
   if F.phase == "nuke" and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct then F.phase = "soulsteal" end
   local p = F.phase
-  if     p == "earthwall"              then cast(cfg.opener_earthwall, "earthwall")
-  elseif p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
+  if     p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
   elseif p == "shards"                 then F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")
   elseif p == "shower"                 then F.last_damage_spell = "shower"; cast(cfg.shower_cmd, "shower")
   elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
@@ -146,7 +141,7 @@ end
 -- ---- fight lifecycle -----------------------------------------------------------------------------
 local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
-  F.phase = "earthwall"
+  F.phase = "tarrants"
   F.busy, F.busy_spell = false, nil
   F.shards_drop, F.shower_drop = 0, 0
   F.winner, F.winner_spell, F.last_damage_spell = nil, nil, nil
@@ -195,7 +190,7 @@ end
 -- same hit_*, so triggers and tests share one implementation.
 local function hit_shards()     succeed("shards")    end   -- "You create and magically throw white shards…"
 local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs…"
-local function hit_earthwall()  succeed("earthwall") end   -- "You drop to one knee… a protective wall!"
+local function hit_tarrants()   succeed("tarrants")  end   -- "An ethereal hand appears and attacks … from behind!"
 local function hit_resist()
   -- soulsteal resisting → re-nuke once, then retry soulsteal. A DAMAGE spell resisting is just a miss → retry.
   if F.busy and F.busy_spell == "soulsteal" then
@@ -251,7 +246,7 @@ if trigger then
   trigger([[^You cast the spell to separate soul from body]], function() hit_soulsteal_ok() end)
   trigger([[^You create and magically throw white shards of crystal at]], function() hit_shards() end)
   trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
-  trigger([[^You drop to one knee.*force the ground into a protective wall]], function() hit_earthwall() end)
+  trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
   trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
   trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
   trigger([[^You fail to cast the spell]], function() hit_fail() end)
@@ -279,7 +274,7 @@ autofight = {}
 
 function autofight.on()
   F.on = true
-  say("armed — earth wall → tarrants → shards/shower probe → nuke winner → soulsteal")
+  say("armed — tarrants → shards/shower probe → nuke winner → soulsteal")
   if F.fighting and not F.busy then fire() end
 end
 
@@ -292,10 +287,10 @@ end
 function autofight.status() if echo then echo(status_line()) end end
 
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
-  text = "Arm the deterministic auto-fight routine: on combat start it casts earth wall then tarrants "
-      .. "(once each), probes shards vs shower and keeps the harder-hitting one, then soulsteals when "
-      .. "the enemy is nearly dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by "
-      .. "default; any command YOU type suspends it briefly so you can intervene." })
+  text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes "
+      .. "shards vs shower and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
+      .. "dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by default; any command "
+      .. "YOU type suspends it briefly so you can intervene." })
 doc(autofight.off, { name = "autofight.off", sig = "autofight.off()", group = "combat",
   text = "Disarm the auto-fight routine and end any in-progress fight tracking." })
 doc(autofight.status, { name = "autofight.status", sig = "autofight.status()", group = "combat",
@@ -321,7 +316,7 @@ _AF_TEST = {
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
-  shards        = hit_shards,      shower       = hit_shower,      earthwall = hit_earthwall,
+  shards        = hit_shards,      shower       = hit_shower,      tarrants  = hit_tarrants,
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   soulsteal_ok  = hit_soulsteal_ok, dead        = hit_dead,
   expire_resume = function()

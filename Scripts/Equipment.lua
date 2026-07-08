@@ -41,7 +41,13 @@ local cfg = {
   -- (a smaller MoE) is untouched. Override with EQ_MODEL if yours is named differently.
   model = os.getenv("EQ_MODEL") or "qwen3.6-27b-mlx@8bit",
   look_wait = 1.0,   -- seconds to let a collector's rows arrive before the next step
-  shortlist_cap = 8, -- most shop rows we'll pull `list <item>` detail for
+  detail_ceiling = 1000, -- pure runaway backstop on `list <item>` detail pulls (NOT a shortlist cap):
+                         -- after dropping non-wearables/consumables/level-unmeetable rows we evaluate
+                         -- everything left. Set absurdly high so it never bites a real room; it only
+                         -- exists so a malformed/huge listing can't spam thousands of commands.
+  single_call_max = 12,  -- if this many items or fewer survive the filter, review them in ONE model
+                         -- call (fast, whole-loadout context). More than this and one call gets big/slow
+                         -- (and the local model starts timing out), so we SPLIT into a call per slot.
   id_gap = 0.4,      -- pause between auto-identify steps (be polite to the game/server)
   id_timeout = 4.0,  -- give up on one identify block if no result parses in this long
   id_combat_retry = 2.0, -- how often to re-check for combat-clear while the id pass is paused
@@ -442,21 +448,64 @@ local function is_consumable(name)
   for _, kw in ipairs(CONSUMABLE_KW) do if n:find(kw, 1, true) then return true end end
   return false
 end
-local function shortlist_shop(parsed, cap)
-  cap = cap or 8
-  local kept, skipped = {}, {}
+-- Shortlist the wearable/wieldable rows worth pulling detail for. This is a FILTER, not a cap: it drops
+-- what definitely can't be used — non-wearable categories, consumables, and items whose level
+-- requirement the character can't meet. Both requirement kinds the listing gives us are checked: a
+-- `(lvl N)` against the character's highest class level, and a `(tot N)` against their TOTAL levels
+-- (summed across classes — e.g. "tot 49" needs 49 combined). It does NOT judge class/alignment fit —
+-- that needs the identify block, so those pass through to the model.
+--
+-- What survives is ordered ROUND-ROBIN across slots (one per slot, then a second per slot, …) so if the
+-- safety `ceiling` is ever hit it's breadth — not "the first slot, 40 times." fit = { level=, total= }
+-- (character's max class level + total levels); nil (or a nil field) skips that part of the filter.
+-- Returns kept, skipped.
+local function shortlist_shop(parsed, fit, ceiling)
+  ceiling = ceiling or math.huge
+  local function unfit(r)
+    if not (fit and r.level) then return false end
+    if r.level_kind == "tot" then return fit.total ~= nil and r.level > fit.total   -- total-levels req
+    else return fit.level ~= nil and r.level > fit.level end                          -- primary level req
+  end
+  local buckets, order, skipped = {}, {}, {}
   for _, r in ipairs(parsed.rows or {}) do
     local cat = (r.category or ""):lower()
-    local worn = cat:find("worn") or cat:find("wield")
-    if not worn and is_consumable(r.name) then
+    local wearable = cat:find("worn") or cat:find("wield") or cat:find("held") or cat:find("shield")
+    if not wearable or is_consumable(r.name) or unfit(r) then
       skipped[#skipped + 1] = r
-    elseif #kept < cap then
-      kept[#kept + 1] = r
     else
-      skipped[#skipped + 1] = r
+      local key = r.category or "?"
+      if not buckets[key] then buckets[key] = {}; order[#order + 1] = key end
+      local b = buckets[key]; b[#b + 1] = r
     end
   end
+  local kept, round = {}, 1
+  while #kept < ceiling do
+    local added = false
+    for _, key in ipairs(order) do
+      local r = buckets[key][round]
+      if r and #kept < ceiling then kept[#kept + 1] = r; added = true end
+    end
+    if not added then break end
+    round = round + 1
+  end
+  local keptset = {}
+  for _, r in ipairs(kept) do keptset[r] = true end
+  for _, key in ipairs(order) do
+    for _, r in ipairs(buckets[key]) do if not keptset[r] then skipped[#skipped + 1] = r end end
+  end
   return kept, skipped
+end
+
+-- Given the ORDERED item names the game showed for an ambiguous `list <kw>` ("you must give the item
+-- number") and our target's display name, return the ordinal `list` argument ("2.helm"). The game
+-- numbers the shown matches from 1 in display order. Falls back to "1.<kw>" if the target isn't found.
+-- Pure/testable — the reactive retry in the detail phase calls this.
+local function ambiguous_list_arg(shown, target, kw)
+  local t = norm_name(target)
+  for i, nm in ipairs(shown or {}) do
+    if norm_name(nm) == t then return i .. "." .. kw end
+  end
+  return "1." .. kw
 end
 
 -- ---- prompt building (pure) ----------------------------------------------------------------------
@@ -604,6 +653,53 @@ local function build_shop_prompt(char, worn, kept)
     u[#u + 1] = "You have " .. (char.gold and (char.gold .. " gold") or "unknown gold")
       .. ". For each shop item say BUY or SKIP with one line why."
   end
+  return EQ_SHOP_SYS, table.concat(u, "\n")
+end
+
+-- Map a shop CATEGORY header ("Worn on wrists") to the worn-equipment SLOT key parse_eq_line uses
+-- ("wrist"), so a per-slot prompt can show what you currently wear there. Plurals and the odd "worn
+-- about body" are handled explicitly (naive de-pluralizing would break hands/ears/arms). nil for an
+-- unrecognized category (the prompt then just omits a current item). Pure/testable.
+local CAT_SLOT = {
+  head = "head", neck = "neck", arms = "arms", wrists = "wrist", hands = "hands", fingers = "finger",
+  waist = "waist", legs = "legs", feet = "feet", back = "back", ears = "ears", eyes = "eyes",
+  face = "face", body = "body", ["about body"] = "about body", held = "held", shields = "shield",
+  wielded = "weapon", ["one handed weapon"] = "weapon", ["two handed weapon"] = "weapon",
+  floating = "floating",
+}
+local function slot_for_category(cat)
+  local c = (cat or ""):lower():gsub("^worn on ", ""):gsub("^worn ", "")
+  return CAT_SLOT[c]
+end
+
+-- Build a prompt for ONE slot: the character sheet, what they wear in that slot right now, and only
+-- that slot's candidate items. Used when a shop has too many items to review in a single call — small
+-- focused context per slot keeps the local model fast and sharp. Pure. Returns system, user.
+local function build_slot_prompt(char, category, items, worn)
+  local slot = slot_for_category(category)
+  local u = { "=== CHARACTER ===", char_sheet_lines(char),
+              "\n=== SLOT: " .. tostring(category) .. " ===", "\n--- WHAT YOU WEAR HERE NOW ---" }
+  local any, donation = false, false
+  for _, w in ipairs(worn or {}) do
+    if slot and w.slot == slot then
+      u[#u + 1] = describe_item_for_prompt(w.name, char, w.flags); any = true
+    end
+  end
+  if not any then u[#u + 1] = "(nothing worn in this slot)" end
+  u[#u + 1] = "\n--- AVAILABLE HERE ---"
+  for _, r in ipairs(items or {}) do
+    local info = describe_item_for_prompt(r.name, char):gsub("^%- ", "")
+    local cost = r.free and "FREE" or (tostring(r.price or "?") .. " gold")
+    local req = (r.level_kind == "tot") and ("tot lvl " .. tostring(r.level))
+                or ("shop lvl " .. tostring(r.level or "?"))
+    if r.free then donation = true end
+    u[#u + 1] = string.format("- [%s] (%s) %s", cost, req, info)
+  end
+  u[#u + 1] = "\n=== TASK ==="
+  u[#u + 1] = donation
+    and "DONATION room — items are FREE. For THIS slot only, say TAKE or SKIP per item (one line why), then name the single best piece to wear here (or 'keep current')."
+    or ("For THIS slot only, say BUY or SKIP per item (one line why), then the best pick (or 'keep current'). You have "
+        .. (char.gold and (char.gold .. " gold") or "unknown gold") .. ".")
   return EQ_SHOP_SYS, table.concat(u, "\n")
 end
 
@@ -1085,28 +1181,96 @@ local function finish_shop()
   local parsed = parse_shop_list(table.concat(S.shop.rows_text, "\n"))
   if parsed.no_shop then echo("[eq] you're not at a shop (no shopkeeper/donation/priest/guildmaster here).", "yellow"); return end
   if #parsed.rows == 0 then echo("[eq] nothing listed here to buy.", "yellow"); return end
-  local kept, skipped = shortlist_shop(parsed, cfg.shortlist_cap)
-  echo(string.format("[eq] shop: %d items, shortlisted %d, skipped %d (consumables/overflow).",
-    #parsed.rows, #kept, #skipped), "cyan")
+  -- The character's level fit from the tracked classes: highest class level (for `(lvl N)` reqs) and
+  -- total levels (for `(tot N)`). Nil when we have no class data, which just skips the level filter.
+  local char = char_from_state()
+  local fit
+  if char and char.classes and next(char.classes) then
+    local maxl, tot = 0, 0
+    for _, lv in pairs(char.classes) do maxl = math.max(maxl, lv or 0); tot = tot + (lv or 0) end
+    fit = { level = maxl, total = tot }
+  end
+  local kept, skipped = shortlist_shop(parsed, fit, cfg.detail_ceiling)
+  local fitnote = fit and string.format(" (fit: ≤ lvl %d, ≤ tot %d)", fit.level, fit.total) or ""
+  echo(string.format("[eq] shop: %d items · evaluating %d wearable%s · skipped %d (consumables/too-high-level).",
+    #parsed.rows, #kept, fitnote, #skipped), "cyan")
+  if #kept >= cfg.detail_ceiling then
+    echo(string.format("[eq] hit the %d-item safety ceiling — raise cfg.detail_ceiling to look at more.", cfg.detail_ceiling), "yellow")
+  end
   if #kept == 0 then echo("[eq] no wearable/wieldable upgrades to evaluate here.", "yellow"); return end
   S.shop.kept = kept
-  local function ask_model()
+  -- One call when the model can handle the whole loadout quickly; SPLIT into a call per slot when there
+  -- are too many items (a big single prompt is slow and the local model starts timing out).
+  local function ask_single()
     if EPOCH ~= _EQUIP.epoch then return end
     local sys, user = build_shop_prompt(char_from_state(), current_worn(), kept)
     echo("[eq] asking " .. cfg.model .. (parsed.donation and " what's worth grabbing…" or " what's worth buying…"), "cyan")
     run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan") end)
   end
-  -- Donation rooms don't answer `list <item>` (that's a priced-shop command) — pulling detail there
-  -- just spams "not for sale". Go straight to the model with names + level reqs; a real shop still
-  -- pulls per-item identify detail (passively ingested) before asking.
-  if parsed.donation then ask_model(); return end
-  local function detail(i)
+  local function ask_per_slot()
     if EPOCH ~= _EQUIP.epoch then return end
-    if i > #kept then ask_model(); return end
-    send("list " .. first_kw(kept[i].name))
-    after(cfg.look_wait, function() detail(i + 1) end)
+    local groups, order = {}, {}
+    for _, r in ipairs(kept) do
+      local c = r.category or "?"
+      if not groups[c] then groups[c] = {}; order[#order + 1] = c end
+      groups[c][#groups[c] + 1] = r
+    end
+    local ch, worn = char_from_state(), current_worn()
+    echo(string.format("[eq] %d items across %d slots — too many for one pass, reviewing a slot at a time…",
+      #kept, #order), "cyan")
+    local function do_slot(i)
+      if EPOCH ~= _EQUIP.epoch then return end
+      if i > #order then echo("[eq] shop review complete.", "cyan"); return end
+      local cat = order[i]
+      echo("[eq] " .. cat .. " —", "cyan")
+      local sys, user = build_slot_prompt(ch, cat, groups[cat], worn)
+      run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan"); do_slot(i + 1) end)
+    end
+    do_slot(1)
   end
-  detail(1)
+  local function ask_model()
+    if #kept <= cfg.single_call_max then ask_single() else ask_per_slot() end
+  end
+  -- Pull `list <item>` detail for each shortlisted row (identify-format, passively ingested into the
+  -- cache) so the model reasons about real stats — donation rooms answer `list <item>` too.
+  --
+  -- Two wrinkles this handles:
+  --  * Shop/donation items aren't owned, so their `list <item>` block has NO "You are wearing/carrying/
+  --    wielding …" line — parse_identify can't learn the display name and would cache under the keyword
+  --    name ("brown scarf strip cloth"), so a lookup by the listing name ("a brown scarf") misses and
+  --    the item reads "unidentified". We bind the block to the exact listing name via S.id_expect.
+  --  * A keyword can be AMBIGUOUS ("list helm" matches "a bronze helm" AND "a jet black helmet"); the
+  --    game then refuses and lists the matches, demanding "list 1.helm". We collect those shown matches
+  --    and resend `list <N>.<kw>` for our exact target (ambiguous_list_arg).
+  local retried = false
+  local function pull(i)
+    if EPOCH ~= _EQUIP.epoch then return end
+    if i > #kept then
+      if class_remove then class_remove("eqdetail") end
+      ask_model(); return
+    end
+    S.shop.cur = kept[i]; S.shop.dis = {}; retried = false
+    S.id_expect = norm_name(kept[i].name)
+    send("list " .. first_kw(kept[i].name))
+    after(cfg.look_wait, function() pull(i + 1) end)
+  end
+  -- Detail-phase observer: gather the match names the game shows, and on the "give the item number"
+  -- prompt resend the current target as an ordinal. (The item detail itself is folded in by the
+  -- always-on id-capture; this trigger only handles disambiguation.)
+  trigger([[.*]], function(line)
+    if not (S.shop and S.shop.cur) then return end
+    local L = strip_ansi(line)
+    local r = parse_shop_row(L)
+    if r and r.name and S.shop.dis then S.shop.dis[#S.shop.dis + 1] = r.name end
+    if not retried and L:find("must give the item number", 1, true) then
+      retried = true
+      local cur = S.shop.cur
+      local arg = ambiguous_list_arg(S.shop.dis, cur.name, first_kw(cur.name))
+      S.id_expect = norm_name(cur.name)
+      send("list " .. arg)
+    end
+  end, { class = "eqdetail" })
+  pull(1)
 end
 
 -- Is this a pager "more" prompt? Long listings (donation rooms, big shops) pause with e.g.
@@ -1226,10 +1390,13 @@ _EQ_TEST = {
   parse_shop_row = parse_shop_row,
   parse_shop_list = parse_shop_list,
   shortlist_shop = shortlist_shop,
+  ambiguous_list_arg = ambiguous_list_arg,
   is_consumable = is_consumable,
   looks_like_container = looks_like_container,
   build_compare_prompt = build_compare_prompt,
   build_shop_prompt = build_shop_prompt,
+  build_slot_prompt = build_slot_prompt,
+  slot_for_category = slot_for_category,
   variant_stats_str = variant_stats_str,
   norm_name = norm_name,
   first_kw = first_kw,

@@ -23,17 +23,16 @@ local function expect_seq(got, want)
   end
 end
 
--- Get to "c shards in flight": start the fight (casts earth wall), land earth wall → shards. (tarrants
--- is skipped until we have its landed line.)
+-- Get to "c shards in flight": start the fight (casts the tarrants opener), land tarrants → shards.
 local function to_shards()
   AF.reset()
-  AF.on_fight(90, ENEMY)   -- combat start → "cast earth wall"
-  AF.earthwall()           -- earth wall LANDED → "c shards"
+  AF.on_fight(90, ENEMY)   -- combat start → "c tarrants"
+  AF.tarrants()            -- tarrants LANDED → "c shards"
 end
 
 -- ---- (a) full fight command sequence -------------------------------------------------------------
-test("full fight: earth wall → shards/shower probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
-  to_shards()                        -- sent: cast earth wall, c shards
+test("full fight: tarrants → shards/shower probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
+  to_shards()                        -- sent: c tarrants, c shards
   AF.on_fight(70, ENEMY)             -- shards Δ20 — a % change NEVER casts
   AF.shards()                        -- shards LANDED → "c shower"
   AF.on_fight(65, ENEMY)             -- shower Δ5
@@ -48,7 +47,7 @@ test("full fight: earth wall → shards/shower probe → nuke winner → soulste
   AF.dead()                          -- enemy dead → fight ends
 
   expect_seq(seq(), {
-    "cast earth wall",
+    "c tarrants",
     "c shards", "c shower",                          -- probes
     "c shards", "c shards", "c shards", "c shards",  -- winner nuked (65→50→35→20→10)
     "c soulsteal",                                   -- finish attempt
@@ -97,18 +96,18 @@ test("a FAILED cast retries the SAME spell (not the next)", function()
 end)
 
 test("an opener that keeps failing is given up after max_tries — never stalls", function()
-  AF.reset(); AF.on_fight(90, ENEMY)       -- "cast earth wall"
+  AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants"
   for _ = 1, AF.cfg.max_tries do AF.fail() end   -- fizzles max_tries times (each after a fail line)
-  expect(AF.sent[#AF.sent]):eq("c shards")       -- gave up on earth wall, moved on
+  expect(AF.sent[#AF.sent]):eq("c shards")       -- gave up on tarrants, moved on
 end)
 
 -- ---- (d) manual-input suspend --------------------------------------------------------------------
 test("suspend: a user-typed command halts sends until the resume window", function()
-  AF.reset(); AF.on_fight(90, ENEMY)       -- "cast earth wall" (busy)
+  AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants" (busy)
   expect(#AF.sent):eq(1)
   AF.on_input("kick guard")                -- the USER intervenes
   expect(AF.state().suspended):eq(true)
-  AF.earthwall()                           -- earth wall lands, but suspended → no "c shards"
+  AF.tarrants()                            -- tarrants lands, but suspended → no "c shards"
   expect(#AF.sent):eq(1)
   AF.expire_resume()                       -- resume window elapses
   expect(AF.state().suspended):eq(false)
@@ -117,8 +116,8 @@ test("suspend: a user-typed command halts sends until the resume window", functi
 end)
 
 test("suspend: our OWN sends echoing back do NOT suspend", function()
-  AF.reset(); AF.on_fight(90, ENEMY)       -- we send "cast earth wall"
-  AF.on_input("cast earth wall")           -- its echo returns through the input observer
+  AF.reset(); AF.on_fight(90, ENEMY)       -- we send "c tarrants"
+  AF.on_input("c tarrants")                -- its echo returns through the input observer
   expect(AF.state().suspended):eq(false)
 end)
 
