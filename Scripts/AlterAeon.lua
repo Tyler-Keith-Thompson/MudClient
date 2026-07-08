@@ -1187,15 +1187,25 @@ doc("recover", { sig = "recover([pct]) -> promise", group = "combat",
 -- Aliases: `state` dumps the snapshot; `recover` rests/sleeps until ready, then auto-stands.
 alias([[^state$]], function() echo(describe_state()) end)
 -- `recover` — sit/sleep to heal and STAND automatically once every vital is back to 90%+ (the auto-stand
--- lives in the kxwt_prompt trigger, which watches ready()). Typing `recover` again cancels; if you're
--- already recovered it just says so. choose_recovery_position picks rest vs sleep for the situation.
+-- lives in the kxwt_prompt trigger, which watches ready()). choose_recovery_position picks rest vs sleep
+-- for the situation. Typing `recover` again while already recovering is a NO-OP (just echoes) — it does
+-- NOT stop and does NOT re-send a posture command, so you can change your mind and follow up with
+-- `recover | explore` without a stray cancel racing it. Use `recover off` to actually stop.
 alias([[^recover$]], function()
   if state.recover then
-    echo("Ending recovery."); end_recovery(false, "cancelled")
+    echo("Already recovering — 'recover off' to stop.")
   elseif ready() then
     echo("Already recovered — all vitals at 90%+.")
   else
     begin_recovery(READY_PCT)
+  end
+end)
+-- `recover off` — the only way to end an in-progress recovery (bare `recover` no longer toggles).
+alias([[^recover off$]], function()
+  if state.recover then
+    echo("Ending recovery."); end_recovery(false, "cancelled")
+  else
+    echo("Not recovering.")
   end
 end)
 

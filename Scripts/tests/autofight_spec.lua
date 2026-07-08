@@ -346,3 +346,34 @@ test("forget(name) drops one entry; forget() clears all", function()
   autofight.forget()                       -- clear all
   expect(next(AF.winners())):eq(nil)
 end)
+
+-- ---- target change mid-combat WITHOUT a kxwt -1 (the "rolled onto the next mob" bug) --------------
+
+-- start_fight clear_sent()s for a clean per-fight sequence, so after a restart AF.sent holds ONLY the
+-- new fight: exactly the fresh opener. (#==1 distinguishes a real restart from "no restart, stale scorch
+-- still the last thing sent".)
+test("a NAME change mid-combat (no -1) starts the routine over on the new enemy", function()
+  to_shards()                                  -- c tarrants, c shards; probing ENEMY
+  AF.on_fight(70, ENEMY); AF.shards()          -- → c scorch (mid-probe, scorch in flight)
+  AF.on_fight(72, "a crimson topaz")           -- DIFFERENT target, no -1 → start over
+  expect(AF.sent[1]):eq("c tarrants")          -- fresh opener on the new enemy
+  expect(#AF.sent):eq(1)
+end)
+
+test("a health bar that jumps UP (same name, new instance) also starts over", function()
+  to_shards()                                  -- c tarrants, c shards
+  AF.on_fight(70, ENEMY); AF.shards()          -- c scorch
+  AF.on_fight(6, ENEMY)                         -- previous ape nearly dead
+  AF.on_fight(78, ENEMY)                        -- same name but 6→78 jump ⇒ new instance → start over
+  expect(AF.sent[1]):eq("c tarrants")
+  expect(#AF.sent):eq(1)
+end)
+
+test("ordinary health drops (and a tiny up-bounce) never restart or cast", function()
+  to_shards()                                  -- c tarrants, c shards
+  local before = #AF.sent
+  AF.on_fight(70, ENEMY)                        -- drop
+  AF.on_fight(50, ENEMY)                        -- drop
+  AF.on_fight(53, ENEMY)                        -- +3 bounce (< new_target_jump) — still the same enemy
+  expect(#AF.sent):eq(before)                   -- health ticks send NOTHING; no spurious opener
+end)

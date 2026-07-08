@@ -39,9 +39,11 @@ local cfg = {
   -- until we see that SPELL's own success line (it LANDED) or a failure line (retry). The enemy
   -- health-bar (kxwt_fighting) updates many times a second and must NEVER trigger a cast — that was
   -- the spam bug. There is no timeout.
-  max_tries     = 4,     -- consecutive failures on one spell before we give up on it and move on
-  resume_after  = 6,     -- seconds of no manual input before the script resumes after a user command
-  soulsteal_pct = 15,    -- enemy health % at/below which we switch to soulsteal ("nearly dead")
+  max_tries       = 4,   -- consecutive failures on one spell before we give up on it and move on
+  resume_after    = 6,   -- seconds of no manual input before the script resumes after a user command
+  soulsteal_pct   = 15,  -- enemy health % at/below which we switch to soulsteal ("nearly dead")
+  new_target_jump = 20,  -- a health bar that jumps UP by >= this many points mid-combat = a NEW target
+                         -- (a mob we're already fighting only trends down); triggers a fresh start
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
   opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the one opener (see NOTE at top)
   shards_cmd       = "c shards",
@@ -276,9 +278,20 @@ end
 -- that's explicitly acceptable).
 local function on_fight(pct, name)
   if not F.on then return end
-  local was, prev = F.fighting, F.pct
+  local was, prev, prevname = F.fighting, F.pct, F.name
   F.pct, F.name = pct, name
   if not was then start_fight(pct, name); return end
+  -- Target changed mid-combat WITHOUT a kxwt_fighting -1: a mob died and we rolled straight onto the
+  -- next, or an add grabbed us — the server never said "not fighting", so `was` is still true, but this
+  -- is a NEW enemy. Start the routine over on it (fresh opener/probe; clears a stuck busy flag and any
+  -- manual-input suspend) instead of nuking the corpse's leftover phase or stalling forever waiting on a
+  -- landed line that will never come. This is the fix for "killed one, rolled onto the last, autofight
+  -- froze": it no longer depends on the (AOE-ambiguous, sometimes-missed) DEAD line to notice the swap.
+  -- Detected authoritatively from the health bar: the NAME changed, or it jumped UP past a regen margin
+  -- (a target we're already on only trends down).
+  if name ~= prevname or (prev and pct >= prev + cfg.new_target_jump) then
+    start_fight(pct, name); return
+  end
   if prev and pct < prev then
     local d = prev - pct
     if     F.last_damage_spell == "shards" then F.shards_drop = F.shards_drop + d
