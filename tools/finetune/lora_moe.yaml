@@ -1,0 +1,87 @@
+# ============================================================================
+# Attention-only QLoRA config for the Qwen3.6-35B-A3B MoE base (arch qwen3_5_moe)
+# ============================================================================
+# WHY THIS FILE EXISTS
+# --------------------
+# LoRA-tuning this MoE 4-bit base with the plain CLI (no config) reliably OOMs
+# (Metal kIOGPUCommandBufferCallbackErrorOutOfMemory) on the FIRST backward pass
+# — Iter-1 validation forward succeeds, then the first grad step dies. It failed
+# 4x across --num-layers 16/8, --max-seq 2048/2304, --grad-checkpoint, batch 1,
+# and even after raising iogpu.wired_limit_mb to 112 GB.
+#
+# ROOT CAUSE (verified in mlx_lm 0.31.3 source):
+#   mlx_lm/tuner/utils.py :: linear_to_lora_layers() has NO per-architecture
+#   default target set. When `lora_parameters.keys` is absent it AUTO-DISCOVERS
+#   *every* Linear/QuantizedLinear/SwitchLinear/QuantizedSwitchLinear/Embedding
+#   module in each of the last `num_layers` decoder blocks and attaches an
+#   adapter to all of them. For qwen3_5_moe that set includes:
+#       mlp.switch_mlp.gate_proj / up_proj / down_proj   <-- 256 experts each!
+#       mlp.shared_expert.{gate,up,down}_proj, mlp.gate, mlp.shared_expert_gate
+#   The switch_mlp linears are QuantizedSwitchLinear tensors holding all 256
+#   experts (this is where ~90% of the 35B params live). --num-layers only caps
+#   HOW MANY layers get LoRA — it does NOT stop the per-layer expert explosion.
+#   The Iter-1 backward has to build gradients through those dequantized 256-way
+#   expert slabs (LoRASwitchLinear), and that VJP + dequant temporaries blow the
+#   wired limit. The dense 27B base has no experts, so the same flags fit fine.
+#
+# THE FIX (config only — NO library patch needed):
+#   Set `lora_parameters.keys` explicitly. linear_to_lora_layers() honors it and
+#   SKIPS auto-discovery, so adapters land ONLY on the attention / token-mixing
+#   projections below. The MoE experts stay FROZEN and quantized — mx.grad never
+#   differentiates them, so the expensive expert-weight-gradient path is never
+#   built and no dequantized expert grad temporaries are materialized.
+#
+# MODULE NAMES (layer-relative paths, exactly as l.named_modules() yields them;
+# `k in keys` is matched against these — see tuner/utils.py):
+#   - Softmax-attention layers (every 4th: idx 3,7,...,39, full_attention_interval=4):
+#         self_attn.q_proj / k_proj / v_proj / o_proj      (nn.Linear -> QuantizedLinear)
+#   - Linear-attention layers (the other 30, GatedDeltaNet token mixer):
+#         linear_attn.in_proj_qkv / in_proj_z / in_proj_b / in_proj_a / out_proj
+#   Every one of the 40 layers also has an MoE `mlp.*` block — DELIBERATELY OMITTED.
+# ============================================================================
+
+model: "/Users/tylerthompson/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit"
+train: true
+fine_tune_type: lora
+data: "/Users/tylerthompson/workspace/MudClient/tools/finetune/data-combined-short"
+
+# --- proven flags carried over from run_train_35b.sh ---
+batch_size: 1
+# num_layers 16 is SAFE now that experts are excluded (the OOM was expert grads,
+# not attention grads). Was forced down to 8 only to fight the expert explosion.
+# -1 (all 40 layers) is also expected to fit attention-only; 16 is the tested-safe pick.
+num_layers: 16
+iters: 600
+# max-seq 1024: data-combined-short uses a compact 154-tok system prompt, so rows are
+# ~720 tokens (max 833). 1024 fits every row intact. Short sequences ALSO cap attention
+# backward memory (the dense-27B OOM on 2026-07-06 was long ~2174-tok rows, quadratic
+# attention grads) — belt-and-suspenders with the attention-only expert exclusion below.
+max_seq_length: 1024
+grad_checkpoint: true
+
+steps_per_report: 10
+steps_per_eval: 200
+save_every: 100
+adapter_path: "/Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe"
+
+# ============================================================================
+# LoRA target selection — ATTENTION ONLY. This is the whole fix.
+# Omit every mlp.* key so the 256-expert switch_mlp / shared_expert / gates are
+# NEVER wrapped in an adapter and stay frozen.
+# ============================================================================
+lora_parameters:
+  rank: 8
+  scale: 20.0
+  dropout: 0.0
+  keys:
+    # softmax-attention layers (idx 3,7,11,...,39)
+    - "self_attn.q_proj"
+    - "self_attn.k_proj"
+    - "self_attn.v_proj"
+    - "self_attn.o_proj"
+    # linear-attention (GatedDeltaNet) layers — the other 30 of 40
+    - "linear_attn.in_proj_qkv"
+    - "linear_attn.in_proj_z"
+    - "linear_attn.in_proj_b"
+    - "linear_attn.in_proj_a"
+    - "linear_attn.out_proj"

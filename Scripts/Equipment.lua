@@ -388,10 +388,24 @@ end
 --   Item:     "[    28] (lvl   0) a wand of scorch"                             -> {price=28,level=0,name=...}
 local function parse_shop_row(line)
   local L = strip_ansi(line)
+  -- Priced shop category: "[  Price] Worn on neck ------------"
   local cat = L:match("^%[%s*Price%]%s*(.-)%s*%-%-%-")
   if cat then return { category = trim(cat) } end
+  -- Priced shop item: "[    28] (lvl   0) a wand of scorch"
   local price, lvl, name = L:match("^%[%s*(%d+)%]%s*%(lvl%s*(%d+)%)%s*(.+)$")
   if price then return { price = tonumber(price), level = tonumber(lvl), name = trim(name) } end
+  -- Donation / "up for grabs" room category: "   Worn on head ------------------" (no price bracket,
+  -- a run of 4+ trailing dashes). Must be tried AFTER the priced forms (those start with '[').
+  local dcat = L:match("^%s*([%a][%a '/&%-]-)%s*%-%-%-%-+%s*$")
+  if dcat then return { category = trim(dcat) } end
+  -- Donation item: " R (lvl  12) a crown of finger bones"  or  " R (tot  42) a ... necklace". A flag
+  -- column (R = restrung/restricted etc.), then a level OR total-levels requirement, then the name.
+  -- These are FREE (no price), so mark them so the shortlist/prompt treat cost as zero.
+  local flag, kind, num, dname = L:match("^%s*(%a?)%s*%(%s*(%a+)%s*(%d+)%s*%)%s*(.+)$")
+  if kind == "lvl" or kind == "tot" then
+    return { price = 0, free = true, level = tonumber(num), level_kind = kind,
+             name = trim(dname), flag = (flag ~= "" and flag or nil) }
+  end
   return nil
 end
 
@@ -405,10 +419,13 @@ local function parse_shop_list(text)
     if L:find("spell castings may be purchased", 1, true) then out.spell_shop = true end
     local seller = L:match("^(.-) tells you, 'The following items are available")
     if seller then out.seller = seller end
+    if L:find("up for grabs", 1, true) then out.donation = true end
     local r = parse_shop_row(L)
     if r then
       if r.category then cur_cat = r.category
-      else r.category = cur_cat; out.rows[#out.rows + 1] = r end
+      else r.category = cur_cat; out.rows[#out.rows + 1] = r
+        if r.free then out.donation = true end
+      end
     end
   end
   return out
@@ -568,14 +585,25 @@ local function build_shop_prompt(char, worn, kept)
   for _, w in ipairs(worn) do
     u[#u + 1] = (w.slot and (w.slot .. ": ") or "- ") .. (describe_item_for_prompt(w.name, char, w.flags):gsub("^%- ", ""))
   end
+  local donation = false
   u[#u + 1] = "\n=== SHOP ITEMS FOR SALE ==="
   if #kept == 0 then u[#u + 1] = "(nothing wearable shortlisted)" end
   for _, r in ipairs(kept) do
     local info = describe_item_for_prompt(r.name, char):gsub("^%- ", "")
-    u[#u + 1] = string.format("- [%s gold] (shop lvl %s) %s", tostring(r.price or "?"), tostring(r.level or "?"), info)
+    local cost = r.free and "FREE" or (tostring(r.price or "?") .. " gold")
+    local req = (r.level_kind == "tot") and ("tot lvl " .. tostring(r.level))
+                or ("shop lvl " .. tostring(r.level or "?"))
+    if r.free then donation = true end
+    u[#u + 1] = string.format("- [%s] (%s) %s", cost, req, info)
   end
-  u[#u + 1] = "\n=== TASK ===\nYou have " .. (char.gold and (char.gold .. " gold") or "unknown gold")
-    .. ". For each shop item say BUY or SKIP with one line why."
+  u[#u + 1] = "\n=== TASK ==="
+  if donation then
+    u[#u + 1] = "This is a DONATION room — every item is FREE. Ignore cost; for each item say TAKE or SKIP "
+      .. "based purely on whether it's an upgrade you can equip, then name the best pieces to grab."
+  else
+    u[#u + 1] = "You have " .. (char.gold and (char.gold .. " gold") or "unknown gold")
+      .. ". For each shop item say BUY or SKIP with one line why."
+  end
   return EQ_SHOP_SYS, table.concat(u, "\n")
 end
 
@@ -1062,34 +1090,61 @@ local function finish_shop()
     #parsed.rows, #kept, #skipped), "cyan")
   if #kept == 0 then echo("[eq] no wearable/wieldable upgrades to evaluate here.", "yellow"); return end
   S.shop.kept = kept
-  -- Pull `list <item>` detail for each shortlisted row (passively ingested), then ask the model.
+  local function ask_model()
+    if EPOCH ~= _EQUIP.epoch then return end
+    local sys, user = build_shop_prompt(char_from_state(), current_worn(), kept)
+    echo("[eq] asking " .. cfg.model .. (parsed.donation and " what's worth grabbing…" or " what's worth buying…"), "cyan")
+    run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan") end)
+  end
+  -- Donation rooms don't answer `list <item>` (that's a priced-shop command) — pulling detail there
+  -- just spams "not for sale". Go straight to the model with names + level reqs; a real shop still
+  -- pulls per-item identify detail (passively ingested) before asking.
+  if parsed.donation then ask_model(); return end
   local function detail(i)
     if EPOCH ~= _EQUIP.epoch then return end
-    if i > #kept then
-      local sys, user = build_shop_prompt(char_from_state(), current_worn(), kept)
-      echo("[eq] asking " .. cfg.model .. " what's worth buying…", "cyan")
-      run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan") end)
-      return
-    end
+    if i > #kept then ask_model(); return end
     send("list " .. first_kw(kept[i].name))
     after(cfg.look_wait, function() detail(i + 1) end)
   end
   detail(1)
 end
 
+-- Is this a pager "more" prompt? Long listings (donation rooms, big shops) pause with e.g.
+--   "Press <return> or 'cont' to continue, anything else to quit..."
+local function is_more_prompt(L)
+  return L:find("' to continue", 1, true) ~= nil or L:find("<return> or 'cont'", 1, true) ~= nil
+end
+
 local function eq_shop()
   if combat_block() then return end
   S.shop = { rows_text = {}, collecting = true }
+  local finish_timer
+  -- Idle-debounced finish: re-armed on every real shop line and every page turn, so the collector
+  -- stays open across a multi-page listing and only wraps up once the output actually goes quiet.
+  local function arm_finish()
+    if cancel and finish_timer then cancel(finish_timer) end
+    finish_timer = after(cfg.look_wait, function()
+      if not (S.shop and S.shop.collecting) then return end
+      S.shop.collecting = false
+      if class_remove then class_remove("eqshop") end
+      finish_shop()
+    end)
+  end
   trigger([[.*]], function(line)
-    if S.shop and S.shop.collecting then S.shop.rows_text[#S.shop.rows_text + 1] = strip_ansi(line) end
+    if not (S.shop and S.shop.collecting) then return end
+    local L = strip_ansi(line)
+    if is_more_prompt(L) then
+      send("cont")     -- fetch the next page; keep collecting
+      arm_finish()
+      return           -- don't store the prompt itself
+    end
+    S.shop.rows_text[#S.shop.rows_text + 1] = L
+    -- Re-arm only on actual shop content (not unrelated chatter) so idle-detect stays reliable.
+    if parse_shop_row(L) then arm_finish() end
   end, { class = "eqshop" })
   echo("[eq] reading the shop's list…", "cyan")
   send("list")
-  after(cfg.look_wait, function()
-    if S.shop then S.shop.collecting = false end
-    if class_remove then class_remove("eqshop") end
-    finish_shop()
-  end)
+  arm_finish()
 end
 
 -- ---- #eq stats / forget / usage ------------------------------------------------------------------

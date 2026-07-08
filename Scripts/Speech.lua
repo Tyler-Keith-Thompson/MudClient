@@ -27,7 +27,7 @@
 -- voice.mute(seconds); `help(voice)`. Hot-reloadable: edit + pilot.reload().
 
 local cfg = {
-  enabled = true,            -- speak by default; voice.off() to silence
+  enabled = false,           -- OFF by default (voice.on() to enable); TTS paused for now
   rate = nil,                -- words/min for `say` (nil = system default; ignored by kokoro)
   connect_mute = 4,          -- seconds after a connect to stay silent (login/MOTD burst)
   -- Preferred TTS backend. "kokoro" = the local mlx-audio server (tools/tts/), with an automatic `say`

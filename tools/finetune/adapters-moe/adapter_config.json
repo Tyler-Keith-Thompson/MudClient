@@ -2,8 +2,8 @@
     "adapter_path": "/Users/tylerthompson/workspace/MudClient/tools/finetune/adapters-moe",
     "batch_size": 1,
     "clear_cache_threshold": 0,
-    "config": null,
-    "data": "/Users/tylerthompson/workspace/MudClient/tools/finetune/data-combined",
+    "config": "/Users/tylerthompson/workspace/MudClient/tools/finetune/lora_moe.yaml",
+    "data": "/Users/tylerthompson/workspace/MudClient/tools/finetune/data-combined-short",
     "fine_tune_type": "lora",
     "grad_accumulation_steps": 1,
     "grad_checkpoint": true,
@@ -11,12 +11,23 @@
     "learning_rate": 1e-05,
     "lora_parameters": {
         "rank": 8,
+        "scale": 20.0,
         "dropout": 0.0,
-        "scale": 20.0
+        "keys": [
+            "self_attn.q_proj",
+            "self_attn.k_proj",
+            "self_attn.v_proj",
+            "self_attn.o_proj",
+            "linear_attn.in_proj_qkv",
+            "linear_attn.in_proj_z",
+            "linear_attn.in_proj_b",
+            "linear_attn.in_proj_a",
+            "linear_attn.out_proj"
+        ]
     },
     "lr_schedule": null,
     "mask_prompt": false,
-    "max_seq_length": 2048,
+    "max_seq_length": 1024,
     "model": "/Users/tylerthompson/.lmstudio/models/lmstudio-community/Qwen3.6-35B-A3B-MLX-4bit",
     "num_layers": 16,
     "optimizer": "adam",

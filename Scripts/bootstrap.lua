@@ -419,6 +419,9 @@ doc("bell",  { sig = "bell()", group = "io",
 doc("copy",  { sig = "copy([n])", group = "terminal",
   text = "Copy the last n scrollback lines (ANSI stripped) to the macOS clipboard; n defaults to 20. Echoes a confirmation with the number of lines copied.",
   example = "copy(50)" })
+doc("spellcheck", { sig = "spellcheck(word) -> suggestion|nil", group = "io",
+  text = "Native macOS spell-check (NSSpellChecker) of a single word: returns the top English correction if the word is misspelled, or nil if it's fine (or under 2 chars). Local dictionary, no network — fast enough to run per chat word. It only knows English, so game jargon must be filtered by the caller (ChatDecode keeps its own allowlist) before calling. Powers the optional typo pass in decode.",
+  example = 'spellcheck("teh")  --> "the"' })
 
 -- colors: the palette topic. help("colors"), help("color"), and help(colors) all land here; calling
 -- colors() prints the live demo. The stdlib `io` TABLE aliases to the "io" doc group so an unquoted

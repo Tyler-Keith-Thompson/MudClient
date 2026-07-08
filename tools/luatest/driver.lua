@@ -53,6 +53,9 @@ stub("bind", function() _bindid = _bindid + 1; return _bindid end)
 stub("input_get", function() return "" end)
 stub("scrollback", function() return {} end)
 stub("scrollback_find", function() return {} end)
+-- spellcheck defaults to "everything is spelled fine" (nil) so the typo pass is inert in CI; the
+-- chatdecode spec overrides the global to drive the correction path.
+stub("spellcheck", function() return nil end)
 
 -- Timer bridge stubs. There's no event loop in the CLI harness, so callbacks never auto-fire (just as
 -- the old `after` no-op never did); these keep the SAME contract the host now exposes so scripts that
@@ -83,8 +86,8 @@ end
 -- _HUD_TEST, _AIP_TEST, …) are all present AND the defensive `state = state or {}` decoupling is
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/AutoFight.lua",
-                     "Scripts/Equipment.lua", "Scripts/HUD.lua", "Scripts/Speech.lua",
-                     "Scripts/Trivia.lua" }) do
+                     "Scripts/ChatDecode.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
+                     "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end

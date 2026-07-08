@@ -209,6 +209,56 @@ test("shortlist_shop: keeps the wearable necklace, skips wands/scrolls", functio
   expect(is_consumable("a soapstone necklace")):eq(false)
 end)
 
+-- ---- donation / "up for grabs" room (no prices, R flag, lvl/tot reqs) -----------------------------
+local DONATE = [[The following items are currently up for grabs:
+
+   Worn on head ---------------------------------------
+ R (lvl  12) a crown of finger bones
+ R (lvl  18) a jet black helmet
+
+   Worn on neck ---------------------------------------
+ R (lvl  17) a brown scarf
+ R (tot  42) a platinum torsade necklace with a lustrous amethyst pendant
+
+Press <return> or 'cont' to continue, anything else to quit...]]
+
+test("parse_shop_row: donation category + free lvl/tot item rows", function()
+  local cat = parse_shop_row("   Worn on head ---------------------------------------")
+  expect(cat.category):eq("Worn on head")
+  local lvl = parse_shop_row(" R (lvl  12) a crown of finger bones")
+  expect(lvl.free):eq(true); expect(lvl.price):eq(0)
+  expect(lvl.level):eq(12); expect(lvl.level_kind):eq("lvl")
+  expect(lvl.name):eq("a crown of finger bones")
+  local tot = parse_shop_row(" R (tot  42) a platinum torsade necklace with a lustrous amethyst pendant")
+  expect(tot.free):eq(true); expect(tot.level):eq(42); expect(tot.level_kind):eq("tot")
+  expect(tot.name):eq("a platinum torsade necklace with a lustrous amethyst pendant")
+end)
+
+test("parse_shop_list: donation room parses rows and flags donation (not no_shop)", function()
+  local p = parse_shop_list(DONATE)
+  expect(p.donation):eq(true)
+  expect(p.no_shop):eq(nil)
+  expect(#p.rows):eq(4)
+  expect(p.rows[1].category):eq("Worn on head")
+  expect(p.rows[4].category):eq("Worn on neck")
+  expect(p.rows[4].free):eq(true)
+end)
+
+test("shortlist_shop: donation wearables are all kept (headers are worn slots)", function()
+  local kept = shortlist_shop(parse_shop_list(DONATE), 8)
+  expect(#kept):eq(4)
+  expect(kept[1].name):eq("a crown of finger bones")
+end)
+
+test("build_shop_prompt: donation items render FREE + TAKE/SKIP task", function()
+  local kept = shortlist_shop(parse_shop_list(DONATE), 8)
+  local _, user = build_shop_prompt({ name = "Tester" }, {}, kept)
+  expect(user:find("FREE", 1, true) ~= nil):eq(true)
+  expect(user:find("DONATION room", 1, true) ~= nil):eq(true)
+  expect(user:find("TAKE or SKIP", 1, true) ~= nil):eq(true)
+  expect(user:find("tot lvl 42", 1, true) ~= nil):eq(true)
+end)
+
 -- ---- equippability -------------------------------------------------------------------------------
 test("precheck_equip: 'can't use yet' (level) blocks equipping", function()
   local v = parse_identify(RING)

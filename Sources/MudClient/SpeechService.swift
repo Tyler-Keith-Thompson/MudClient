@@ -20,6 +20,9 @@
 //    * The backlog is capped (`maxBacklog`): a chat flood drops the OLDEST unspoken line.
 //    * `stop()` bumps a generation, flushes the queue, and cancels the in-flight utterance — for kokoro
 //      that abandons the in-flight HTTP request AND kills afplay.
+//    * Voice-list queries never block the caller: the `say -v ?` list is pre-warmed at init on a
+//      background thread, and `kokoroVoices()` returns a cached snapshot while refreshing off-thread.
+//      So a Lua trigger resolving a speaker's voice can never stall the UI on a subprocess/network wait.
 //
 //  Everything external is injected so tests drive the queue without speaking or hitting the network:
 //  the say-process factory (`makeUtterance`), the voice-list source (`voiceListing`), the Kokoro HTTP
@@ -219,6 +222,12 @@ final class SpeechService: @unchecked Sendable {
 
     private var cachedVoices: [Voice]?             // parsed once, guarded by `cond`
 
+    // Kokoro voice-id cache. `kokoroVoices()` returns this snapshot IMMEDIATELY (never blocking the
+    // caller) and refreshes it on a background thread; `refreshing` keeps a single fetch in flight.
+    // Both guarded by `cond`.
+    private var cachedKokoroVoices: [String] = []
+    private var kokoroRefreshing = false
+
     init(maxBacklog: Int = 8,
          makeUtterance: @escaping ([String]) -> SpeechUtterance = { ProcessUtterance(executable: "/usr/bin/say", args: $0) },
          voiceListing: @escaping () -> String = SpeechService.runSayVoiceList,
@@ -235,6 +244,19 @@ final class SpeechService: @unchecked Sendable {
         self.tempWriter = tempWriter
         self.now = now
         self.cooldownInterval = cooldownInterval
+        // Pre-warm the (static) say voice list off the caller thread so no chat line ever pays for the
+        // `say -v ?` subprocess synchronously. Uses the injected listing (instant/empty in tests).
+        warmVoiceListInBackground()
+    }
+
+    /// Populate `cachedVoices` on a detached thread. The real default runs the `say -v ?` subprocess
+    /// here (never on a caller); tests inject a trivial listing so this is an instant no-op.
+    private func warmVoiceListInBackground() {
+        Thread.detachNewThread { [weak self] in
+            guard let self else { return }
+            let parsed = SpeechService.parseVoices(self.voiceListing())
+            self.cond.lock(); if self.cachedVoices == nil { self.cachedVoices = parsed }; self.cond.unlock()
+        }
     }
 
     /// Enqueue `text` to be spoken. `backend` picks the renderer (default `.say`); `voice` is the voice
@@ -292,9 +314,30 @@ final class SpeechService: @unchecked Sendable {
         return ("say", "say backend selected")
     }
 
-    /// The Kokoro server's voice ids (GET /v1/voices), best-effort with a short timeout. Empty if the
-    /// server is unreachable — the Lua side then falls back to its curated voice set.
+    /// The Kokoro server's voice ids — returned from a cached snapshot IMMEDIATELY so a caller (the Lua
+    /// trigger thread) never blocks on the network. The first call returns whatever's cached (empty
+    /// until the first fetch lands — the Lua side then uses its curated set) and kicks a single
+    /// background refresh; later calls see the warmed list. The actual GET (with its timeout wait) only
+    /// ever runs on the detached refresh thread, never on the caller.
     func kokoroVoices() -> [String] {
+        cond.lock()
+        let snapshot = cachedKokoroVoices
+        let alreadyRefreshing = kokoroRefreshing
+        if !alreadyRefreshing { kokoroRefreshing = true }
+        cond.unlock()
+        if !alreadyRefreshing {
+            Thread.detachNewThread { [weak self] in
+                guard let self else { return }
+                let ids = self.fetchKokoroVoices()
+                self.cond.lock(); self.cachedKokoroVoices = ids; self.kokoroRefreshing = false; self.cond.unlock()
+            }
+        }
+        return snapshot
+    }
+
+    /// Blocking GET /v1/voices (short timeout). ONLY called from the background refresh in
+    /// `kokoroVoices()` — never on a caller thread — so its semaphore wait can't stall the UI.
+    private func fetchKokoroVoices() -> [String] {
         guard let base = ProcessInfo.processInfo.environment["TTS_BASE_URL"] ?? Optional("http://127.0.0.1:8880"),
               let url = URL(string: base + "/v1/voices") else { return [] }
         var req = URLRequest(url: url)
@@ -315,14 +358,18 @@ final class SpeechService: @unchecked Sendable {
         return result
     }
 
-    /// Available `say` voices, parsed once from the injected listing. `all=false` keeps English only.
+    /// Available `say` voices. Normally served from the cache pre-warmed at init (see
+    /// `warmVoiceListInBackground`), so no caller pays for the `say -v ?` subprocess. If a call somehow
+    /// races ahead of the warm, it parses the injected listing ONCE — off the `cond` lock, so it never
+    /// stalls `speak()` or the worker. `all=false` keeps English only.
     func voices(all: Bool = false) -> [Voice] {
-        cond.lock()
-        if cachedVoices == nil { cachedVoices = SpeechService.parseVoices(voiceListing()) }
-        let v = cachedVoices ?? []
-        cond.unlock()
-        if all { return v }
-        return v.filter { $0.locale.hasPrefix("en") }
+        cond.lock(); var v = cachedVoices; cond.unlock()
+        if v == nil {
+            let parsed = SpeechService.parseVoices(voiceListing())   // off-lock; pre-warmed in production
+            cond.lock(); if cachedVoices == nil { cachedVoices = parsed }; v = cachedVoices; cond.unlock()
+        }
+        let list = v ?? []
+        return all ? list : list.filter { $0.locale.hasPrefix("en") }
     }
 
     // MARK: - Worker

@@ -852,6 +852,23 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // bell() — ring the terminal bell.
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
+        // spellcheck(word) -> suggestion|nil. Native macOS spell-check (NSSpellChecker, local dictionary
+        // — no network) of a SINGLE word: returns the top correction if the word is misspelled, else nil
+        // (also nil for <2 chars). Fast enough to run per chat word. It only knows English — game jargon
+        // must be filtered by the caller (ChatDecode keeps its own allowlist) before calling.
+        lua.register("spellcheck") { args in
+            guard case .string(let raw)? = args.first else { return [] }
+            let word = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard word.count >= 2 else { return [] }
+            let checker = NSSpellChecker.shared
+            let misspelled = checker.checkSpelling(of: word, startingAt: 0)
+            guard misspelled.location != NSNotFound, misspelled.length > 0 else { return [] }
+            let full = NSRange(location: 0, length: (word as NSString).length)
+            let guesses = checker.guesses(forWordRange: full, in: word,
+                                          language: checker.language(), inSpellDocumentWithTag: 0)
+            guard let first = guesses?.first, !first.isEmpty else { return [] }
+            return [.string(first)]
+        }
         // copy(n) — copy the last n scrollback lines (ANSI-stripped) to the macOS clipboard. n
         // defaults to 20; a non-positive count is a usage error. Echoes a confirmation with the number
         // of lines actually copied (fewer than n if the scrollback is shorter).
