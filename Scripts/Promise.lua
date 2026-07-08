@@ -70,12 +70,29 @@ local function normalize(x)
   end
 end
 
+-- Registry of not-yet-settled promises so cancelPromises() can abort every in-flight chain at once
+-- (running each promise's cancel hook — recover stands you up, attack disarms auto-fight, a pipe
+-- segment's pending send is dropped). Weak KEYS so a promise that's otherwise unreferenced can still be
+-- collected; entries are also cleared eagerly the moment a promise settles or is cancelled, so the table
+-- reflects only genuinely live promises.
+local live = setmetatable({}, { __mode = "k" })
+
+-- Cancel every currently-live promise. Snapshots the set first, because cancel() clears `live` entries
+-- (and cascades to parents/children) as it runs. Returns how many promise objects were cancelled.
+local function cancel_all()
+  local snapshot = {}
+  for p in pairs(live) do snapshot[#snapshot + 1] = p end
+  for _, p in ipairs(snapshot) do p.cancel() end
+  return #snapshot
+end
+
 -- Core constructor (no auto-start). `builder` (below) wraps this to add the next-tick auto-start that
 -- makes a bare `recover(95)` run on its own; result promises from andThen/finally/timeout use `make`
 -- directly and are driven by their parent, never a timer.
 local function make(executor, label)
   local p = { __is_promise = true, state = "cold", label = label,
               _handlers = {}, _had_consumer = false }
+  live[p] = true                                                    -- track until it settles/cancels
 
   local run_handler   -- fwd
 
@@ -113,6 +130,7 @@ local function make(executor, label)
   local function settle(newstate, err)
     if p.state ~= "cold" and p.state ~= "running" then return end   -- settle-once (incl. after cancel)
     p.state, p.err = newstate, err
+    live[p] = nil                                                   -- settled → no longer in-flight
     local hs = p._handlers; p._handlers = {}
     for _, h in ipairs(hs) do dispatch(h) end
     if newstate == "failed" then
@@ -190,6 +208,7 @@ local function make(executor, label)
   p.cancel = function()
     if p.state ~= "cold" and p.state ~= "running" then return end   -- terminal → no-op
     p.state = "cancelled"
+    live[p] = nil
     cancel_timer(p.__start_timer); p.__start_timer = nil
     cancel_timer(p._timeout_timer); p._timeout_timer = nil
     if p._on_cancel then pcall(p._on_cancel) end                    -- UNDO the side effect
@@ -213,4 +232,21 @@ end
 -- => internal by convention (doc-exempt); the user-facing surface is recover()/attack()/.andThen/etc.
 __promise = builder
 
-_PROMISE_TEST = { make = make, builder = builder, normalize = normalize, is_promise = is_promise }
+-- cancelPromises() — abort every in-flight promise at once. Each one's cancel hook runs, so the action
+-- is UNDONE: recover stands you up, attack disarms auto-fight, a queued pipe segment's send is dropped.
+-- The panic button for "stop whatever the chain is doing." Returns how many promises were cancelled.
+function cancelPromises()
+  local n = cancel_all()
+  if echo then
+    echo("[promise] cancelled " .. n .. " in-flight promise" .. (n == 1 and "" or "s") .. ".")
+  end
+  return n
+end
+doc("cancelPromises", { sig = "cancelPromises() -> count", group = "combat",
+  text = "Abort EVERY in-flight promise chain (recover/attack/goto, `|` pipe sequences, timeouts) and "
+      .. "run each one's cancel hook so its action is undone — stand up from recovery, disarm auto-fight, "
+      .. "drop a queued send. Returns how many promises were cancelled.",
+  example = "#cancelPromises()" })
+
+_PROMISE_TEST = { make = make, builder = builder, normalize = normalize, is_promise = is_promise,
+                  live = live, cancel_all = cancel_all }

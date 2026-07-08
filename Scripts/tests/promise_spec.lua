@@ -327,3 +327,29 @@ test("cancelling a recover in progress stands you up and clears the flag (undo h
     expect(_AA_TEST.recovery.settle):eq(nil) -- and dropped the settlers
   end)
 end)
+
+-- ---- cancelPromises() (global panic button) ------------------------------------------------------
+
+test("cancel_all cancels every live promise and runs each one's cancel hook", function()
+  local a = deferred("cancel-a")
+  local b = deferred("cancel-b")
+  a.promise.__start(); b.promise.__start()          -- both running and registered as live
+  expect(a.promise.state):eq("running")
+  expect(b.promise.state):eq("running")
+  local n = _PROMISE_TEST.cancel_all()
+  expect(n >= 2):eq(true)                            -- (>= : other specs may leave live promises around)
+  expect(a.promise.state):eq("cancelled")
+  expect(b.promise.state):eq("cancelled")
+  expect(a.cancelled):eq(true)                       -- undo hook ran
+  expect(b.cancelled):eq(true)
+end)
+
+test("a settled promise is not re-cancelled by cancel_all (left the registry)", function()
+  local a = deferred("settled")
+  a.promise.__start()
+  a.resolve()
+  expect(a.promise.state):eq("done")
+  expect(_PROMISE_TEST.live[a.promise]):eq(nil)      -- deregistered on settle
+  _PROMISE_TEST.cancel_all()
+  expect(a.promise.state):eq("done")                 -- still done, not flipped to cancelled
+end)

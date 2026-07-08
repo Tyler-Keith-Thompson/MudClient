@@ -51,8 +51,14 @@ extension Character {
 
 extension AsyncSequence where Self: Sendable, Element == String {
     func processScriptInput() -> AnyAsyncSequence<String> {
-        compactMap { input -> String? in
+        compactMap { rawInput -> String? in
             let interpreter = Container.scriptInterpreter()
+            // Trim surrounding whitespace once, up front, so every downstream stage sees the clean
+            // command: anchored aliases (`^recover$`) match "recover " too, `;`-split segments like the
+            // " recover" in "look; recover" work, and a stray leading space before `#` still hits the
+            // REPL. Interior spacing is untouched (so `say  hi` keeps its gap); leading/trailing space on
+            // a MUD command is never meaningful.
+            let input = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
             // Any leading `#` line is a REPL chunk: Lua evaluated in the live script state (with the
             // legacy-command rewrite covering old habits like `#load {X}`, `#reload`, `#ai …`, `#kxwt`).
             if input.first == Character.scriptIndicator {

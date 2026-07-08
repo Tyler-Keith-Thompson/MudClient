@@ -50,9 +50,23 @@ local function ready(p)
      and pct(state.stam, state.maxstam) >= p
 end
 
+-- Recovery postures ranked by how deeply they heal (and how far they drop your guard): standing/kneeling
+-- don't recover; `rest` (kxwt reports the resting state as sitting/resting) heals moderately while you
+-- keep some awareness; `sleep` heals fastest but fully drops your guard. Unknown posture → 0, so we err
+-- toward issuing a command rather than assuming we're already recovering.
+local RECOVERY_DEPTH = { standing = 0, kneeling = 0, sitting = 1, resting = 1, sleeping = 2 }
+local function recovery_depth(posn) return RECOVERY_DEPTH[posn or ""] or 0 end
+
+-- Pick the recovery posture for the current vitals — and current posture. rest keeps more of your guard,
+-- so it wins when only mana is lacking (hp/stam already high); otherwise sleep heals fastest. Context
+-- aware: only send a command when it actually deepens the posture. Already resting/sleeping when rest is
+-- enough → send nothing; sitting/resting when we want sleep → escalate to sleep. No redundant spam.
 local function choose_recovery_position()
   local hp, mp, sp = pct(state.hp, state.maxhp), pct(state.mana, state.maxmana), pct(state.stam, state.maxstam)
-  if hp > 0.85 and mp < 1 and sp > 0.75 then send("rest") else send("sleep") end
+  local want = (hp > 0.85 and mp < 1 and sp > 0.75) and "rest" or "sleep"
+  local target = (want == "sleep") and 2 or 1
+  if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
+  send(want)
 end
 
 -- Recovery-as-a-promise. `recovery.pct` is the current target threshold; `recovery.settle` holds the
@@ -70,7 +84,7 @@ end
 -- Called from the kxwt_prompt trigger on every vitals update: stand + resolve once the target is met.
 -- Factored out (and exposed via _AA_TEST) so the spec can drive completion without the Swift trigger.
 local function maybe_complete_recovery()
-  if state.recover and (state.position == "sitting" or state.position == "sleeping") and ready(recovery.pct) then
+  if state.recover and recovery_depth(state.position) >= 1 and ready(recovery.pct) then
     echo("You have recovered and are ready to adventure!")
     send("stand")
     end_recovery(true)
@@ -81,7 +95,7 @@ end
 
 -- Exposed for the test harness (Scripts/tests/recover_spec.lua, promise_spec.lua).
 _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
-             choose_recovery_position = choose_recovery_position,
+             choose_recovery_position = choose_recovery_position, recovery_depth = recovery_depth,
              recovery = recovery, end_recovery = end_recovery,
              maybe_complete_recovery = maybe_complete_recovery }
 
@@ -201,7 +215,8 @@ end)
 -- Position. Starting a recovery sits/sleeps as appropriate.
 trigger([[^kxwt_position (.+)$]], function(_, p)
   state.position = p
-  if state.recover and not (p == "sitting" or p == "sleeping") then choose_recovery_position() end
+  -- If we're recovering but got knocked back to a non-recovery posture (stood up, kicked awake), re-issue.
+  if state.recover and recovery_depth(p) == 0 then choose_recovery_position() end
 end)
 
 -- Combat. -1 = not fighting; otherwise "<pct> <gender> <name>".

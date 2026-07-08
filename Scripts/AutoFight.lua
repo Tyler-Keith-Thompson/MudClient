@@ -53,8 +53,10 @@ local cfg = {
   shower_cmd       = "c shower",     -- shower of sparks
 }
 
--- Survive pilot.reload(): keep the on/off toggle and any in-flight fight state in a global.
-_AUTOFIGHT = _AUTOFIGHT or { on = false }
+-- Survive pilot.reload(): keep the on/off toggle and any in-flight fight state in a global. Armed by
+-- default on a FRESH session (`on = true`); a live reload preserves whatever you last toggled it to,
+-- so an explicit autofight.off() sticks across reloads within a session.
+_AUTOFIGHT = _AUTOFIGHT or { on = true }
 local F = _AUTOFIGHT
 -- Default the runtime fields (idempotent across reloads).
 F.fighting          = F.fighting or false
