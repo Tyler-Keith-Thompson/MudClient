@@ -641,6 +641,47 @@ doc(autofight.forget, { name = "autofight.forget", sig = "autofight.forget([name
   text = "Forget a learned winner so it re-probes next time: pass a target name to drop just that one, "
       .. "or call with no argument to clear the whole memory. Persists the change." })
 
+-- winner(name[, spell]) — manually SET (override) the learned attack for a target NAME. Use it when the
+-- probe mislearned: it picked the element the enemy RESISTS, or — worse — one that HEALS it (a cold mob
+-- healed by shards, a fire one by scorch). `spell` is 'shards' (cold) or 'scorch' (fire), the two the
+-- routine nukes with. No spell → report the current winner; 'none'/'clear' → forget it (re-probe next
+-- fight). Persists, skips the probe forever after for that name, and switches the CURRENT fight on the spot.
+function autofight.winner(name, spell)
+  local key = name and winner_key(name)
+  if not key or key == "" then
+    say("usage: autofight.winner('<enemy name>', 'shards'|'scorch')  — force which spell to nuke it with")
+    return
+  end
+  local s = (spell or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if s == "" then
+    local cur = _AUTOFIGHT.winners[key]
+    say(cur and (key .. " → " .. cur) or ("no learned winner for '" .. key .. "'"))
+    return
+  end
+  if s == "none" or s == "clear" or s == "forget" then
+    _AUTOFIGHT.winners[key] = nil; schedule_winners_save(); say("forgot '" .. key .. "' — will re-probe")
+    return
+  end
+  if s ~= "shards" and s ~= "scorch" then
+    say("winner must be 'shards' or 'scorch' (the two spells the routine nukes with) — got '" .. s .. "'")
+    return
+  end
+  remember_winner(name, s)   -- set + persist; the next fight vs this name skips the probe and nukes `s`
+  -- Fighting this exact target right now? Switch immediately — don't keep casting the wrong (maybe
+  -- healing!) spell until the fight ends.
+  if F.fighting and F.name and winner_key(F.name) == key then
+    F.known_winner, F.winner, F.winner_spell = s, cfg[s .. "_cmd"], s
+    if F.phase == "shards" or F.phase == "scorch" or F.phase == "decide" then F.phase = "nuke" end
+    say("overriding the CURRENT fight → " .. s)
+  end
+  say("'" .. key .. "' → " .. s .. " (set, persisted)")
+end
+doc(autofight.winner, { name = "autofight.winner", sig = "autofight.winner(name[, 'shards'|'scorch'])",
+  group = "combat", text = "Manually override the learned attack spell for a target NAME — for when the "
+      .. "probe mislearned and picked the element the enemy RESISTS or is HEALED by. 'shards' (cold) or "
+      .. "'scorch' (fire); no spell reports the current winner; 'none' forgets it. Persists, skips the "
+      .. "probe for that name, and switches the current fight immediately if you're fighting it." })
+
 -- engage(target[, on_dead][, on_fail]) — START a fight from out of combat. Sets the target and casts
 -- the opener (tarrants) to actually aggro it, retrying the opener until it lands (up to cfg.max_tries);
 -- once combat starts the normal routine takes over, skipping a second opener. on_dead() fires when the
@@ -696,8 +737,26 @@ setmetatable(autofight, { __call = function(_, rest)
   elseif verb == "aoe" then autofight.aoe(arg)
   elseif verb == "winners" then autofight.winners()
   elseif verb == "forget" then autofight.forget(arg ~= "" and arg or nil)
+  elseif verb == "winner" then
+    -- "winner <enemy name...> <spell>" — the enemy name can have spaces, so the SPELL is the last word.
+    -- If the last word isn't a spell keyword, treat the whole thing as a name (report the current winner).
+    local last = arg:match("(%S+)%s*$")
+    local lw = last and last:lower()
+    if lw == "shards" or lw == "scorch" or lw == "none" or lw == "clear" or lw == "forget" then
+      autofight.winner(arg:match("^(.-)%s+%S+%s*$"), last)
+    else
+      autofight.winner(arg ~= "" and arg or nil)
+    end
   else autofight.status() end
 end })
+
+-- Game-line aliases so the controls work typed straight in (no `#` needed), like explore/goto/noexit:
+-- `autofight` alone reports status; `autofight <verb …>` dispatches (on/off/aoe/winners/forget/winner),
+-- e.g. `autofight winner A ghostly presence scorch`. (`#autofight …` via the REPL still works too.)
+if alias then
+  alias([[^autofight$]], function() autofight() end)
+  alias([[^autofight (.+)$]], function(_, rest) autofight(rest) end)
+end
 
 -- ---- test seam -----------------------------------------------------------------------------------
 -- The spec drives the state machine by calling the SAME handlers the live triggers call — there is no

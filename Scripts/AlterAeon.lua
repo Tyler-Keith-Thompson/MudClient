@@ -905,6 +905,14 @@ trigger([[^kxwt_fighting -1$]], function()
   state.opponents = {}; state.engaged_until = nil
   assist_at = 0                      -- fight over → next fight may assist immediately
 end)
+-- Just YOU (not your minions): the melee lines' pronoun "you", or your kxwt_myname. Lets us tell "I'm in
+-- this fight" from "my MINIONS are" — a mob brawling only with your pets shouldn't pin YOU in combat.
+local function is_self(name)
+  if not name then return false end
+  local low = name:lower()
+  return low == "you" or (state.name ~= nil and low == state.name:lower())
+end
+_AA_TEST.is_self = is_self
 trigger([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|devastates|maims|mutilates|dismembers|disembowels|massacres|obliterates|demolishes|destroys|annihilates|misses|nicks|cuts|gouges|gashes|lacerates|shreds|mangles|rends|thumps|mars|batters|thrashes|clobbers|smashes|pulverizes) ]],
   function(line)
     local attacker, target = parse_melee(line)
@@ -912,10 +920,16 @@ trigger([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|dev
     local enemy = melee_enemy(attacker, target)
     if not enemy then return end                       -- bystander fight; not ours
     local now = os.time()
-    state.engaged_until = now + ENGAGE_TTL
-    end_recovery(false, "combat started")             -- fights (kxwt-visible or not) cancel recovery
     opponent_note(state.opponents, enemy, nil, now, false)   -- name sighting; keeps any known pct
     maybe_assist(now)                                  -- your side is fighting; jump in if you aren't
+    -- Only YOU being in the melee opens the engaged window (which gates goto/explore/rest). A mob brawling
+    -- only with your MINIONS keeps them busy but doesn't stop you moving — else `goto` refuses while your
+    -- pets mop up adds and you're free to walk off. (If you then `assist`, kxwt_fighting/your own melee
+    -- lines engage you for real.)
+    if is_self(attacker) or is_self(target) then
+      state.engaged_until = now + ENGAGE_TTL
+      end_recovery(false, "combat started")           -- fights (kxwt-visible or not) cancel recovery
+    end
   end)
 trigger([[(near death|mortally wounded|awful|pretty hurt|nasty wounds|a few wounds|small wounds|few scratches|excellent)]],
   function(line)
@@ -1437,10 +1451,13 @@ trigger([[^You can't harvest spell components from that]], function() corpse_har
 trigger([[^Looks like the corpses? of .+ (is|are) too damaged for you to use]], function() corpse_harvest_done() end) -- corpse(s) too mangled to harvest -> skip, keep going (plural for swarm/group mobs)
 -- A SUCCESSFUL `harvest spellcomps` has no distinct "done" line — it just yields the component(s) and
 -- stops (unlike teeth, which end on "grow restless"). So the yield line IS the terminal for the
--- spellcomps step. These are the necromancer fluid/bladder comps (bile + colored fluids); generalized to
--- catch every colour ("drain … into …", "… tie off the ends …"). Gated to the spellcomps step so a
--- stray yield can't advance a teeth harvest early — and so an earlier fight's line can't fire it.
-trigger([[^You make a small incision and drain .+ into ]],
+-- spellcomps step. Necromancer comps come in a few shapes; generalized to catch every colour/type:
+--   * "…drain <X> into <Y>"          ("You make a small incision and drain some fluid into a vial of
+--                                      bile.", "You find a dark cyst and drain it into a vial of melancholy.")
+--   * "…tie off the ends…"           (hack-out/find a bladder of coloured fluid)
+-- Gated to the spellcomps step so a stray yield can't advance a teeth harvest early — and so an earlier
+-- fight's line can't fire it.
+trigger([[^You .+ drain .+ into a vial]],
   function() if corpse.active and corpse.step == "spellcomps" then corpse_harvest_done() end end)
 trigger([[^You .+ tie off the ends]],
   function() if corpse.active and corpse.step == "spellcomps" then corpse_harvest_done() end end)

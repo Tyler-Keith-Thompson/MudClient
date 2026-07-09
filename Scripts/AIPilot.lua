@@ -1987,6 +1987,23 @@ function human_goto(label)
     echo("[goto] nothing is marked '" .. label .. "'. Stand in the room and mark('" .. label .. "') first.")
     return
   end
+  -- Marked but not reachable exactly (no walk path, no learnable bridge). Rather than just refusing, get
+  -- as CLOSE as the explored map allows — route to the nearest reachable room by coordinates (same as
+  -- `goto death`). Only fall through to the hints below if we're already as close as we can get.
+  local target_coord
+  for _, r in pairs(P.rooms) do
+    if has_mark(r, label) and r.coord then target_coord = r.coord; break end
+  end
+  local near = target_coord and nearest_reachable_to_coord(target_coord)
+  local npath = near and near ~= P.current_room and find_path(function(id) return id == near end)
+  if npath and #npath > 0 then
+    P.goto_bridge = nil
+    echo(string.format("[goto] can't reach '%s' exactly from here — routing to the nearest reachable point"
+      .. " (%d step%s) — 'goto stop' to cancel.", label, #npath, #npath == 1 and "" or "s"))
+    P.nav = { path = npath, idx = 1, dest = "near '" .. label .. "'", gen = 0 }
+    nav_step()
+    return
+  end
   -- "unreachable" also covers a mark that IS walkable from a known waypoint whose NUMBER we haven't
   -- learned (bridge_estimate refuses bridges that would stall mid-hop). Say so accurately instead of
   -- claiming no waypoint reaches it.

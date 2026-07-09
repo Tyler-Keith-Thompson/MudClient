@@ -144,6 +144,24 @@ test("melee_enemy picks the non-ally side of a round line, using the kxwt_group 
   state.group = saved
 end)
 
+test("is_self is YOU only, not your minions — so a minion-only brawl doesn't open the engaged window", function()
+  local saved_name, saved_group = state.name, state.group
+  state.name = "Vaelith"
+  state.group = { { name = "Vaelith" }, { name = "A flesh beast" }, { name = "A skeletal spider" } }
+  local is_self = _AA_TEST.is_self
+  expect(is_self("you")):truthy()
+  expect(is_self("You")):truthy()
+  expect(is_self("Vaelith")):truthy()
+  expect(is_self("A flesh beast")):falsy()          -- a minion is an ally, but NOT you
+  expect(is_self("A skeletal spider")):falsy()
+  expect(is_self("an orc bachelor")):falsy()
+  -- The gate the melee trigger applies: mob-vs-minion has no `self` side (you stay free to move);
+  -- mob-vs-you does (you're engaged for real).
+  expect(is_self("an orc bachelor") or is_self("A flesh beast")):falsy()
+  expect(is_self("an orc bachelor") or is_self("you")):truthy()
+  state.name, state.group = saved_name, saved_group
+end)
+
 test("engaged() is true while the text-inferred window is open, without any kxwt_fighting", function()
   local saved_f, saved_u = state.fighting, state.engaged_until
   state.fighting = false

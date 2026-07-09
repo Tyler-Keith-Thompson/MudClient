@@ -514,3 +514,31 @@ test("autofight.current() exposes the in-flight promise, nil when not fighting",
   AF.on_fight_end()
   expect(autofight.current()):eq(nil)
 end)
+
+-- ---- manual winner override (autofight.winner) ---------------------------------------------------
+test("autofight.winner sets/overrides the learned attack for a target and persists it; 'none' clears", function()
+  AF.reset()
+  local key = AF.winner_key("undead marsh troll")
+  autofight.winner("undead marsh troll", "scorch")
+  expect(_AUTOFIGHT.winners[key]):eq("scorch")
+  autofight.winner("undead marsh troll", "shards")     -- re-override to the other element
+  expect(_AUTOFIGHT.winners[key]):eq("shards")
+  autofight.winner("undead marsh troll", "none")        -- forget → re-probe next time
+  expect(_AUTOFIGHT.winners[key]):eq(nil)
+end)
+
+test("autofight.winner rejects a spell that isn't shards/scorch (memory untouched)", function()
+  AF.reset()
+  autofight.winner("a rat", "frostflower")
+  expect(_AUTOFIGHT.winners[AF.winner_key("a rat")]):eq(nil)
+end)
+
+test("autofight.winner switches the CURRENT fight immediately (stops casting the wrong spell)", function()
+  AF.reset()
+  local F = AF.state()
+  AF.on_fight(90, "a wraith")                            -- fresh fight → would normally probe
+  autofight.winner("a wraith", "scorch")                 -- override mid-fight
+  expect(F.winner_spell):eq("scorch")
+  expect(F.known_winner):eq("scorch")
+  AF.on_fight_end()
+end)
