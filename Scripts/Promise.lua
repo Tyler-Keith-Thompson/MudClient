@@ -110,6 +110,19 @@ local function active_promises()
   return out
 end
 
+-- The "current" in-flight promise: the most-recently-created still-pending tracked one. This is what
+-- `+| <cmd>` appends onto — e.g. after `recover`, `+| explore` grafts explore onto the recovery. Returns
+-- the promise OBJECT (or nil if nothing's pending), plus its display desc.
+local function current_promise()
+  local best
+  for p in pairs(tracked) do
+    if (p.state == "cold" or p.state == "running") and (not best or (p._seq or 0) > (best._seq or 0)) then
+      best = p
+    end
+  end
+  return best
+end
+
 -- Core constructor (no auto-start). `builder` (below) wraps this to add the next-tick auto-start that
 -- makes a bare `recover(95)` run on its own; result promises from andThen/finally/timeout use `make`
 -- directly and are driven by their parent, never a timer.
@@ -281,8 +294,9 @@ doc("cancelPromises", { sig = "cancelPromises() -> count", group = "combat",
 -- __track_promise/__untrack_promise let the pipe layer (bootstrap) name a whole chain as one row and
 -- drop the head it superseded. `__`-prefixed => internal/doc-exempt; active_promises is documented.
 _G.active_promises = active_promises   -- _G. is REQUIRED: `active_promises` is a local here, so a bare
-_G.__track_promise   = track           -- assignment would just rebind the local, never create the global
-_G.__untrack_promise = untrack         -- the HUD/pipe look up. (This was the "widget never shows" bug.)
+_G.__track_promise    = track          -- assignment would just rebind the local, never create the global
+_G.__untrack_promise  = untrack        -- the HUD/pipe look up. (This was the "widget never shows" bug.)
+_G.__current_promise  = current_promise
 doc("active_promises", { sig = "active_promises() -> { {desc, state}, ... }", group = "combat",
   text = "The in-flight promises for the HUD widget, oldest first: each is { desc, state } where desc "
       .. "is the typed pipe line (e.g. \"recover | explore\") or the action's label, and state is "
@@ -290,4 +304,4 @@ doc("active_promises", { sig = "active_promises() -> { {desc, state}, ... }", gr
 
 _PROMISE_TEST = { make = make, builder = builder, normalize = normalize, is_promise = is_promise,
                   live = live, cancel_all = cancel_all,
-                  active = active_promises, track = track, untrack = untrack }
+                  active = active_promises, track = track, untrack = untrack, current = current_promise }

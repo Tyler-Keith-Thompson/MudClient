@@ -67,6 +67,13 @@ extension AsyncSequence where Self: Sendable, Element == String {
             }
             // Let scripts observe the typed command without swallowing it (e.g. the AI pilot).
             interpreter.engine.notifyUserInput(input)
+            // A leading `+|` APPENDS to the current in-flight promise ("recover", then "+| explore" ⇒
+            // recover | explore). Checked before the plain `|` case, since "+| x" also contains a pipe.
+            if input.hasPrefix("+|") {
+                let segments = InputService.pipeSegments(String(input.dropFirst(2)))
+                interpreter.engine.appendPipe(segments)
+                return nil
+            }
             // A `|` sequences commands on promises ("recover 95 | attack rat | l"): each segment waits
             // for the previous to resolve. Swift tokenizes (same escaping grammar as `;`); >1 segment
             // means it's a pipe, so hand the segments to Lua's __pipe to build/run the chain and swallow

@@ -232,6 +232,13 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("__pipe", [.table(segments.map { .string($0) }, [:])])
     }
 
+    /// `+| <cmd…>` — append the segments onto the current in-flight promise (see bootstrap __pipe_append)
+    /// rather than starting a fresh chain, so `recover` then `+| explore` behaves like `recover | explore`.
+    func appendPipe(_ segments: [String]) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("__pipe_append", [.table(segments.map { .string($0) }, [:])])
+    }
+
     /// Consult the optional Lua `on_send(cmd)` hook for one final, atomic outbound command (already
     /// past alias handling and `;` splitting) and return the commands that should actually be
     /// transmitted, in order. No hook defined → `[command]` unchanged. The hook's return value governs

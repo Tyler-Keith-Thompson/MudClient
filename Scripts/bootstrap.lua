@@ -784,9 +784,29 @@ function __pipe(segments)
   end
 end
 
--- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder. (Splitting +
+-- `+| <cmd…>` — APPEND to the current in-flight promise instead of starting a new chain. So `recover`
+-- then `+| explore` becomes `recover | explore`: the new segments are grafted onto the promise that's
+-- already running (via andThen), and the widget row is retitled to the whole line. If nothing's pending
+-- ("if possible" fails), we just run the segments as a fresh pipe. Returns true if it appended.
+function __pipe_append(segments)
+  if type(segments) ~= "table" or #segments == 0 then return false end
+  local head = __current_promise and __current_promise()
+  if not head then __pipe(segments); return false end   -- nothing to append to → just run it
+  local desc = head._track_desc or head.label or "?"
+  if __untrack_promise then __untrack_promise(head) end  -- the retitled tail supersedes this row
+  local chain, parts = head, {}
+  for i = 1, #segments do
+    local seg = segments[i]
+    chain = chain.andThen(function() return pipe_run_segment(seg) end)
+    parts[#parts + 1] = (seg or ""):match("^%s*(.-)%s*$")
+  end
+  if __track_promise then __track_promise(chain, desc .. " | " .. table.concat(parts, " | ")) end
+  return true
+end
+
+-- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder + append. (Split +
 -- escaping is Swift's job now — InputService.pipeSegments — tested on that side.)
-_PIPE_TEST = { run = pipe_run_segment, pipe = __pipe, callable = pipe_is_callable }
+_PIPE_TEST = { run = pipe_run_segment, pipe = __pipe, append = __pipe_append, callable = pipe_is_callable }
 
 -- scripts / documentation
 doc("load", { sig = "load(path)", group = "scripts",

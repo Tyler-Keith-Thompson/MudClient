@@ -105,3 +105,34 @@ test("__pipe registers the whole pipe as a single widget row and de-registers th
   expect(present("A")):eq(false)                  -- head superseded by the line (de-registered)
   _G.wpipeA, _G.wpipeB = nil, nil
 end)
+
+-- ---- +| : append to the current in-flight promise -------------------------------------------------
+
+test("+| grafts the segments onto the current promise and retitles the widget row", function()
+  local head = _PROMISE_TEST.builder(function(res) _G.__ap_res = res end, "wtesthead")
+  head.__start()                                       -- running; it's the newest pending → the "current"
+  expect(_PROMISE_TEST.current() == head):eq(true)
+  local sent, real_send = {}, send; _G.send = function(c) sent[#sent + 1] = c end
+  local ok = _PIPE_TEST.append({ "wtestcmd" })         -- like typing `+| wtestcmd`
+  expect(ok):eq(true)
+  local function present(d)
+    for _, e in ipairs(_PROMISE_TEST.active()) do if e.desc == d then return true end end
+    return false
+  end
+  expect(present("wtesthead | wtestcmd")):eq(true)     -- one row, the whole line
+  expect(present("wtesthead")):eq(false)               -- the old standalone row is gone
+  expect(#sent):eq(0)                                  -- appended step waits for the head to resolve
+  _G.__ap_res()                                        -- head done → the appended command runs
+  expect(sent[1]):eq("wtestcmd")
+  _G.send, _G.__ap_res = real_send, nil
+end)
+
+test("+| with nothing in flight falls back to just running the segments", function()
+  _PROMISE_TEST.cancel_all()                           -- clear everything → no "current" promise
+  expect(_PROMISE_TEST.current()):eq(nil)
+  local ok = _PIPE_TEST.append({ "wtestfallback" })
+  expect(ok):eq(false)                                 -- nothing to append to
+  local cur = _PROMISE_TEST.current()                  -- but it ran the segment as a fresh promise
+  expect(cur ~= nil):eq(true)
+  expect(cur._track_desc):eq("wtestfallback")
+end)
