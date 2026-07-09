@@ -67,18 +67,35 @@ test("minions_pending_spell_heal: only a below-full SKELETAL minion counts", fun
   end)
 end)
 
-test("all_minions_ready: skeletal must be FULL; regen minions only need frac; player excluded", function()
-  with_group({ me(), minion("A skeletal spider", 38, 39) }, {}, function()  -- 97%, still not full
+test("all_minions_ready: SMALL pools must be full, BIG pools only need frac; player excluded", function()
+  with_group({ me(), minion("A skeletal spider", 38, 39) }, {}, function()  -- 97% but pool<100 → not full
     expect(AA.all_minions_ready(0.90)):falsy()
   end)
   with_group({ me(), minion("A skeletal spider", 39, 39) }, {}, function()
     expect(AA.all_minions_ready(0.90)):truthy()
   end)
-  with_group({ me(), minion("A flesh beast", 437, 485) }, {}, function()   -- ~90.1% regen → ready at frac
+  with_group({ me(), minion("A flesh beast", 437, 485) }, {}, function()   -- ~90.1% big pool → ready at frac
     expect(AA.all_minions_ready(0.90)):truthy()
   end)
-  with_group({ me(), minion("A flesh beast", 300, 485) }, {}, function()   -- ~62% regen → not ready
+  with_group({ me(), minion("A flesh beast", 300, 485) }, {}, function()   -- ~62% big pool → not ready
     expect(AA.all_minions_ready(0.90)):falsy()
+  end)
+end)
+
+test("the ready threshold is by POOL SIZE, not creature type", function()
+  -- A big-pool construct (200 max) only needs frac even though it's skeletal…
+  with_group({ me(), minion("a bone golem", 180, 200) }, {}, function()    -- 90% of a 200 pool
+    expect(AA.all_minions_ready(0.90)):truthy()
+  end)
+  with_group({ me(), minion("a bone golem", 179, 200) }, {}, function()    -- 89.5% → below frac
+    expect(AA.all_minions_ready(0.90)):falsy()
+  end)
+  -- …and a small-pool natural creature (<100) must be topped to FULL even though it self-regens.
+  with_group({ me(), minion("a fire beetle", 89, 90) }, {}, function()     -- 98.9%, not full
+    expect(AA.all_minions_ready(0.90)):falsy()
+  end)
+  with_group({ me(), minion("a fire beetle", 90, 90) }, {}, function()
+    expect(AA.all_minions_ready(0.90)):truthy()
   end)
 end)
 
@@ -196,6 +213,34 @@ test("choose_recovery_position sleeps once the skeletal minions are topped off",
   AA.choose_recovery_position()
   state, _G.send = saved_state, saved_send
   expect(sent[1]):eq("sleep")
+end)
+
+-- A FULL player shouldn't stay asleep just because minions aren't done. If skeletal minions still need
+-- casting, wake to rest (can't cast asleep); if only natural-regen minions are left, stand up and wait.
+local function choose_with(position, group)
+  local saved_state, saved_send = state, send
+  local sent = {}
+  state = { name = "Me", hp = 100, maxhp = 100, mana = 100, maxmana = 100, stam = 100, maxstam = 100,
+            position = position, recover = true, group = group }
+  _G.send = function(c) sent[#sent + 1] = c end
+  AA.choose_recovery_position()
+  state, _G.send = saved_state, saved_send
+  return sent
+end
+
+test("full player with a skeletal minion still to heal WAKES from sleep to rest", function()
+  local sent = choose_with("sleeping", { me(), minion("A skeletal spider", 10, 39) })
+  expect(sent[1]):eq("rest")   -- can't cast asleep → drop to resting
+end)
+
+test("full player waiting only on natural-regen minions STANDS UP (nothing to do)", function()
+  local sent = choose_with("sleeping", { me(), minion("A flesh beast", 300, 485) })
+  expect(sent[1]):eq("stand")
+end)
+
+test("full player already standing while waiting on regen minions sends nothing", function()
+  local sent = choose_with("standing", { me(), minion("A flesh beast", 300, 485) })
+  expect(#sent):eq(0)
 end)
 
 test("recovery doesn't complete until skeletal minions are topped off", function()

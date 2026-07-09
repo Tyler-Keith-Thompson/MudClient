@@ -31,6 +31,7 @@ do
     effects = {},                        -- timed self-effects (kxwt_spst): name -> remaining-time text
     action = 0,                          -- kxwt_action code; >= 50 prevents spellcasting
     music = {},                          -- channel -> current track name (kxwt_music), for the HUD ♪
+    auto_assist = true,                  -- auto-`assist` when your minions are fighting but you aren't
   }
   for k, v in pairs(defaults) do if state[k] == nil then state[k] = v end end
   -- (name/gold/exp/expcap/hp/maxhp/mana/maxmana/stam/maxstam/position/room_*/area/terrain/
@@ -65,18 +66,33 @@ local minions_pending_spell_heal   -- () -> bool: any skeletal (no-regen) minion
 local all_minions_ready            -- (frac) -> bool: every minion at its target (skeletal=full, else frac)
 local heal_minions_kick            -- () -> nil: (re)start the minion-heal driver
 local reset_minion_heal            -- () -> nil: clear the minion-heal driver (on recovery end/cancel)
+local recovery                     -- { pct, settle } — the active recovery's target + promise callbacks
 
--- Pick the recovery posture for the current vitals — and current posture. rest keeps more of your guard,
--- so it wins when only mana is lacking (hp/stam already high); otherwise sleep heals fastest. Context
--- aware: only send a command when it actually deepens the posture. Already resting/sleeping when rest is
--- enough → send nothing; sitting/resting when we want sleep → escalate to sleep. No redundant spam.
+-- Pick the recovery posture for the current vitals, current posture, AND what the minions still need.
+-- rest keeps more of your guard, so it wins when only mana is lacking (hp/stam already high); otherwise
+-- sleep heals fastest. Context aware: only send a command when it actually changes the posture — no spam.
 local function choose_recovery_position()
+  local player_done = ready(recovery and recovery.pct or nil)
+  local cast_pending = minions_pending_spell_heal and minions_pending_spell_heal()
+  if player_done then
+    -- You're fully recovered; you're only still "recovering" because the minions aren't all topped off.
+    -- There's no point staying asleep (or even resting) when you're full: either cast on the skeletal
+    -- ones or just wait standing on the natural-regen ones.
+    if cast_pending then
+      -- You must cast bolster/soothe on the skeletal minions, which you can't do asleep — wake to resting.
+      if recovery_depth(state.position) >= 2 then send("rest") end
+    else
+      -- Only natural-regen minions left to wait on — nothing for you to do, so stand back up.
+      if recovery_depth(state.position) > 0 then send("stand") end
+    end
+    return
+  end
+  -- You still need to recover yourself. rest when only mana is low (keeps your guard), else sleep — but
+  -- you can't cast while asleep, so cap at rest while skeletal minions still need bolster/soothe. rest
+  -- heals you a bit slower than sleep, but the minions can't heal themselves at all.
   local hp, mp, sp = pct(state.hp, state.maxhp), pct(state.mana, state.maxmana), pct(state.stam, state.maxstam)
   local want = (hp > 0.85 and mp < 1 and sp > 0.75) and "rest" or "sleep"
-  -- You can't cast while asleep, so as long as skeletal minions still need bolster/soothe, cap the
-  -- posture at rest (which still recovers you AND lets you cast). We escalate to sleep only once they're
-  -- topped off. rest heals you a bit slower than sleep, but the minions can't heal themselves at all.
-  if want == "sleep" and minions_pending_spell_heal and minions_pending_spell_heal() then want = "rest" end
+  if want == "sleep" and cast_pending then want = "rest" end
   local target = (want == "sleep") and 2 or 1
   if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
   send(want)
@@ -86,7 +102,7 @@ end
 -- resolve/reject callbacks of the promise recover() returned, while one is waiting (nil otherwise).
 -- end_recovery() is the single settle point: it clears the flag, restores the default threshold, and
 -- resolves (completed) or rejects (interrupted: you moved, a fight started, you cancelled) the promise.
-local recovery = { pct = READY_PCT, settle = nil }
+recovery = { pct = READY_PCT, settle = nil }
 local function end_recovery(completed, reason)
   state.recover = false
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
@@ -102,7 +118,9 @@ local function maybe_complete_recovery()
   -- healed to full, natural-regen minions we simply waited on. Until then, keep resting (and, if the
   -- skeletal minions are now all healed but you still want to sleep for your own vitals, re-pick the
   -- posture so we escalate rest -> sleep).
-  if state.recover and recovery_depth(state.position) >= 1 and ready(recovery.pct)
+  -- No posture gate: once you're standing-and-waiting on natural-regen minions (choose stands you up
+  -- when you're full but they aren't), completion must still fire when they finally top off.
+  if state.recover and ready(recovery.pct)
      and all_minions_ready and all_minions_ready(recovery.pct) then
     echo("You have recovered and are ready to adventure!")
     send("stand")
@@ -136,9 +154,17 @@ end
 -- a fixed ordinal. Instead we SWEEP: cycle the ordinal 1..K; the full ones refund harmlessly and the
 -- hurt one gets healed within K casts. A refusal advances the sweep past that slot.
 
--- Skeletal-cap override: skeletal minions have tiny HP pools, so a few missing points is a big chunk of
--- them — heal them to FULL, not the recovery threshold. Natural-regen minions just track `frac`.
-local MINION_FULL = 1.0
+-- How full a minion must be before recovery is satisfied with it — by HP POOL SIZE, not creature type.
+-- Small pools (< 100 max hp: the skeletal spiders/mage at ~40-80) must be topped to FULL, since a few
+-- missing points is a big fraction of them. Big pools (the flesh beast's ~485) just respect the recovery
+-- threshold `frac` — waiting for a huge bar to regen its last point is pointless. `frac` defaults to the
+-- active recovery target (recovery.pct), so `recover 80` holds the flesh beast to 80% but still fulls the
+-- little ones.
+local MINION_FULL_BELOW = 100
+local function minion_ready_target(m, frac)
+  if (m.maxhp or 0) < MINION_FULL_BELOW then return 1.0 end
+  return frac or (recovery and recovery.pct) or READY_PCT
+end
 -- Below this fraction a wound is big enough for bolster (the strong heal); at or above it we use soothe
 -- (the weak heal) so the game doesn't refuse it as "doesn't need that much healing" near full.
 local BOLSTER_BELOW = 0.70
@@ -160,24 +186,22 @@ local function minion_target_word(name)
   return (name or ""):match("(%S+)%s*$") or ""
 end
 
--- () -> bool: any skeletal (no-regen) minion still below full — used to keep posture at rest.
+-- () -> bool: any skeletal (no-regen) minion still below its ready target — used to keep posture at rest.
 minions_pending_spell_heal = function()
   for _, m in ipairs(state.group or {}) do
-    if not is_self_row(m) and minion_needs_spell_heal(m.name) and (m.hp or 0) < (m.maxhp or 0) then
+    if not is_self_row(m) and minion_needs_spell_heal(m.name)
+       and pct(m.hp, m.maxhp) < minion_ready_target(m) then
       return true
     end
   end
   return false
 end
 
--- (frac) -> bool: every minion at its target — skeletal healed to full, natural-regen ones up to `frac`.
+-- (frac) -> bool: every minion at its ready target (small pools to full, big pools to `frac`) — whether
+-- we heal them (skeletal) or just wait on their natural regen (flesh beast, clay man, ...).
 all_minions_ready = function(frac)
-  frac = frac or READY_PCT
   for _, m in ipairs(state.group or {}) do
-    if not is_self_row(m) then
-      local target = minion_needs_spell_heal(m.name) and MINION_FULL or frac
-      if pct(m.hp, m.maxhp) < target then return false end
-    end
+    if not is_self_row(m) and pct(m.hp, m.maxhp) < minion_ready_target(m, frac) then return false end
   end
   return true
 end
@@ -193,12 +217,12 @@ reset_minion_heal = function()
   minion_heal.token = minion_heal.token + 1   -- kill any in-flight timeout
 end
 
--- Pick the most-hurt skeletal minion still below full (skipping any keyword we've given up on).
+-- Pick the most-hurt skeletal minion still below its ready target (skipping any keyword we gave up on).
 local function most_hurt_spell_minion()
   local best, best_frac
   for _, m in ipairs(state.group or {}) do
     if not is_self_row(m) and minion_needs_spell_heal(m.name)
-       and (m.hp or 0) < (m.maxhp or 0)
+       and pct(m.hp, m.maxhp) < minion_ready_target(m)
        and not minion_heal.blocked[minion_target_word(m.name)] then
       local f = pct(m.hp, m.maxhp)
       if not best_frac or f < best_frac then best, best_frac = m, f end
@@ -832,6 +856,26 @@ end
 doc(engaged, { name = "engaged", sig = "engaged([now])", group = "combat",
   text = "True when you're in a fight: the kxwt_fighting target is live OR combat text (melee-round lines) was seen within the last ~10s. Covers nomelee fights, where the server sends NO kxwt_fighting at all." })
 
+-- Auto-assist. When your minions (or you) are getting hit by an enemy but you're NOT in the melee round
+-- yourself — engaged() is true from the combat text, yet state.fighting is false (no kxwt_fighting), the
+-- "dimmed target" state — jump into the fight with `assist` so you (and AutoFight) actually engage. Fires
+-- off the melee-round trigger (which has already identified the enemy and confirmed your side is in it),
+-- debounced so the many rounds-per-second lines don't spam `assist`. Off via `autoassist off`.
+local ASSIST_COOLDOWN = 3   -- seconds between assist attempts (retries if the first didn't pull you in)
+local assist_at = 0
+local function maybe_assist(now)
+  if not state.auto_assist then return end
+  if state.fighting then return end          -- already in the melee round → nothing to assist into
+  now = now or os.time()
+  if now < assist_at + ASSIST_COOLDOWN then return end
+  assist_at = now
+  send("assist")
+end
+-- kxwt_fighting -1 (combat ended) resets the debounce so the NEXT fight assists immediately.
+_AA_TEST = _AA_TEST or {}
+_AA_TEST.maybe_assist = maybe_assist
+_AA_TEST.reset_assist = function() assist_at = 0 end
+
 -- Feed the tracker. The current target's EXACT reading (kxwt_fighting), every melee-round line (names
 -- the enemy and proves engagement), and every condition line while engaged update the table; combat
 -- end / room change / mob death clear or remove entries. The condition trigger is gated on engaged()
@@ -841,6 +885,7 @@ trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, p, name)
 end)
 trigger([[^kxwt_fighting -1$]], function()
   state.opponents = {}; state.engaged_until = nil
+  assist_at = 0                      -- fight over → next fight may assist immediately
 end)
 trigger([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|devastates|maims|mutilates|dismembers|disembowels|massacres|obliterates|demolishes|destroys|annihilates|misses|nicks|cuts|gouges|gashes|lacerates|shreds|mangles|rends|thumps|mars|batters|thrashes|clobbers|smashes|pulverizes) ]],
   function(line)
@@ -852,6 +897,7 @@ trigger([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|dev
     state.engaged_until = now + ENGAGE_TTL
     end_recovery(false, "combat started")             -- fights (kxwt-visible or not) cancel recovery
     opponent_note(state.opponents, enemy, nil, now, false)   -- name sighting; keeps any known pct
+    maybe_assist(now)                                  -- your side is fighting; jump in if you aren't
   end)
 trigger([[(near death|mortally wounded|awful|pretty hurt|nasty wounds|a few wounds|small wounds|few scratches|excellent)]],
   function(line)
@@ -1235,18 +1281,32 @@ function in_combat() return engaged() end
 -- so nothing fires late. We always ATTEMPT each harvest and let the game reject it instantly when
 -- teeth are full / you lack the skill (that reply both advances us and guarantees the loot response
 -- has already arrived, so the empty/dirty decision is never made early).
-local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil, killed = false }
+local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil,
+                 killed = false, settle = nil }
 if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the loot/sacrifice decision is unit-tested
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
 
 -- `killed` = a mob actually DIED this fight (kxwt_mdeath), so combat ending means we have corpses to
 -- work. Cleared here (and on a room change), so ending combat by FLEEING — which changes rooms and
--- leaves no corpse of ours — never kicks off looting.
-function corpse_done() corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false end
+-- leaves no corpse of ours — never kicks off looting. Settling the promise (resolve) drops the row from
+-- the promise widget, whether the pass finished naturally or was stopped (off / room change).
+function corpse_done()
+  corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
+  local s = corpse.settle; corpse.settle = nil
+  if s then s.resolve() end
+end
 
 function corpse_start()
   if not corpse.on or corpse.active or in_combat() then return end
   corpse.active = true; corpse.idx = 1
+  -- Surface the loot pass as a tracked promise so it shows in the HUD promise widget ("looting corpses")
+  -- and disappears when corpse_done() resolves it. Guarded so the driver still runs without Promise.lua.
+  if __promise then
+    __promise(function(resolve, reject, onCancel)
+      corpse.settle = { resolve = resolve, reject = reject }
+      onCancel(function() corpse.settle = nil; if corpse.active then corpse_done() end end)
+    end, "looting corpses")
+  end
   corpse_process()
 end
 
@@ -1434,6 +1494,17 @@ alias([[^recover$]], function()
     recover()   -- go through the promise (not begin_recovery) so the recovery shows in the promise widget
   end
 end)
+-- `autoassist [on|off]` — toggle/report the auto-`assist` (jump into a fight your minions are in when
+-- you're not). NOT named `assist` — that's a real game command we must never shadow.
+alias([[^autoassist\s*(\w*)$]], function(_, arg)
+  local a = (arg or ""):lower()
+  if a == "on" then state.auto_assist = true
+  elseif a == "off" then state.auto_assist = false
+  elseif a ~= "" then echo("Usage: autoassist [on|off]"); return end
+  echo("Auto-assist is " .. (state.auto_assist and "ON" or "OFF")
+    .. " — I " .. (state.auto_assist and "will" or "won't") .. " `assist` when your minions are fighting and you aren't.")
+end)
+
 -- `recover off` — the only way to end an in-progress recovery (bare `recover` no longer toggles).
 alias([[^recover off$]], function()
   if state.recover then

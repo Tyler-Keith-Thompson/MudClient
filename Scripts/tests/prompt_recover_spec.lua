@@ -26,8 +26,12 @@ test("choose_recovery_position rests only when hp>85% AND mana<100% AND stamina>
   expect(capture_choice(90, 50, 90)):eq("rest")
 end)
 
-test("choose_recovery_position sleeps when mana is already full (nothing to rest for)", function()
-  expect(capture_choice(100, 100, 100)):eq("sleep")   -- mana==100% is NOT <100%, so sleep
+test("choose_recovery_position does NOT deepen posture for a fully-recovered player", function()
+  -- Once you're at/above the recovery target there's nothing to rest or sleep for — staying down when
+  -- you're full makes no sense. (When you're full but still waiting on minions, the posture logic stands
+  -- you up / wakes you from sleep — covered in minion_heal_spec.) Position defaults to standing here, so
+  -- there's nothing to change → no command.
+  expect(capture_choice(100, 100, 100)):eq(nil)
 end)
 
 test("choose_recovery_position sleeps when hp or stamina is low (deeper heal needed)", function()
