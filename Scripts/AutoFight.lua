@@ -90,6 +90,13 @@ F.aoe_mode          = F.aoe_mode or "auto"
 F.pack              = F.pack or false
 F.room_seen         = F.room_seen or 0      -- tally of hostile "is here, fighting" lines in the current burst
 F.enemy_est         = F.enemy_est or 0      -- estimated engaged hostiles: set by a look, counted down by deaths
+-- Each engagement is a tracked promise (shows in the HUD widget, resolves when combat ends) — the
+-- fight-as-a-promise surface, matching recover()/eq/corpse. `fight_settle` holds its resolve/reject
+-- while a fight is live; `fight_promise` is the object (for autofight.current() chaining + retitling on
+-- target rollover). NOT persisted across reload — the Promise layer is fresh then, so old handles are
+-- stale; cleared unconditionally (not `or`).
+F.fight_settle      = nil
+F.fight_promise     = nil
 
 -- Command capture, always on (cheap, cleared each fight) so the test harness can read the exact send
 -- sequence without stubbing the host `send`. `_AF_TEST.sent` aliases this table.
@@ -258,8 +265,33 @@ fail_again = function()
 end
 
 -- ---- fight lifecycle -----------------------------------------------------------------------------
+-- Fight-as-a-promise. begin_fight_promise() creates the tracked promise on the FIRST start_fight of an
+-- engagement (guarded so a target rollover — which re-runs start_fight — doesn't spawn a second) and
+-- retitles the widget row to the current target on a rollover. settle_fight_promise() resolves it when
+-- combat ends. Guarded on __promise so AutoFight still runs without the promise layer. Started
+-- SYNCHRONOUSLY so fight_settle is wired before any combat line can end the fight.
+local function begin_fight_promise(name)
+  local desc = "autofight: " .. (name or "?")
+  if F.fight_settle then
+    if __track_promise and F.fight_promise then __track_promise(F.fight_promise, desc) end   -- rollover → retitle
+    return
+  end
+  if not __promise then return end
+  local p = __promise(function(resolve, reject, onCancel)
+    F.fight_settle = { resolve = resolve, reject = reject }
+    onCancel(function() F.fight_settle = nil end)
+  end, desc)
+  if p and p.__start then p.__start() end
+  F.fight_promise = p
+end
+local function settle_fight_promise()
+  local s = F.fight_settle; F.fight_settle, F.fight_promise = nil, nil
+  if s then s.resolve() end
+end
+
 local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
+  begin_fight_promise(name)   -- track this engagement as a promise (once; retitles on target rollover)
   -- Do we already know the winning spell for this target name? If so, skip the probe entirely.
   local key = winner_key(name)
   local known = key and _AUTOFIGHT.winners[key]
@@ -395,6 +427,7 @@ local function on_fight_end()
   local was_engaged_fight = F.fighting and F.on_dead
   F.pack, F.enemy_est = false, 0                         -- combat truly over → next fight re-evaluates
   if F.fighting then end_fight() end
+  settle_fight_promise()                                 -- resolve the engagement's promise (combat is over)
   -- The fight we started via engage() is over (mob dead or fled): fire on_dead exactly once. Guarded on
   -- was-fighting so a stray -1 while we're still trying to land the opener (F.engaging) doesn't resolve.
   if was_engaged_fight then
@@ -549,6 +582,16 @@ end
 
 function autofight.status() if echo then echo(status_line()) end end
 
+-- current() — the in-flight fight as a PROMISE (or nil when not fighting): resolves when this engagement
+-- ends. Lets you chain off combat — autofight.current() and autofight.current().andThen(function() ...) —
+-- e.g. loot then explore once the fight is over. The fight also shows as an "autofight: <enemy>" row in
+-- the HUD promise widget on its own; this just hands you the handle.
+function autofight.current() return F.fight_promise end
+doc(autofight.current, { name = "autofight.current", sig = "autofight.current() -> promise|nil", group = "combat",
+  text = "The current fight as a promise (nil when not fighting), resolving when combat ends. Chain off "
+      .. "it — autofight.current().andThen(...) — to act once the fight is over. Also shown as an "
+      .. "'autofight: <enemy>' row in the HUD promise widget." })
+
 -- aoe([mode]) — control room-AOE (frostflower) use. "auto" (default): AOE once a pack is detected (a
 -- kill that rolls straight onto another enemy); "on": always AOE; "off": never. No arg reports current.
 function autofight.aoe(mode)
@@ -680,9 +723,13 @@ _AF_TEST = {
     if F.suspend_timer and cancel then cancel(F.suspend_timer) end
     F.suspend_timer, F.suspended = nil, false; fire()
   end,
+  begin_promise = begin_fight_promise,
+  settle_promise = settle_fight_promise,
+  fight_promise = function() return F.fight_promise end,
   reset = function()                                      -- clean pre-fight state, armed, for a test
     F.on = true
     end_fight()
+    settle_fight_promise()                                -- settle+clear any lingering fight promise
     F.self_sent = {}
     F.aoe_mode, F.pack, F.room_seen, F.enemy_est = "auto", false, 0, 0   -- hermetic: default AOE prefs
     F.room_burst_timer = nil

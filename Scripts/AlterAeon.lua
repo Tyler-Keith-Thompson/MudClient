@@ -366,7 +366,7 @@ function kxwt.corpse(mode) return corpse_command("corpse", mode or "") end
 doc(kxwt.dump, { name = "kxwt.dump", sig = "kxwt.dump([n])", group = "protocol",
   text = "Show the last n (default 15) captured kxwt_ protocol lines — the machinery normally hidden from the display." })
 doc(kxwt.corpse, { name = "kxwt.corpse", sig = "kxwt.corpse(['on'|'off'|'status'])", group = "protocol",
-  text = "Control the after-kill corpse automation (loot -> harvest -> sacrifice). No arg reports status." })
+  text = "Control the after-kill corpse automation (harvest teeth/spellcomps; bsac+sac only the EMPTY corpses, leave any holding loot intact — no looting). No arg reports status." })
 
 -- Callable table: forward a legacy subcommand string to the right member.
 setmetatable(kxwt, { __call = function(_, args)
@@ -1287,21 +1287,22 @@ end
 -- "am I in the melee round with an exact target" should read state.fighting directly.
 function in_combat() return engaged() end
 
--- ===== Corpse automation (kxwt_mdeath-driven) — fully stream/trigger-driven, NO timers =====
+-- ===== Corpse automation (kxwt_mdeath-driven) — fully stream/trigger-driven =====
 -- ON by default (kxwt.corpse('off') to stop). Runs only after an actual KILL (not a flee — see below).
--- When you're OUT OF COMBAT, walk the corpses in the room BY INDEX (1.corpse, 2.corpse, ...). For each:
--- get all -> harvest teeth -> harvest spellcomps, then
---   * LOOTED/EMPTY corpse -> bsac -> sac. `sac` removes it, so the next corpse shifts into THIS index
---     and we re-process the same index.
---   * DIRTY corpse (inventory full, so items were LEFT behind) -> leave it intact, step to the NEXT index.
--- So a dirty corpse never blocks one behind it, and we never sacrifice loot we couldn't carry. We stop
--- when there's no corpse at the current index. Every step advances off a real STREAM line — never a timer,
--- so nothing fires late. We always ATTEMPT each harvest and let the game reject it instantly when
--- teeth are full / you lack the skill (that reply both advances us and guarantees the loot response
--- has already arrived, so the empty/dirty decision is never made early).
-local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil,
-                 killed = false, settle = nil, watchdog = nil }
-if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the loot/sacrifice decision is unit-tested
+-- When you're OUT OF COMBAT, walk the corpses in the room BY INDEX (1.corpse, 2.corpse, ...) and HARVEST
+-- each: harvest teeth -> harvest spellcomps, then:
+--   * EMPTY corpse -> bsac -> sac. `sac` removes it, so the next corpse shifts into THIS index (re-process).
+--   * HAS LOOT -> leave it INTACT and step to the NEXT index. We never `get all` (looting was removed by
+--     request), and we must never sacrifice a corpse that still holds items — that would destroy them,
+--     incl. binding/quest gear (the bug fixed earlier). "Has loot" is read from the contents the game
+--     auto-prints at the kill ("(on ground) the corpse of X contains:"); each corpse's NAME comes from its
+--     own "You start harvesting…" reply, so we only sac the ones we're sure are empty.
+-- We stop when there's no corpse at the current index. Each step advances off a real STREAM line; the
+-- watchdog below is only a last-resort net for a missed line.
+local corpse = { on = true, active = false, idx = 1, step = nil, room = nil,
+                 killed = false, settle = nil, watchdog = nil,
+                 with_items = {}, cur_name = nil }
+if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the empty/has-loot decision is unit-tested
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
 
 -- Stall watchdog. Pacing stays STREAM-DRIVEN (each step advances off a real game line); this is only a
@@ -1309,7 +1310,7 @@ local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (gua
 -- comps with no distinct "done" line), so if we ever miss a terminal the machine would hang forever —
 -- corpse.active stuck true (blocking every future loot pass) and the promise row leaking. If no step
 -- has advanced within CORPSE_WATCHDOG seconds, force the pass closed so nothing stays wedged.
-local CORPSE_WATCHDOG = 15
+local CORPSE_WATCHDOG = 5
 local function corpse_touch()
   if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   if not corpse.active then return end
@@ -1333,9 +1334,9 @@ end
 function corpse_start()
   if not corpse.on or corpse.active or in_combat() then return end
   corpse.active = true; corpse.idx = 1
-  -- Surface the loot pass as a tracked promise so it shows in the HUD promise widget ("looting corpses")
-  -- and disappears when corpse_done() resolves it. Guarded so the driver still runs without Promise.lua.
-  -- CRITICAL: start the promise SYNCHRONOUSLY (p.__start()) so corpse.settle is wired *before* we loot.
+  -- Surface the harvest pass as a tracked promise so it shows in the HUD promise widget ("harvesting
+  -- corpses") and disappears when corpse_done() resolves it. Guarded so the driver runs without Promise.lua.
+  -- CRITICAL: start the promise SYNCHRONOUSLY (p.__start()) so corpse.settle is wired *before* we harvest.
   -- The builder otherwise runs its executor on the next tick (after(0)); but corpse_done() — driven by
   -- stream lines — can fire before that tick, find corpse.settle still nil, and never resolve, leaking
   -- the widget row forever. Running the executor now removes the timing dependency entirely.
@@ -1343,7 +1344,7 @@ function corpse_start()
     local p = __promise(function(resolve, reject, onCancel)
       corpse.settle = { resolve = resolve, reject = reject }
       onCancel(function() corpse.settle = nil; if corpse.active then corpse_done() end end)
-    end, "looting corpses")
+    end, "harvesting corpses")
     if p and p.__start then p.__start() end
   end
   corpse_process()
@@ -1354,14 +1355,13 @@ function corpse_process()
   if not corpse.active then return end
   if corpse.idx > CORPSE_MAX then corpse_done(); return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
-  corpse.dirty = false
-  corpse.step = "loot"
-  send("get all " .. corpse.idx .. ".corpse")     -- no corpse at idx -> "don't see anything named" ends us
-  corpse.step = "teeth"
+  corpse.step, corpse.cur_name = "teeth", nil   -- cur_name is re-learned from this corpse's harvest reply
+  -- Harvest is the FIRST thing we send now — no `get all`. On a missing corpse this yields "You don't see
+  -- anything named '<n>.corpse'" (or the watchdog fires), which ends the walk.
   send("harvest teeth " .. corpse.idx .. ".corpse")
 end
 
--- A harvest terminal line was seen -> next harvest, or on to the sacrifice decision.
+-- A harvest terminal line was seen -> next harvest, or on to the empty/has-loot decision.
 function corpse_harvest_done()
   if not corpse.active then return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
@@ -1373,14 +1373,18 @@ function corpse_harvest_done()
   end
 end
 
+-- Done harvesting this corpse. Sacrifice it ONLY if we're sure it's empty: we know its name (from its
+-- harvest reply) AND the kill didn't auto-print any loot contents for it. Otherwise (has loot, or name
+-- unknown) leave it INTACT and step to the next index — never destroy items.
 function corpse_finish()
   if not corpse.active then return end
-  if corpse.dirty then
-    corpse.idx = corpse.idx + 1   -- leave this corpse (it still has items); step past it
-    corpse_process()
-  else
+  local name = corpse.cur_name
+  if name and not corpse.with_items[name] then
     corpse.step = "bsac"
-    send("bsac " .. corpse.idx .. ".corpse")   -- advances to sac on the bsac result line
+    send("bsac " .. corpse.idx .. ".corpse")   -- empty → blood-sacrifice, then sac on the bsac result line
+  else
+    corpse.idx = corpse.idx + 1                 -- has loot (or unsure) → leave it, next corpse
+    corpse_process()
   end
 end
 
@@ -1402,9 +1406,20 @@ trigger([[^kxwt_fighting -1$]], function() if corpse.killed then corpse_start() 
 -- Room change abandons this room's corpses (they don't follow you) -> stop, so we never target a
 -- corpse in the wrong room (e.g. after fleeing).
 trigger([[^kxwt_rvnum (-?\d+)]], function(_, vnum)
-  if corpse.room ~= nil and corpse.room ~= vnum then corpse_done() end
+  if corpse.room ~= nil and corpse.room ~= vnum then
+    corpse_done()
+    corpse.with_items = {}   -- has-loot knowledge is per-room; forget it when we leave
+  end
   corpse.room = vnum
 end)
+
+-- Loot detection WITHOUT looting: the game auto-prints a corpse's contents at the kill — "(on ground)
+-- the corpse(s) of <name> contains:" — whenever it holds items. Record those names; the harvest walk
+-- then bsac/sacs only the corpses that never showed contents (see corpse_finish). Loose (unanchored) on
+-- purpose: over-recording just leaves a corpse un-sacrificed, while missing one would destroy its loot.
+trigger([[the corpses? of (.+) contains:]], function(_, name) corpse.with_items[name] = true end)
+-- Learn the current corpse's name from its own harvest reply so we can match it against with_items.
+trigger([[^You start harvesting teeth from the corpses? of (.+?)\.?$]], function(_, name) corpse.cur_name = name end)
 
 -- No corpse at the current index -> the room's corpses are done. The `'<n>.corpse'` miss is how the
 -- index-walk detects "no more corpses", so gag it: it's internal plumbing, not something you did.
@@ -1412,27 +1427,14 @@ gag([[^You don't see anything named '\d+\.corpse']])
 trigger([[^You don't see anything named]], function() if corpse.active then corpse_done() end end)
 trigger([[^You don't see that here]], function() if corpse.active then corpse_done() end end)
 
--- Loot outcome -> we couldn't take everything (inventory full), so items REMAIN in this corpse: leave
--- it intact (don't sacrifice loot) and step to the next index. NOTE: we deliberately do NOT treat the
--- "(on ground) the corpse of X contains:" loot HEADER as dirty — that line prints on every corpse that
--- has items, even when we then take them all, and mis-flagging it made fully-looted corpses get skipped
--- (and probe a phantom next index) instead of sacrificed.
-trigger([[^You can't carry that many items]], function() if corpse.active then corpse.dirty = true end end)
--- A BINDING object (glow/quest gear) can't be taken by a generic `get all` — it needs `get <name>` to
--- bind it, so it's LEFT in the corpse. That produced no "can't carry" line, so the old code sacrificed
--- the corpse and destroyed the item. Treat "must get it by name" / "is a binding object" as dirty too:
--- never sacrifice a corpse still holding loot we couldn't auto-take. (Over-marking dirty is safe — it
--- only leaves a corpse un-sacrificed; the harmful direction is destroying loot, which this prevents.)
-trigger([[^.+ is a binding object\b]], function() if corpse.active then corpse.dirty = true end end)
-trigger([[You must get it by name]], function() if corpse.active then corpse.dirty = true end end)
-
 -- Harvest terminal lines (^-anchored so another player can't fire them). Success-complete OR the
 -- instant "full"/"no skill" rejection — either way the harvest step is finished, so advance.
 trigger([[^You don't see any usable]], function() corpse_harvest_done() end)             -- teeth (likely spellcomps too)
 trigger([[^You can't safely carry any more teeth]], function() corpse_harvest_done() end) -- teeth full
 trigger([[^Your collected teeth grow restless]], function() corpse_harvest_done() end)    -- teeth full
 trigger([[^You don't know enough about the undead]], function() corpse_harvest_done() end) -- no spellcomp skill
-trigger([[^Looks like the corpse of .+ is too damaged for you to use]], function() corpse_harvest_done() end) -- corpse too mangled to harvest -> skip, keep going
+trigger([[^You can't harvest spell components from that]], function() corpse_harvest_done() end) -- this corpse yields no spellcomps
+trigger([[^Looks like the corpses? of .+ (is|are) too damaged for you to use]], function() corpse_harvest_done() end) -- corpse(s) too mangled to harvest -> skip, keep going (plural for swarm/group mobs)
 -- A SUCCESSFUL `harvest spellcomps` has no distinct "done" line — it just yields the component(s) and
 -- stops (unlike teeth, which end on "grow restless"). So the yield line IS the terminal for the
 -- spellcomps step. These are the necromancer fluid/bladder comps (bile + colored fluids); generalized to
@@ -1443,7 +1445,7 @@ trigger([[^You make a small incision and drain .+ into ]],
 trigger([[^You .+ tie off the ends]],
   function() if corpse.active and corpse.step == "spellcomps" then corpse_harvest_done() end end)
 
--- Blood sacrifice result (success OR the undead/"not intact" refusal) -> the final sacrifice.
+-- Blood-sacrifice result (success OR the undead/"not intact" refusal) -> the final sacrifice.
 trigger([[^You sacrifice blood from]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
 trigger([[^You can only blood sacrifice]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
 
@@ -1453,7 +1455,7 @@ function corpse_command(verb, rest)
   local m = (rest or ""):lower():match("^%s*(%S*)")
   if m == "on" then
     corpse.on = true
-    echo("[kxwt] corpse automation ON — out of combat, per corpse (by index): loot -> harvest teeth -> harvest spellcomps -> (if empty) bsac -> sac")
+    echo("[kxwt] corpse automation ON — out of combat, per corpse (by index): harvest teeth -> harvest spellcomps -> (if EMPTY) bsac -> sac; corpses holding loot are left intact (never `get all`, never sac loot)")
   elseif m == "off" then
     corpse.on = false; corpse_done()
     echo("[kxwt] corpse automation OFF")

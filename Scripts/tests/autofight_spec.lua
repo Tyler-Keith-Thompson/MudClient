@@ -475,3 +475,42 @@ test("a peaceful look (not fighting) never arms AOE", function()
   expect(AF.aoe_active()):eq(false)
   expect(AF.state().pack):eq(false)
 end)
+
+-- ---- fight-as-a-promise --------------------------------------------------------------------------
+local function fight_widget_has(desc)
+  for _, e in ipairs(active_promises()) do if e.desc == desc then return true end end
+  return false
+end
+
+test("a fresh fight is a tracked promise that shows in the widget and resolves when combat ends", function()
+  AF.reset()
+  _PROMISE_TEST.cancel_all()
+  AF.on_fight(90, "a gnoll warrior")            -- fresh engagement → start_fight → promise
+  expect(AF.fight_promise() ~= nil):eq(true)
+  expect(fight_widget_has("autofight: a gnoll warrior")):eq(true)
+  AF.on_fight_end()                             -- combat over → resolve
+  expect(AF.fight_promise()):eq(nil)
+  expect(fight_widget_has("autofight: a gnoll warrior")):eq(false)
+end)
+
+test("a target rollover retitles the SAME promise, not a second one", function()
+  AF.reset()
+  _PROMISE_TEST.cancel_all()
+  AF.on_fight(90, "a gnoll warrior")
+  local p1 = AF.fight_promise()
+  AF.on_fight(80, "a gnoll pup")                -- name change mid-combat (no -1) → rollover
+  expect(AF.fight_promise()):eq(p1)             -- same promise object
+  expect(fight_widget_has("autofight: a gnoll pup")):eq(true)      -- retitled to the new target
+  expect(fight_widget_has("autofight: a gnoll warrior")):eq(false)
+  AF.on_fight_end()
+end)
+
+test("autofight.current() exposes the in-flight promise, nil when not fighting", function()
+  AF.reset()
+  _PROMISE_TEST.cancel_all()
+  expect(autofight.current()):eq(nil)
+  AF.on_fight(90, "a rat")
+  expect(autofight.current() ~= nil):eq(true)
+  AF.on_fight_end()
+  expect(autofight.current()):eq(nil)
+end)

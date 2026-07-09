@@ -94,6 +94,16 @@ final class TerminalService {
     private var pendingLine = ""
     /// Cap on retained history lines; the oldest are dropped past this.
     private let scrollbackLimit = 5000
+    /// Serializes the scrollback buffer + its wrap cache. Server output (`recordOutput`, on the pump
+    /// task) and mouse-wheel scrolling (`physicalRows`, on the main thread) both touch these, so without
+    /// this they RACE on the array — a latent crash. Uncontended most of the time, so ~free.
+    private let scrollbackLock = NSLock()
+    /// Memoized `physicalRows` result. Re-wrapping the whole 5000-line buffer is O(buffer) and used to run
+    /// on EVERY mouse-wheel notch (a scroll = repeated full re-wraps → a multi-hundred-ms main-thread
+    /// hitch). The wrap only changes when the content or the width does, so we cache it and invalidate on
+    /// `recordOutput` / a width change — turning each wheel notch into an O(1) lookup.
+    private var wrapCache: [String]?
+    private var wrapCacheWidth = -1
     /// How many PHYSICAL (wrapped) rows the view is currently parked above the live tail. 0 = live,
     /// and while 0 every existing behaviour is untouched.
     private var scrollOffset = 0
@@ -653,6 +663,7 @@ final class TerminalService {
     /// bare carriage returns (rare — the connection pipeline normalises line endings) are dropped.
     private func recordOutput(_ text: String) {
         guard !text.isEmpty else { return }
+        scrollbackLock.lock(); defer { scrollbackLock.unlock() }
         var segment = pendingLine
         for ch in text {
             switch ch {
@@ -669,6 +680,7 @@ final class TerminalService {
         if scrollbackLines.count > scrollbackLimit {
             scrollbackLines.removeFirst(scrollbackLines.count - scrollbackLimit)
         }
+        wrapCache = nil                                     // content changed → the wrap memo is stale
     }
 
     /// Break one logical line into physical rows of at most `width` VISIBLE characters, copying ANSI
@@ -798,7 +810,15 @@ final class TerminalService {
         // Each row carries the SGR state active at its start (see selfContainedPhysicalRows), so the
         // scrolled-back repaint keeps colour on continuation rows and on lines after the first — the
         // repaint resets SGR per row, which otherwise dropped every colour set on an earlier line/row.
-        return Self.selfContainedPhysicalRows(scrollbackLines + [pendingLine], width: width)
+        // MEMOIZED: recomputed only when the content (recordOutput clears wrapCache) or the width changes;
+        // a burst of wheel notches with no new output all hit the cache. (COW makes the shared return safe
+        // to hand out even if another thread later replaces wrapCache.)
+        scrollbackLock.lock(); defer { scrollbackLock.unlock() }
+        if let cached = wrapCache, wrapCacheWidth == width { return cached }
+        let rows = Self.selfContainedPhysicalRows(scrollbackLines + [pendingLine], width: width)
+        wrapCache = rows
+        wrapCacheWidth = width
+        return rows
     }
 
     /// Drop terminal REPLIES from keyboard input: cursor-position reports (`ESC[<n>;<n>R`) and device-
@@ -1053,8 +1073,10 @@ final class TerminalService {
 
     /// Every logical output line seen so far (including the live tail), ANSI-stripped, oldest-first.
     private func strippedHistory() -> [String] {
+        scrollbackLock.lock()
         var lines = scrollbackLines
         if !pendingLine.isEmpty { lines.append(pendingLine) }
+        scrollbackLock.unlock()
         return lines.map { stripAnsi($0) }
     }
 
