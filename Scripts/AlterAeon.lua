@@ -57,6 +57,15 @@ end
 local RECOVERY_DEPTH = { standing = 0, kneeling = 0, sitting = 1, resting = 1, sleeping = 2 }
 local function recovery_depth(posn) return RECOVERY_DEPTH[posn or ""] or 0 end
 
+-- Forward declarations for the minion-healing block (defined just below the recovery machinery). The
+-- posture chooser and the completion check — both defined ABOVE that block — consult it: we must not
+-- sleep while skeletal minions still need casting (you can't cast asleep), and recovery isn't "done"
+-- until every minion is topped off too.
+local minions_pending_spell_heal   -- () -> bool: any skeletal (no-regen) minion still below full
+local all_minions_ready            -- (frac) -> bool: every minion at its target (skeletal=full, else frac)
+local heal_minions_kick            -- () -> nil: (re)start the minion-heal driver
+local reset_minion_heal            -- () -> nil: clear the minion-heal driver (on recovery end/cancel)
+
 -- Pick the recovery posture for the current vitals — and current posture. rest keeps more of your guard,
 -- so it wins when only mana is lacking (hp/stam already high); otherwise sleep heals fastest. Context
 -- aware: only send a command when it actually deepens the posture. Already resting/sleeping when rest is
@@ -64,6 +73,10 @@ local function recovery_depth(posn) return RECOVERY_DEPTH[posn or ""] or 0 end
 local function choose_recovery_position()
   local hp, mp, sp = pct(state.hp, state.maxhp), pct(state.mana, state.maxmana), pct(state.stam, state.maxstam)
   local want = (hp > 0.85 and mp < 1 and sp > 0.75) and "rest" or "sleep"
+  -- You can't cast while asleep, so as long as skeletal minions still need bolster/soothe, cap the
+  -- posture at rest (which still recovers you AND lets you cast). We escalate to sleep only once they're
+  -- topped off. rest heals you a bit slower than sleep, but the minions can't heal themselves at all.
+  if want == "sleep" and minions_pending_spell_heal and minions_pending_spell_heal() then want = "rest" end
   local target = (want == "sleep") and 2 or 1
   if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
   send(want)
@@ -76,6 +89,7 @@ end
 local recovery = { pct = READY_PCT, settle = nil }
 local function end_recovery(completed, reason)
   state.recover = false
+  if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
   recovery.settle, recovery.pct = nil, READY_PCT
   if s then if completed then s.resolve() else s.reject(reason or "recovery interrupted") end end
@@ -84,20 +98,197 @@ end
 -- Called from the kxwt_prompt trigger on every vitals update: stand + resolve once the target is met.
 -- Factored out (and exposed via _AA_TEST) so the spec can drive completion without the Swift trigger.
 local function maybe_complete_recovery()
-  if state.recover and recovery_depth(state.position) >= 1 and ready(recovery.pct) then
+  -- Done only when YOU are recovered AND every minion is topped off: skeletal (no-regen) minions we
+  -- healed to full, natural-regen minions we simply waited on. Until then, keep resting (and, if the
+  -- skeletal minions are now all healed but you still want to sleep for your own vitals, re-pick the
+  -- posture so we escalate rest -> sleep).
+  if state.recover and recovery_depth(state.position) >= 1 and ready(recovery.pct)
+     and all_minions_ready and all_minions_ready(recovery.pct) then
     echo("You have recovered and are ready to adventure!")
     send("stand")
     end_recovery(true)
     return true
   end
+  -- Not done yet. Re-pick the posture: once the skeletal minions are finally topped off we're allowed to
+  -- escalate rest -> sleep for your own remaining recovery. choose_recovery_position only sends when it
+  -- actually deepens the posture, so this is a no-op on the common tick.
+  if state.recover then choose_recovery_position() end
   return false
 end
 
--- Exposed for the test harness (Scripts/tests/recover_spec.lua, promise_spec.lua).
+-- ---- Minion healing during recovery -------------------------------------------------------------
+--
+-- The player animates undead (skeletal spider/mage, bone constructs) that have NO natural regen: the
+-- only way their HP comes back is the cleric actively casting on them. So `recover` doesn't just heal
+-- YOU — it tops those minions off with bolster/soothe. Everything else the player fields (flesh beast,
+-- clay man, summoned demons, natural pets) regenerates on its own; we never spend mana on them, but
+-- recovery still waits for them to come back up before it calls itself done.
+--
+-- Pacing is one cast at a time, settled by the game's own reply lines (mirrors AutoFight): a heal lands
+-- ("You repair the damage to X's body."), fails ("You fail to cast the spell '...'."), is refused
+-- ("X doesn't need that much healing right now." — fires when the spell is too strong for a tiny wound
+-- OR when we targeted the wrong one of several same-named minions; either way it REFUNDS the mana), or
+-- finds no target ("...you must use your name."). A fresh group roster (or a timeout backstop) drives
+-- the next cast.
+--
+-- Multiples: same-named minions are addressed by ordinal (1.spider, 2.spider, ...). The group roster's
+-- order isn't guaranteed to match the room's `N.keyword` order, so we can't map a hurt roster entry to
+-- a fixed ordinal. Instead we SWEEP: cycle the ordinal 1..K; the full ones refund harmlessly and the
+-- hurt one gets healed within K casts. A refusal advances the sweep past that slot.
+
+-- Skeletal-cap override: skeletal minions have tiny HP pools, so a few missing points is a big chunk of
+-- them — heal them to FULL, not the recovery threshold. Natural-regen minions just track `frac`.
+local MINION_FULL = 1.0
+-- Below this fraction a wound is big enough for bolster (the strong heal); at or above it we use soothe
+-- (the weak heal) so the game doesn't refuse it as "doesn't need that much healing" near full.
+local BOLSTER_BELOW = 0.70
+
+-- Skeletal/undead constructs the player raises: no natural regen, must be spell-healed. Matched by name
+-- ("skeletal spider", "skeletal mage", "bone ..."). Everything else is assumed to self-regen.
+local function minion_needs_spell_heal(name)
+  local low = (name or ""):lower()
+  return low:find("skelet", 1, true) ~= nil or low:find("bone ", 1, true) ~= nil
+end
+
+-- Roster helpers. state.group includes YOU (name == state.name) plus pets/groupmates; a minion is any
+-- entry that isn't you. (Other real players could be grouped too, but they regen and we never heal
+-- them, so lumping them with the natural-regen crowd is harmless.)
+local function is_self_row(m) return state.name and m.name == state.name end
+local function minion_target_word(name)
+  -- Cast target keyword = last word of the name ("A skeletal spider" -> "spider", "A skeletal mage"
+  -- -> "mage"), which is the distinctive noun the player actually types (see human traces).
+  return (name or ""):match("(%S+)%s*$") or ""
+end
+
+-- () -> bool: any skeletal (no-regen) minion still below full — used to keep posture at rest.
+minions_pending_spell_heal = function()
+  for _, m in ipairs(state.group or {}) do
+    if not is_self_row(m) and minion_needs_spell_heal(m.name) and (m.hp or 0) < (m.maxhp or 0) then
+      return true
+    end
+  end
+  return false
+end
+
+-- (frac) -> bool: every minion at its target — skeletal healed to full, natural-regen ones up to `frac`.
+all_minions_ready = function(frac)
+  frac = frac or READY_PCT
+  for _, m in ipairs(state.group or {}) do
+    if not is_self_row(m) then
+      local target = minion_needs_spell_heal(m.name) and MINION_FULL or frac
+      if pct(m.hp, m.maxhp) < target then return false end
+    end
+  end
+  return true
+end
+
+-- Driver state. `casting` = a heal is out, awaiting its reply line. `sweep[word]` = next ordinal to try
+-- for that keyword. `blocked[word]` = gave up on it this recovery (backstop against a refuse loop).
+-- `token` invalidates a stale timeout when a reply arrives first.
+local minion_heal = { casting = false, sweep = {}, blocked = {}, refuse_streak = 0, token = 0, last = nil }
+
+reset_minion_heal = function()
+  minion_heal.casting, minion_heal.refuse_streak = false, 0
+  minion_heal.sweep, minion_heal.blocked, minion_heal.last = {}, {}, nil
+  minion_heal.token = minion_heal.token + 1   -- kill any in-flight timeout
+end
+
+-- Pick the most-hurt skeletal minion still below full (skipping any keyword we've given up on).
+local function most_hurt_spell_minion()
+  local best, best_frac
+  for _, m in ipairs(state.group or {}) do
+    if not is_self_row(m) and minion_needs_spell_heal(m.name)
+       and (m.hp or 0) < (m.maxhp or 0)
+       and not minion_heal.blocked[minion_target_word(m.name)] then
+      local f = pct(m.hp, m.maxhp)
+      if not best_frac or f < best_frac then best, best_frac = m, f end
+    end
+  end
+  return best, best_frac
+end
+
+-- Count group members sharing a target keyword (so ordinals 1..K line up with the room's N.keyword).
+local function keyword_count(word)
+  local n = 0
+  for _, m in ipairs(state.group or {}) do
+    if minion_target_word(m.name) == word then n = n + 1 end
+  end
+  return n
+end
+
+-- Try to cast one heal at the most-hurt skeletal minion. No-op when not recovering, a cast is already
+-- out, casting is blocked (busy action / asleep), or nothing needs healing. Exposed via _AA_TEST.
+local function try_cast_heal()
+  if not state.recover or minion_heal.casting then return end
+  if (state.action or 0) >= 50 then return end          -- a busy action prevents spellcasting
+  if state.position == "sleeping" then return end        -- can't cast asleep (posture logic avoids this)
+  local m, f = most_hurt_spell_minion()
+  if not m then return end
+  local word = minion_target_word(m.name)
+  local K = keyword_count(word)
+  local target = word
+  local ord
+  if K > 1 then
+    ord = minion_heal.sweep[word] or 1
+    if ord > K then ord = 1 end
+    target = ord .. "." .. word
+  end
+  local spell = (f < BOLSTER_BELOW) and "bolster" or "soothe"
+  minion_heal.last = { word = word, ord = ord, K = K }
+  minion_heal.casting = true
+  send("c " .. spell .. " " .. target)
+  -- Backstop: if no reply line arrives (e.g. a silent failure), clear the flag and try again shortly.
+  local token = minion_heal.token + 1
+  minion_heal.token = token
+  after(3, function() if minion_heal.token == token then minion_heal.casting = false; try_cast_heal() end end)
+end
+
+-- Settle the outstanding cast on one of the game's reply lines, then decide the next move.
+--   ok           -> healed; wait for the refreshed roster to choose the next target
+--   fail         -> spell fizzled; retry the same target immediately
+--   full/notgt   -> this slot is topped (or wrong target); advance the sweep and try the next ordinal
+local MINION_REFUSE_CAP = 3   -- consecutive refuses per keyword beyond K before we give up on it
+local function minion_cast_settled(kind)
+  if not minion_heal.casting then return end
+  minion_heal.casting = false
+  minion_heal.token = minion_heal.token + 1     -- a reply beat the timeout; invalidate it
+  local last = minion_heal.last
+  if kind == "ok" then
+    minion_heal.refuse_streak = 0
+    return   -- next kxwt_group_end drives the following cast (roster reflects the new HP by then)
+  elseif kind == "fail" then
+    try_cast_heal()   -- unchanged roster -> same target; just retry
+    return
+  end
+  -- full / notgt: advance the sweep past this ordinal.
+  if last and (last.K or 1) > 1 then
+    minion_heal.sweep[last.word] = ((last.ord or 1) % last.K) + 1
+  end
+  minion_heal.refuse_streak = minion_heal.refuse_streak + 1
+  if last and minion_heal.refuse_streak > (last.K or 1) + MINION_REFUSE_CAP then
+    -- Swept every ordinal and still can't land a heal (roster says hurt but every cast refuses) —
+    -- give up on this keyword for the rest of this recovery so we don't loop forever.
+    if last.word then
+      minion_heal.blocked[last.word] = true
+      echo("\27[33m[recover] can't seem to heal '" .. last.word .. "'; skipping it.\27[0m")
+    end
+    minion_heal.refuse_streak = 0
+  end
+  try_cast_heal()
+end
+
+-- (Re)start the driver — called when a recovery begins and on every fresh group roster.
+heal_minions_kick = function() try_cast_heal() end
+
+-- Exposed for the test harness (Scripts/tests/recover_spec.lua, promise_spec.lua, minion_heal_spec.lua).
 _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              choose_recovery_position = choose_recovery_position, recovery_depth = recovery_depth,
              recovery = recovery, end_recovery = end_recovery,
-             maybe_complete_recovery = maybe_complete_recovery }
+             maybe_complete_recovery = maybe_complete_recovery,
+             minion_needs_spell_heal = minion_needs_spell_heal, minion_target_word = minion_target_word,
+             minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,
+             minion_heal = minion_heal, try_cast_heal = try_cast_heal,
+             minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -292,7 +483,17 @@ trigger([[^kxwt_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
 trigger([[^kxwt_group_end$]], function()
   if group_capturing then state.group = group_buf end
   group_capturing = false
+  -- Fresh roster: if we're recovering, this is the cue to (re)pick the next minion to heal.
+  if state.recover then heal_minions_kick() end
 end)
+
+-- Minion-heal pacing: settle the outstanding cast on the game's own reply lines (see the minion-healing
+-- block above). Anchored so another player's speech can't spoof them.
+trigger([[^You repair the damage to .+'s body\.$]], function() minion_cast_settled("ok") end)
+trigger([[^You fail to cast the spell '(soothe wounds|bolster)'\.$]], function() minion_cast_settled("fail") end)
+trigger([[^.+ doesn't need that much healing right now\.$]], function() minion_cast_settled("full") end)
+trigger([[^If you really want to cast that on yourself, you must use your name\.$]],
+  function() minion_cast_settled("notgt") end)
 
 -- Environment: sky/time/weather. kxwt_time is "<mud-minutes> <daypart> <clock> <am/pm>";
 -- kxwt_precipitation is a 0-100ish intensity; kxwt_sky is "<outdoors> <sky-visible> <overcast>" (1/0).
@@ -1175,6 +1376,7 @@ local function begin_recovery(frac)
   echo(string.format("Recovering — resting/sleeping; I'll stand you up once every vital hits %d%%.",
        math.floor(frac * 100 + 0.5)))
   choose_recovery_position()
+  heal_minions_kick()   -- start topping off no-regen minions right away (roster refreshes drive the rest)
 end
 
 -- recover([pct]) — start a recovery and return a PROMISE (Scripts/Promise.lua) that resolves when
@@ -1190,7 +1392,11 @@ function recover(target)
   end
   if frac > 1 then frac = 1 end
   return __promise(function(resolve, reject, onCancel)
-    if ready(frac) then echo("Already recovered — vitals at target."); resolve(); return end
+    -- Nothing to do only if YOU are at target AND every minion is topped off — otherwise recovery still
+    -- has work (resting your vitals and/or casting heals on the skeletal minions).
+    if ready(frac) and all_minions_ready(frac) then
+      echo("Already recovered — vitals at target and minions topped off."); resolve(); return
+    end
     -- A recovery is a singleton (one `recovery.settle` slot). If one is already pending — e.g. you typed
     -- `recover`, then `recover | explore` — the newer call takes over: reject the old promise as
     -- superseded so it settles (and leaves the promise widget) instead of dangling forever, orphaned.
@@ -1202,6 +1408,7 @@ function recover(target)
       -- is cancelled, not settled). A later kxwt_prompt then can't complete it (state.recover is false).
       if state.recover then send("stand") end
       recovery.settle, recovery.pct, state.recover = nil, READY_PCT, false
+      reset_minion_heal()   -- drop any in-flight minion healing too
     end)
   end, "recover")
 end
@@ -1221,8 +1428,8 @@ alias([[^state$]], function() echo(describe_state()) end)
 alias([[^recover$]], function()
   if state.recover then
     echo("Already recovering — 'recover off' to stop.")
-  elseif ready() then
-    echo("Already recovered — all vitals at 90%+.")
+  elseif ready() and all_minions_ready() then
+    echo("Already recovered — all vitals at 90%+ and minions topped off.")
   else
     recover()   -- go through the promise (not begin_recovery) so the recovery shows in the promise widget
   end
