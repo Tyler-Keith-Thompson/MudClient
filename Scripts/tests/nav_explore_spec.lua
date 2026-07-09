@@ -117,3 +117,52 @@ test("best_explore_dir prefers an untaken exit here, else the first BFS step tow
   expect(best_explore_dir()):eq(nil)
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
+
+-- ---- noexit: manual per-room direction blocking (locked doors / guards explore should skip) --------
+
+local noexit       = _AIP_TEST.noexit_command
+local has_frontier = _AIP_TEST.has_frontier
+
+test("noexit <dir> blocks a direction out of the current room, and explore skips it", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = { north = true, south = true }, moves = {} } }
+  P.current_room = "A"
+  noexit("north")
+  expect(P.rooms.A.blocked.north):eq(true)
+  expect(best_explore_dir()):eq("south")   -- north blocked → south is the untaken exit
+  expect(untaken_exit("A")):eq("south")
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("noexit accepts direction abbreviations and ignores non-directions", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = { northeast = true }, moves = {} } }
+  P.current_room = "A"
+  noexit("ne")
+  expect(P.rooms.A.blocked.northeast):eq(true)
+  noexit("banana")                          -- not a direction → nothing blocked under that key
+  expect(P.rooms.A.blocked.banana):eq(nil)
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("noexit clear <dir> unblocks one; noexit clear wipes every block here", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = { north = true, east = true }, moves = {},
+                    blocked = { north = true, east = true } } }
+  P.current_room = "A"
+  noexit("clear north")
+  expect(P.rooms.A.blocked.north):eq(nil)
+  expect(P.rooms.A.blocked.east):eq(true)
+  noexit("clear")
+  expect(P.rooms.A.blocked):eq(nil)         -- emptied table is dropped
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("a room whose only untaken exit is blocked is no longer a frontier", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = { north = true }, moves = {}, blocked = { north = true } } }
+  expect(has_frontier("A")):eq(false)
+  P.rooms.A.blocked = nil
+  expect(has_frontier("A")):eq(true)
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)

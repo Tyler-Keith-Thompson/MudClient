@@ -463,6 +463,12 @@ doc("every", { sig = "every(seconds, callback) -> id", group = "timers",
 doc("cancel", { sig = "cancel(id)", group = "timers",
   text = "Cancel a pending or repeating timer started by after()/every().",
   example = "t = after(5, f); cancel(t)" })
+doc("lag_status", { sig = "lag_status() -> {ui_ms, ui_age_ms, net_ms, net_age_ms}", group = "terminal",
+  text = "Latency snapshot separating a LOCAL UI hitch (the terminal's main loop stalling — measured by "
+      .. "a heartbeat on the UI queue) from SERVER round-trip (time from your last command to its next "
+      .. "prompt). Durations and an age in ms since each was measured (age -1 = never). Powers the HUD "
+      .. "lag widget.",
+  example = "local s = lag_status(); if s.ui_age_ms >= 0 then echo(\"UI hitch \"..s.ui_ms..\"ms\") end" })
 
 -- connection
 doc("connect", { sig = "connect(host[, port])", group = "connection",

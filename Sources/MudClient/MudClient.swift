@@ -31,6 +31,10 @@ struct Connect: ParsableCommand {
 
         Container.terminalService().setup()
 
+        // Start the main-queue heartbeat that detects UI hitches (see LagMonitor). Must run on `.main`,
+        // where rendering + input live, so it measures the loop the user actually feels stall.
+        Container.lagMonitor().start()
+
         // Load the Scripts/ directory. This runs each script's top-level code, which is what wires
         // the client up: AlterAeon.lua opens the connection itself (a guarded top-level `connect()`),
         // so there is no hardcoded host/port here. The connection lifecycle lives in ConnectionManager

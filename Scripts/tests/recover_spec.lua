@@ -33,6 +33,7 @@ local function with_posture(hp, mp, sp, position, fn)
   local sent = {}
   state = { hp = hp, maxhp = 100, mana = mp, maxmana = 100, stam = sp, maxstam = 100, position = position }
   _G.send = function(c) sent[#sent + 1] = c end
+  _AA_TEST.reset_posture()   -- clear the cross-test posture debounce so a repeated command isn't eaten
   local ok, err = pcall(function() fn(sent) end)
   state, _G.send = saved_state, saved_send
   if not ok then error(err, 2) end
@@ -64,6 +65,16 @@ end)
 test("sitting but wanting deeper recovery escalates to sleep", function()
   with_posture(40, 40, 40, "sitting", function(sent)    -- want sleep, only at depth 1 → escalate
     choose(); expect(sent[1]):eq("sleep")
+  end)
+end)
+
+test("does NOT re-send a posture command while it's still in flight (no 'already resting' spam)", function()
+  -- choose runs on every prompt (many/sec); position lags the command by a round-trip, so a naive
+  -- re-check would fire "rest" repeatedly until the kxwt_position update lands. It must send exactly once.
+  with_posture(90, 50, 90, "standing", function(sent)   -- wants rest, currently standing
+    choose(); choose(); choose()                        -- position still "standing" for all three
+    expect(#sent):eq(1)
+    expect(sent[1]):eq("rest")
   end)
 end)
 

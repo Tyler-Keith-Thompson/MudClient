@@ -45,9 +45,11 @@ local cfg = {
                          -- after dropping non-wearables/consumables/level-unmeetable rows we evaluate
                          -- everything left. Set absurdly high so it never bites a real room; it only
                          -- exists so a malformed/huge listing can't spam thousands of commands.
-  single_call_max = 12,  -- if this many items or fewer survive the filter, review them in ONE model
+  single_call_max = 4,   -- if this many items or fewer survive the filter, review them in ONE model
                          -- call (fast, whole-loadout context). More than this and one call gets big/slow
-                         -- (and the local model starts timing out), so we SPLIT into a call per slot.
+                         -- (and the local model times out), so we SPLIT into a call per slot. Kept low
+                         -- because a full shop of ~8 wearables in one prompt reliably timed the local
+                         -- MLX model out — small per-slot calls are far more dependable.
   id_gap = 0.4,      -- pause between auto-identify steps (be polite to the game/server)
   id_timeout = 4.0,  -- give up on one identify block if no result parses in this long
   id_combat_retry = 2.0, -- how often to re-check for combat-clear while the id pass is paused
@@ -74,6 +76,7 @@ if S.idq then
 end
 S.id_expect = nil
 S.id_cap = nil
+S.id_resolve = nil   -- a manual eq.id's one-shot promise resolver (see finalize_id); stale across reload
 
 -- items[name] = { variants = { [fingerprint] = variant, ... } }   (persistent, name -> LIST of variants)
 -- session[name] = { fp, variant, ts }                             (this-session id while holding the item)
@@ -393,7 +396,11 @@ end
 --   Category: "[  Price] Worn on neck ---------------------------------------"  -> {category="Worn on neck"}
 --   Item:     "[    28] (lvl   0) a wand of scorch"                             -> {price=28,level=0,name=...}
 local function parse_shop_row(line)
-  local L = strip_ansi(line)
+  -- The game INDENTS every shop row three spaces ("   [    178] (lvl 16) a drake bone circlet"), so trim
+  -- leading/trailing whitespace before the `^[`-anchored priced patterns — without this every priced row
+  -- failed to parse and a stocked shop read as "nothing to buy". (The donation patterns tolerate leading
+  -- space on their own, but trimming is harmless for them.)
+  local L = trim(strip_ansi(line))
   -- Priced shop category: "[  Price] Worn on neck ------------"
   local cat = L:match("^%[%s*Price%]%s*(.-)%s*%-%-%-")
   if cat then return { category = trim(cat) } end
@@ -733,9 +740,65 @@ local function run_model(sys, user, on_reply)
   local g = S.gen
   ai_local_request(sys, user, cfg.max_tokens, cfg.think_prefill, function(reply, err)
     if EPOCH ~= _EQUIP.epoch or g ~= S.gen then return end
-    if err then echo("[eq] model error: " .. tostring(err), "red"); return end
+    -- ALWAYS hand control back to on_reply — even on error — with reply="" so the caller advances/settles
+    -- (a per-slot review moves to the next slot; a single review resolves its promise) instead of hanging
+    -- until the watchdog. The error itself is surfaced here.
+    if err then echo("[eq] model error: " .. tostring(err), "red"); on_reply("", err); return end
     on_reply(reply or "")
   end, cfg.model)
+end
+
+-- ---- eq operations as promises -------------------------------------------------------------------
+-- Every eq operation (scan/quick/compare/shop/id) runs as ONE tracked promise, so it shows in the HUD
+-- promise widget and can be chained (`eq scan | eq compare`, `recover | eq shop`, or
+-- eq.scan().andThen(...)). One op runs at a time; starting a new one supersedes (rejects) the running
+-- one. Because these flows fan out through many capture triggers, paced timers and model callbacks —
+-- with lots of early-return paths — a missed terminal would leak a widget row forever (the corpse-widget
+-- lesson). So a watchdog, RE-ARMED on every step of real progress (eq_touch), force-settles the promise
+-- if the op ever goes quiet without finishing. The promise is started SYNCHRONOUSLY so eq_op is wired
+-- before any capture fires.
+local eq_op = nil                 -- { resolve, reject, timer, label }
+-- Seconds of NO progress before the watchdog force-settles the op. MUST exceed the local-model request
+-- timeout (LLMClient: 180s) so a single slow compare/shop model call — which makes no intermediate
+-- progress — can't trip it; run_model's own timeout fires first and settles the op cleanly.
+local EQ_OP_IDLE = 210
+local function eq_settle(ok, reason)
+  local op = eq_op; eq_op = nil
+  if not op then return end
+  if op.timer and cancel then cancel(op.timer) end
+  if ok == false then op.reject(reason or "eq interrupted") else op.resolve() end
+end
+local function eq_resolve() eq_settle(true) end
+local function eq_reject(reason) eq_settle(false, reason) end
+local function eq_touch()         -- progress: re-arm the idle watchdog
+  local op = eq_op; if not op then return end
+  if op.timer and cancel then cancel(op.timer) end
+  if after then op.timer = after(EQ_OP_IDLE, function()
+    echo("[eq] " .. (op.label or "operation") .. " stalled — wrapping up.", "yellow")
+    eq_settle(false, "stalled")
+  end) end
+end
+-- Begin an op: supersede any running one, create+track the promise, wire eq_op, arm the watchdog.
+-- Returns the promise (nil only if the promise layer isn't loaded, so callers still run bare).
+local function eq_begin(label)
+  eq_reject("superseded")
+  if not __promise then return nil end
+  local p = __promise(function(resolve, reject, onCancel)
+    eq_op = { resolve = resolve, reject = reject, label = label, timer = nil }
+    onCancel(function()
+      if eq_op and eq_op.timer and cancel then cancel(eq_op.timer) end
+      eq_op = nil
+    end)
+  end, label)
+  if p and p.__start then p.__start() end   -- run the executor NOW so eq_op is set before any capture
+  eq_touch()
+  return p
+end
+-- An instantly-completed op (stats/forget/usage) as a resolved promise, for uniform chaining — does NOT
+-- touch the eq_op slot, so it never supersedes a running scan/shop.
+local function eq_instant(label)
+  if not __promise then return nil end
+  return __promise(function(resolve) resolve() end, label)
 end
 
 -- ---- PASSIVE identify capture (always on) --------------------------------------------------------
@@ -780,6 +843,8 @@ local function finalize_id()
     ingest(v)
   end
   if idq_advance then idq_advance(v ~= nil and matched) end
+  -- A manual `eq.id` waits on the block it asked for: resolve its promise when it lands (one-shot).
+  if S.id_resolve then local cb = S.id_resolve; S.id_resolve = nil; cb() end
 end
 local function id_begin() S.id_cap = { lines = {} } end
 local function id_feed(line)
@@ -856,7 +921,10 @@ local function build_id_queue(worn, inv, containers)
     if seen[dkey] then return end
     seen[dkey] = true
     local r = resolve_item(e.name)
-    if r.status == "session" then known = known + 1; return end
+    -- Trust the PERSISTED cache: a name with exactly one known variant ("cached") is taken as-is instead
+    -- of re-identifying it every scan. (A "multi" — two+ stat-blocks seen for the same name — stays
+    -- ambiguous and IS re-identified; that rare same-name-different-stats case is the only one we pay for.)
+    if r.status == "session" or r.status == "cached" then known = known + 1; return end
     queue[#queue + 1] = { name = e.name, kw = e.kw, base_kw = e.base_kw, ordinal = e.ordinal,
                           status = r.status, container = container }
   end
@@ -907,6 +975,7 @@ idq_finish = function()
       .. table.concat(q.left_out, ", ") .. " — put them back manually.", "red")
   end
   echo("[eq] now try eq.compare().", "cyan")
+  eq_resolve()   -- the scan's identify pass is the scan op's terminal
 end
 
 idq_next_entry = function()
@@ -914,10 +983,12 @@ idq_next_entry = function()
   if EPOCH ~= _EQUIP.epoch then return end          -- died on reload
   if in_combat and in_combat() then                 -- pause (don't advance) until combat clears
     if not q.paused_msg then echo("[eq] identify pass paused (in combat) — resuming when clear.", "yellow"); q.paused_msg = true end
+    eq_touch()   -- a combat pause is NOT a stall — keep the op promise alive across the fight
     if after then q.timer = after(cfg.id_combat_retry, function() q.timer = nil; idq_next_entry() end) end
     return
   end
   q.paused_msg = nil
+  eq_touch()   -- progress on the identify pass: keep the op promise alive
   q.i = q.i + 1
   if q.i > #q.list then idq_finish(); return end
   q.cur = q.list[q.i]; q.got = false
@@ -995,8 +1066,9 @@ end
 
 local function idq_start(queue, known)
   if #queue == 0 then
-    echo(string.format("[eq] nothing to auto-identify — %d item(s) already identified this session.", known), "cyan")
+    echo(string.format("[eq] nothing to auto-identify — %d item(s) already known (cached/identified).", known), "cyan")
     echo("[eq] now try eq.compare().", "cyan")
+    eq_resolve()
     return
   end
   S.idq = { list = queue, i = 0, known = known, ident = 0, failed = 0, left_out = {},
@@ -1070,6 +1142,7 @@ end
 
 local function finish_scan()
   if not S.scan then return end
+  eq_touch()   -- gear collection done → keep the op alive into the (quick end / identify pass)
   if class_remove then class_remove("eq") end
   local sc = S.scan
   -- Rebuild the possession set and invalidate stale session bindings (items no longer on us).
@@ -1084,6 +1157,7 @@ local function finish_scan()
   if sc.quick then
     echo("[eq] quick scan — collected names only (no identify). Run eq.scan() to auto-identify.", "dim")
     echo("[eq] now try eq.compare() (items you've never identified will read 'unidentified').", "cyan")
+    eq_resolve()   -- quick scan has no identify pass, so this is its terminal
     return
   end
   -- The point of `#eq scan`: identify everything that lacks a trustworthy binding so compare/shop can
@@ -1105,6 +1179,7 @@ end
 local function eq_scan(mode)
   if combat_block() then return end
   local quick = (trim(mode or ""):lower() == "quick")
+  local p = eq_begin(quick and "eq.quick" or "eq.scan")
   S.scan = { eq = {}, inv = {}, containers = {}, mode = nil, curcont = nil, quick = quick }
   install_scan_triggers()
   echo(quick and "[eq] quick scan — collecting names only…" or "[eq] scanning gear, inventory, containers, then auto-identifying…", "cyan")
@@ -1117,6 +1192,7 @@ local function eq_scan(mode)
       scan_containers(conts, 1)
     end)
   end)
+  return p
 end
 
 -- ---- current loadout (from the last scan, else the shared `state`) --------------------------------
@@ -1160,10 +1236,18 @@ local function eq_compare(focus)
   focus = trim(focus)
   local char = char_from_state()
   local worn, cands = current_worn(), current_candidates()
-  if #worn == 0 and #cands == 0 then echo("[eq] nothing to compare — run eq.scan() first.", "yellow"); return end
+  local p = eq_begin("eq.compare")
+  if #worn == 0 and #cands == 0 then
+    echo("[eq] nothing to compare — run eq.scan() first.", "yellow"); eq_resolve(); return p
+  end
   local sys, user = build_compare_prompt(char, worn, cands, focus)
   echo("[eq] asking " .. cfg.model .. " to review your gear…", "cyan")
-  run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan") end)
+  eq_touch()   -- anchor the watchdog window at the model call
+  run_model(sys, user, function(reply)
+    if trim(reply) ~= "" then echo("[eq] " .. trim(reply), "cyan") end
+    eq_resolve()
+  end)
+  return p
 end
 
 -- ---- #eq id ---------------------------------------------------------------------------------------
@@ -1171,16 +1255,20 @@ local function eq_id(arg)
   arg = trim(arg)
   if arg == "" then echo("[eq] usage: eq.id('<item keyword>')", "yellow"); return end
   if combat_block() then return end
+  local p = eq_begin("eq.id " .. arg)
   echo("[eq] identifying '" .. arg .. "' (higher-level items need an identify scroll/spell)…", "cyan")
-  send("identify " .. arg)   -- the passive capture folds the resulting block into the cache
+  S.id_resolve = eq_resolve   -- one-shot: finalize_id resolves the op when the block lands (else watchdog)
+  send("identify " .. arg)    -- the passive capture folds the resulting block into the cache
+  return p
 end
 
 -- ---- #eq shop ------------------------------------------------------------------------------------
 local function finish_shop()
   if not S.shop then return end
+  eq_touch()   -- list collected → keep the op alive through detail pulls + model review
   local parsed = parse_shop_list(table.concat(S.shop.rows_text, "\n"))
-  if parsed.no_shop then echo("[eq] you're not at a shop (no shopkeeper/donation/priest/guildmaster here).", "yellow"); return end
-  if #parsed.rows == 0 then echo("[eq] nothing listed here to buy.", "yellow"); return end
+  if parsed.no_shop then echo("[eq] you're not at a shop (no shopkeeper/donation/priest/guildmaster here).", "yellow"); eq_resolve(); return end
+  if #parsed.rows == 0 then echo("[eq] nothing listed here to buy.", "yellow"); eq_resolve(); return end
   -- The character's level fit from the tracked classes: highest class level (for `(lvl N)` reqs) and
   -- total levels (for `(tot N)`). Nil when we have no class data, which just skips the level filter.
   local char = char_from_state()
@@ -1197,7 +1285,7 @@ local function finish_shop()
   if #kept >= cfg.detail_ceiling then
     echo(string.format("[eq] hit the %d-item safety ceiling — raise cfg.detail_ceiling to look at more.", cfg.detail_ceiling), "yellow")
   end
-  if #kept == 0 then echo("[eq] no wearable/wieldable upgrades to evaluate here.", "yellow"); return end
+  if #kept == 0 then echo("[eq] no wearable/wieldable upgrades to evaluate here.", "yellow"); eq_resolve(); return end
   S.shop.kept = kept
   -- One call when the model can handle the whole loadout quickly; SPLIT into a call per slot when there
   -- are too many items (a big single prompt is slow and the local model starts timing out).
@@ -1205,7 +1293,11 @@ local function finish_shop()
     if EPOCH ~= _EQUIP.epoch then return end
     local sys, user = build_shop_prompt(char_from_state(), current_worn(), kept)
     echo("[eq] asking " .. cfg.model .. (parsed.donation and " what's worth grabbing…" or " what's worth buying…"), "cyan")
-    run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan") end)
+    eq_touch()   -- anchor the watchdog window at the model call (a single call makes no interim progress)
+    run_model(sys, user, function(reply)
+      if trim(reply) ~= "" then echo("[eq] " .. trim(reply), "cyan") end
+      eq_resolve()
+    end)
   end
   local function ask_per_slot()
     if EPOCH ~= _EQUIP.epoch then return end
@@ -1220,11 +1312,15 @@ local function finish_shop()
       #kept, #order), "cyan")
     local function do_slot(i)
       if EPOCH ~= _EQUIP.epoch then return end
-      if i > #order then echo("[eq] shop review complete.", "cyan"); return end
+      if i > #order then echo("[eq] shop review complete.", "cyan"); eq_resolve(); return end
+      eq_touch()
       local cat = order[i]
       echo("[eq] " .. cat .. " —", "cyan")
       local sys, user = build_slot_prompt(ch, cat, groups[cat], worn)
-      run_model(sys, user, function(reply) echo("[eq] " .. trim(reply), "cyan"); do_slot(i + 1) end)
+      run_model(sys, user, function(reply)
+        if trim(reply) ~= "" then echo("[eq] " .. trim(reply), "cyan") end
+        do_slot(i + 1)
+      end)
     end
     do_slot(1)
   end
@@ -1248,6 +1344,15 @@ local function finish_shop()
     if i > #kept then
       if class_remove then class_remove("eqdetail") end
       ask_model(); return
+    end
+    eq_touch()
+    -- CACHE HIT: shop `list <item>` details are ingested under the listing name, so if we've already got
+    -- a trustworthy entry for this exact name (this session, or one persisted variant) don't re-`list` it
+    -- — just move on. This is the same "don't re-identify what we already know" the scan does, applied to
+    -- shop detail pulls (the biggest time sink at a busy shop).
+    local r = resolve_item(kept[i].name)
+    if r.status == "session" or r.status == "cached" then
+      after(0, function() pull(i + 1) end); return
     end
     S.shop.cur = kept[i]; S.shop.dis = {}; retried = false
     S.id_expect = norm_name(kept[i].name)
@@ -1281,6 +1386,7 @@ end
 
 local function eq_shop()
   if combat_block() then return end
+  local p = eq_begin("eq.shop")
   S.shop = { rows_text = {}, collecting = true }
   local finish_timer
   -- Idle-debounced finish: re-armed on every real shop line and every page turn, so the collector
@@ -1309,6 +1415,7 @@ local function eq_shop()
   echo("[eq] reading the shop's list…", "cyan")
   send("list")
   arm_finish()
+  return p
 end
 
 -- ---- #eq stats / forget / usage ------------------------------------------------------------------
@@ -1330,19 +1437,22 @@ end
 -- legacy typed `#eq scan` (rewritten by the host to `eq("scan")`) still dispatches to the right member.
 eq = {}
 
+-- Each op returns its tracked promise (nil only if the promise layer isn't loaded), so it shows in the
+-- HUD widget and chains: `eq scan | eq compare`, `recover | eq shop`, eq.scan().andThen(eq.compare).
 function eq.scan(mode)
   if type(mode) == "table" then mode = mode.quick and "quick" or "" end
-  eq_scan(mode)
+  return eq_scan(mode)
 end
-function eq.quick() eq_scan("quick") end
-function eq.compare(slot_or_item) eq_compare(slot_or_item) end
-function eq.id(item) eq_id(item) end
-function eq.shop() eq_shop() end
-function eq.stats() eq_stats() end
+function eq.quick() return eq_scan("quick") end
+function eq.compare(slot_or_item) return eq_compare(slot_or_item) end
+function eq.id(item) return eq_id(item) end
+function eq.shop() return eq_shop() end
+function eq.stats() eq_stats(); return eq_instant("eq.stats") end
 function eq.forget()
   for k in pairs(items) do items[k] = nil end
   for k in pairs(session) do session[k] = nil end
   save_items(); echo("[eq] cleared the item cache")
+  return eq_instant("eq.forget")
 end
 
 doc(eq.scan, { name = "eq.scan", sig = "eq.scan(['quick'])", group = "equipment",
@@ -1366,13 +1476,14 @@ setmetatable(eq, { __call = function(_, rest)
   rest = trim(rest or "")
   local verb = (rest:match("^%S*") or ""):lower()
   local arg = rest:match("^%S+%s+(.*)$") or ""
-  if verb == "scan" then eq.scan(arg ~= "" and arg or nil)
-  elseif verb == "quick" then eq.quick()
-  elseif verb == "compare" or verb == "cmp" then eq.compare(arg)
-  elseif verb == "id" or verb == "identify" then eq.id(arg)
-  elseif verb == "shop" then eq.shop()
-  elseif verb == "stats" or verb == "cache" then eq.stats()
-  elseif verb == "forget" then eq.forget()
+  -- Return the member's promise so `eq("scan")` / the pipe (`eq scan | …`) can chain on it.
+  if verb == "scan" then return eq.scan(arg ~= "" and arg or nil)
+  elseif verb == "quick" then return eq.quick()
+  elseif verb == "compare" or verb == "cmp" then return eq.compare(arg)
+  elseif verb == "id" or verb == "identify" then return eq.id(arg)
+  elseif verb == "shop" then return eq.shop()
+  elseif verb == "stats" or verb == "cache" then return eq.stats()
+  elseif verb == "forget" then return eq.forget()
   else echo(eq_usage(), "cyan") end
 end })
 
@@ -1427,6 +1538,7 @@ _EQ_TEST = {
   set_id_expect = function(name) S.id_expect = name end,
   items = items,
   session = session,
+  eq_begin = eq_begin, eq_resolve = eq_resolve, eq_reject = eq_reject, eq_instant = eq_instant,
   reset = function() for k in pairs(items) do items[k] = nil end; for k in pairs(session) do session[k] = nil end end,
 }
 

@@ -169,21 +169,26 @@ test("parse_eq_line: slot + item, optional flag column, two-word slots, rejects 
 end)
 
 -- ---- shop list parsing + shortlist ---------------------------------------------------------------
+-- VERBATIM shape from a live `list` (mud_raw): the game INDENTS every priced row three spaces. The
+-- fixtures MUST keep that indent — without it the `^[`-anchored parser silently matched nothing and a
+-- fully-stocked shop reported "nothing to buy" (the bug this locks down).
 local SHOP = [[a wizard's apprentice tells you, 'The following items are available for sale at this time'
-[  Price] Held ---------------------------------------
-[     28] (lvl   0) a wand of scorch
-[    126] (lvl   1) a wand of crystal light
-[  Price] Miscellaneous ---------------------------------------
-[    155] (lvl   1) a scroll of detect magic
-[  Price] Worn on neck ---------------------------------------
-[    335] (lvl   1) a soapstone necklace
+   [  Price] Held ---------------------------------------
+   [     28] (lvl   0) a wand of scorch
+   [    126] (lvl   1) a wand of crystal light
+   [  Price] Miscellaneous ---------------------------------------
+   [    155] (lvl   1) a scroll of detect magic
+   [  Price] Worn on neck ---------------------------------------
+   [    335] (lvl   1) a soapstone necklace
 To see a specific item in detail, give the item name.]]
 
-test("parse_shop_row: category header vs priced item row", function()
-  local cat = parse_shop_row("[  Price] Worn on neck ---------------------------------------")
+test("parse_shop_row: category header vs priced item row (leading indent tolerated)", function()
+  local cat = parse_shop_row("   [  Price] Worn on neck ---------------------------------------")
   expect(cat.category):eq("Worn on neck")
-  local row = parse_shop_row("[     28] (lvl   0) a wand of scorch")
+  local row = parse_shop_row("   [     28] (lvl   0) a wand of scorch")
   expect(row.price):eq(28); expect(row.level):eq(0); expect(row.name):eq("a wand of scorch")
+  -- un-indented still parses too (robust either way)
+  expect(parse_shop_row("[     28] (lvl   0) a wand of scorch").name):eq("a wand of scorch")
 end)
 
 test("parse_shop_list: seller, rows tagged with their category", function()
@@ -193,6 +198,49 @@ test("parse_shop_list: seller, rows tagged with their category", function()
   expect(p.rows[1].category):eq("Held")
   expect(p.rows[4].name):eq("a soapstone necklace")
   expect(p.rows[4].category):eq("Worn on neck")
+end)
+
+-- VERBATIM from the raw log (The Hidden Homunculus necromancer shop) — the exact indentation and the
+-- mid-list pager line the collector strips. This is the "#eq.shop() said nothing to buy" report.
+local NECRO_SHOP = [[a bony old man tells you, 'The following items are available for sale at this time'
+
+   [  Price] Worn on head ---------------------------------------
+   [    178] (lvl  16) a drake bone circlet
+
+   [  Price] Worn on neck ---------------------------------------
+   [    158] (lvl  16) an amulet of mandrake root
+
+   [  Price] Worn on wrists ---------------------------------------
+   [    436] (lvl  16) a drake horn bracer
+
+   [  Price] Worn on body ---------------------------------------
+   [    300] (lvl  17) black leather shirt with skull shoulder pads
+
+   [  Price] Worn on legs ---------------------------------------
+   [    300] (lvl  17) black leather pants with skull kneecaps
+
+   [  Price] Held ---------------------------------------
+   [    649] (lvl   2) a wand of preservation
+   [    740] (lvl  16) a drake bone sickle
+
+   [  Price] Miscellaneous ---------------------------------------
+   [     20] (lvl  13) a scroll of soulsteal
+
+To see a specific item in detail, give the item name.]]
+
+test("parse_shop_list: the real indented necromancer shop parses ALL its rows (regression)", function()
+  local p = parse_shop_list(NECRO_SHOP)
+  expect(p.seller):eq("a bony old man")
+  expect(#p.rows):eq(8)                                   -- was 0 before the indent fix → "nothing to buy"
+  expect(p.rows[1].name):eq("a drake bone circlet")
+  expect(p.rows[1].category):eq("Worn on head")
+  expect(p.rows[1].price):eq(178); expect(p.rows[1].level):eq(16)
+  -- the wearable armour survives the shortlist; the wands/scrolls are dropped as consumables
+  local kept = shortlist_shop(p)
+  expect(#kept >= 5):eq(true)
+  local names = {}; for _, r in ipairs(kept) do names[r.name] = true end
+  expect(names["a drake bone circlet"]):eq(true)
+  expect(names["a wand of preservation"]):eq(nil)        -- consumable, filtered
 end)
 
 test("parse_shop_list: recognizes the not-at-a-shop message", function()
@@ -601,11 +649,12 @@ test("assign_ordinals: duplicate keywords get bare, then 2.kw, 3.kw in listing o
 end)
 
 -- ---- build_id_queue -------------------------------------------------------------------------------
-test("build_id_queue: skips session-bound, includes unknown/multi/stale, dedups identical displays", function()
+test("build_id_queue: skips session-bound AND single-variant cached; includes unknown, dedups", function()
   E.reset()
-  -- 'a chameleon ring' identified THIS session (trustworthy) -> must be SKIPPED as already-known.
+  -- 'a chameleon ring' identified THIS session (trustworthy) -> SKIPPED as already-known.
   feed_id_stream(RING_LINES)
-  -- 'well made leather gloves' cached but NOT session-bound (stale) -> must be INCLUDED.
+  -- 'well made leather gloves' cached (one persisted variant), NOT session-bound -> now TRUSTED and
+  -- SKIPPED (the persistence change: don't re-identify what one cached variant already tells us).
   ingest(parse_identify(GLOVES))
   E.session["well made leather gloves"] = nil
 
@@ -613,13 +662,26 @@ test("build_id_queue: skips session-bound, includes unknown/multi/stale, dedups 
   local inv  = { "a horned imp-hide hood", "a horned imp-hide hood", "a mysterious orb" }  -- dup + unknown
   local queue, known = build_id_queue(worn, inv, {})
 
-  expect(known):eq(1)                                     -- the chameleon ring
+  expect(known):eq(2)                                    -- ring (session) + gloves (single cached variant)
   local names = {}
   for _, e in ipairs(queue) do names[e.name] = (names[e.name] or 0) + 1 end
   expect(names["chameleon ring"]):eq(nil)               -- skipped (session); names are article-stripped
-  expect(names["well made leather gloves"]):eq(1)        -- stale cache -> re-id
+  expect(names["well made leather gloves"]):eq(nil)     -- skipped (trusted cache)
   expect(names["horned imp-hide hood"]):eq(1)            -- duplicate display collapsed to one
   expect(names["mysterious orb"]):eq(1)                  -- unknown -> included
+end)
+
+test("build_id_queue: a MULTI-variant name (same name, 2 stat blocks) is STILL re-identified", function()
+  E.reset()
+  -- The only case the persistence change still pays for: two different variants cached under one name.
+  ingest(parse_identify(GLOVES))
+  E.items["well made leather gloves"].variants["fake-second-fp"] =
+    { name = "well made leather gloves", fp = "fake-second-fp" }
+  E.session["well made leather gloves"] = nil
+  local queue = build_id_queue({ "well made leather gloves" }, {}, {})
+  local byname = {}
+  for _, e in ipairs(queue) do byname[e.name] = e.status end
+  expect(byname["well made leather gloves"]):eq("multi")  -- ambiguous -> queued for re-id
 end)
 
 test("build_id_queue: ordinals span worn+carried as one scope (identify sees both)", function()
@@ -937,4 +999,41 @@ test("GLOW BUG: the compare prompt carries the real display names (with glowing 
   expect(user):contains("glowing")                       -- …and the marker as a property
   expect(user:find("- glow:", 1, true)):eq(nil)          -- never an item literally named 'glow'
   expect(user:find("eq.id('glow')", 1, true)):eq(nil)    -- and never an identify-'glow' hint
+end)
+
+-- ---- eq operations as promises -------------------------------------------------------------------
+
+local function eq_widget_has(desc)
+  for _, e in ipairs(active_promises()) do if e.desc == desc then return true end end
+  return false
+end
+
+test("an eq op runs as a tracked promise that shows in the widget and settles on resolve", function()
+  _PROMISE_TEST.cancel_all()
+  local p = E.eq_begin("eq.test")
+  expect(p ~= nil):eq(true)
+  local during = eq_widget_has("eq.test")
+  E.eq_resolve()
+  local after = eq_widget_has("eq.test")
+  expect(during):eq(true)
+  expect(after):eq(false)
+end)
+
+test("starting a new eq op supersedes (rejects) the running one", function()
+  _PROMISE_TEST.cancel_all()
+  local p1 = E.eq_begin("eq.one")
+  local rejected
+  p1.catch(function(reason) rejected = reason end)
+  E.eq_begin("eq.two")                 -- supersedes p1
+  expect(rejected):eq("superseded")
+  E.eq_resolve()                        -- settle p2 so it doesn't linger
+  expect(eq_widget_has("eq.one")):eq(false)
+end)
+
+test("eq_instant returns an already-settling promise (for the synchronous stats/forget ops)", function()
+  _PROMISE_TEST.cancel_all()
+  local p = E.eq_instant("eq.stats")
+  expect(p ~= nil):eq(true)
+  p.__start()                           -- CLI harness doesn't auto-fire the builder's next-tick start
+  expect(eq_widget_has("eq.stats")):eq(false)   -- resolved immediately → not pending
 end)

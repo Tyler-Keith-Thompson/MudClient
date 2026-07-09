@@ -43,6 +43,7 @@ stub("__list_dir", function() return {} end)
 stub("__run_file", function() return true end)
 stub("__clear_rules")
 stub("__term_cols", function() return 80 end)   -- internal (__-prefixed): help() packs to this width
+stub("lag_status", function() return { ui_ms = 0, ui_age_ms = -1, net_ms = 0, net_age_ms = -1 } end)
 stub("ai_rag_count", function() return 0 end)
 stub("ai_usage", function() return 0, 0, 0, 0 end)
 stub("ai_mem_usage", function() return 0, 0 end)

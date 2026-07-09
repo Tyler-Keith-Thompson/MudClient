@@ -454,6 +454,42 @@ local function promise_rows(width)
   return rows
 end
 
+-- Lag widget — sits under the promise widget (right column). Differentiates a LOCAL UI hitch (the
+-- terminal's own main loop stalling — a surprisingly common thing, measured by a Swift heartbeat on the
+-- UI queue) from SERVER round-trip latency (time from your last command to the next prompt). A recent
+-- spike shows a bright ⚠ alert with its duration; otherwise a dim readout of the last figures. lag_status()
+-- returns {ui_ms, ui_age_ms, net_ms, net_age_ms}; an age of -1 means "never measured yet".
+local LAG_UI_ALERT  = 100     -- ms: a UI hitch this big is worth flagging
+local LAG_NET_ALERT = 300     -- ms: a server round-trip this slow is worth flagging
+local LAG_RECENT_MS = 6000    -- ms: a spike counts as "happening now" (bright alert) for this long after
+local function lag_row(label, ms, alert)
+  local val = string.format("%dms", math.floor((ms or 0) + 0.5))
+  if alert then
+    return { spans = { { text = "  ⚠ " .. label .. " ", fg = "brightred", bold = true },
+                       { text = val, fg = "brightred", bold = true } } }
+  end
+  return { spans = { { text = "  " .. label .. " ", dim = true }, { text = val, fg = "green", dim = true } } }
+end
+local function lag_rows(width)
+  if not lag_status then return {} end                 -- host builtin not present
+  local s = lag_status()
+  if type(s) ~= "table" then return {} end
+  local ui_ms, ui_age  = s.ui_ms or 0, s.ui_age_ms or -1
+  local net_ms, net_age = s.net_ms or 0, s.net_age_ms or -1
+  local ui_hit  = ui_age >= 0 and ui_ms > LAG_UI_ALERT               -- a UI hitch has been recorded
+  local net_ok  = net_age >= 0                                       -- we have a round-trip sample
+  if not (ui_hit or net_ok) then return {} end                       -- nothing to show yet
+  local ui_now  = ui_hit and ui_age < LAG_RECENT_MS                  -- ...and it just happened
+  local net_bad = net_ok and net_ms > LAG_NET_ALERT and net_age < LAG_RECENT_MS
+  local rows = {}
+  local function W(r) r.width = width; rows[#rows + 1] = r end
+  W({ spans = { { text = "  lag", fg = (ui_now or net_bad) and "brightred" or "cyan",
+                  dim = not (ui_now or net_bad) } } })
+  if net_ok then W(lag_row("net", net_ms, net_bad)) end
+  if ui_hit  then W(lag_row(ui_now and "UI hitch" or "UI last", ui_ms, ui_now)) end
+  return rows
+end
+
 local function update_top()
   local left = {}
   local g = state.group or {}
@@ -480,6 +516,9 @@ local function update_top()
   local prows = promise_rows(mw)
   if #prows > 0 and #right > 0 then right[#right + 1] = { text = "", width = mw } end   -- gap under the map
   for _, r in ipairs(prows) do right[#right + 1] = r end
+  local lrows = lag_rows(mw)
+  if #lrows > 0 and #right > 0 then right[#right + 1] = { text = "", width = mw } end   -- gap above the lag widget
+  for _, r in ipairs(lrows) do right[#right + 1] = r end
   if #right == 0 then panel.top(left); return end
   local blank = { text = "", width = mw }
   local rows, n = {}, math.max(#left, #right)
@@ -504,4 +543,4 @@ _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next
               exp_spans = exp_spans, compass = compass, group_member_row = group_member_row,
               append_col = append_col, opponent_bars = opponent_bars,
               target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
-              truncate_middle = truncate_middle }
+              truncate_middle = truncate_middle, lag_rows = lag_rows }

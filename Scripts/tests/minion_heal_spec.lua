@@ -28,6 +28,7 @@ local function with_group(group, opts, fn)
   }
   _G.send = function(c) sent[#sent + 1] = c end
   AA.reset_minion_heal()
+  AA.reset_posture()
   local ok, err = pcall(function() fn(sent) end)
   state, _G.send = saved_state, saved_send
   AA.reset_minion_heal()
@@ -223,6 +224,7 @@ local function choose_with(position, group)
   state = { name = "Me", hp = 100, maxhp = 100, mana = 100, maxmana = 100, stam = 100, maxstam = 100,
             position = position, recover = true, group = group }
   _G.send = function(c) sent[#sent + 1] = c end
+  AA.reset_posture()
   AA.choose_recovery_position()
   state, _G.send = saved_state, saved_send
   return sent

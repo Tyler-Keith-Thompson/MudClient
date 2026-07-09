@@ -76,6 +76,7 @@ final class ConnectionManager: @unchecked Sendable {
     func send(_ command: String) {
         lock.lock(); let conn = connection; lock.unlock()
         guard let conn else { return }
+        Container.lagMonitor().noteSend()   // stamp for the send->prompt round-trip measure
         Task { try? await conn.send(command) }
     }
 

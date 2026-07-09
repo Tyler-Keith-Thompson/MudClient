@@ -77,7 +77,9 @@ final class LLMClient: @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let key { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
-        req.timeoutInterval = 60
+        // A local MLX model on a big shop/compare prompt can be slow — 60s was timing out. Give it room;
+        // the equipment layer also splits big shop reviews per-slot so individual calls stay small.
+        req.timeoutInterval = 180
         var messages: [[String: Any]] = [
             ["role": "system", "content": system],
             ["role": "user", "content": user],

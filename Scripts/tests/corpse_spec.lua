@@ -36,12 +36,40 @@ test("a CLEAN corpse is blood-sacrificed", function()
   end)
 end)
 
+test("a SUCCESSFUL spellcomps harvest (a yield line, no 'done' line) advances to bsac — no stall", function()
+  -- This is the bug: `harvest spellcomps` that SUCCEEDS just prints its yield ("...drain...into a vial
+  -- of bile." / "...tie off the ends...") with no terminal, so the machine used to hang at the spellcomps
+  -- step forever. The yield triggers call corpse_harvest_done; from the spellcomps step that must bsac.
+  with_corpse({ on = true, active = true, idx = 1, step = "spellcomps", dirty = false }, function(sent)
+    corpse_harvest_done()
+    expect(sent[1]):eq("bsac 1.corpse")
+    expect(corpse.step):eq("bsac")
+  end)
+end)
+
 -- ---- the loot pass surfaces as a tracked promise (the HUD promise widget) -----------------------
 
 local function widget_has(desc)
   for _, e in ipairs(active_promises()) do if e.desc == desc then return true end end
   return false
 end
+
+test("a stall watchdog is armed while looting and cleared when the pass ends", function()
+  local saved_state, saved_send = state, send
+  state = { opponents = {}, engaged_until = nil }   -- in_combat() false
+  send = function() end
+  local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
+  corpse.on, corpse.active, corpse.watchdog, corpse.killed, corpse.settle = true, false, nil, true, nil
+  corpse_start()
+  local armed = corpse.watchdog ~= nil      -- after() stub returned a timer id
+  corpse_done()
+  local cleared = corpse.watchdog == nil     -- cancel() cleared it
+  for k in pairs(corpse) do corpse[k] = nil end
+  for k, v in pairs(snap) do corpse[k] = v end
+  state, send = saved_state, saved_send
+  expect(armed):eq(true)
+  expect(cleared):eq(true)
+end)
 
 test("corpse_start surfaces a 'looting corpses' promise; corpse_done settles it off the widget", function()
   _PROMISE_TEST.cancel_all()                       -- clear any leftovers from other specs
@@ -51,9 +79,9 @@ test("corpse_start surfaces a 'looting corpses' promise; corpse_done settles it 
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
   corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
   corpse_start()
-  -- The CLI harness never fires the builder's after(0) auto-start, so fire it here so the executor runs
-  -- and wires corpse.settle (in the live app it starts on the next tick on its own).
-  _PROMISE_TEST.current().__start()
+  -- corpse_start starts the promise SYNCHRONOUSLY (it must, or corpse_done can fire before the executor
+  -- wires corpse.settle and the row leaks). No manual __start here — if the sync-start regressed, `after`
+  -- below would be true (the row never resolves) and this test fails.
   local during = widget_has("looting corpses")     -- shows while looting
   corpse_done()
   local after = widget_has("looting corpses")       -- gone once the pass ends

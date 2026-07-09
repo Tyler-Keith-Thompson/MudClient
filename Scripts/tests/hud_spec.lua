@@ -179,3 +179,60 @@ test("truncate_middle is UTF-8 safe across the multibyte '·' separator", functi
   local out = tm("aa · bb · cc", 7)
   expect(utf8.len(out)):eq(7)                  -- valid UTF-8, correct visible length (no split bytes)
 end)
+
+-- ---- lag widget (lag_rows) — differentiates a local UI hitch from server round-trip latency --------
+
+local lag_rows = _HUD_TEST.lag_rows
+local function row_text(row)
+  local parts = {}
+  for _, s in ipairs(row.spans or {}) do parts[#parts + 1] = s.text end
+  return table.concat(parts)
+end
+local function lag_text(rows)
+  local t = {}
+  for _, r in ipairs(rows) do t[#t + 1] = row_text(r) end
+  return table.concat(t, "\n")
+end
+local function with_lag(snapshot, fn)
+  local saved = lag_status
+  _G.lag_status = function() return snapshot end
+  local ok, err = pcall(fn)
+  _G.lag_status = saved
+  if not ok then error(err, 2) end
+end
+
+test("lag widget is hidden until there's a real sample", function()
+  with_lag({ ui_ms = 0, ui_age_ms = -1, net_ms = 0, net_age_ms = -1 }, function()
+    expect(#lag_rows(22)):eq(0)
+  end)
+end)
+
+test("lag widget: a healthy round-trip shows a dim net readout, no alert", function()
+  with_lag({ ui_ms = 0, ui_age_ms = -1, net_ms = 48, net_age_ms = 200 }, function()
+    local txt = lag_text(lag_rows(22))
+    expect(txt):contains("net 48ms")
+    expect(txt:find("⚠")):eq(nil)
+  end)
+end)
+
+test("lag widget: a recent slow round-trip raises a ⚠ net alert with its duration", function()
+  with_lag({ ui_ms = 0, ui_age_ms = -1, net_ms = 620, net_age_ms = 500 }, function()
+    expect(lag_text(lag_rows(22))):contains("⚠ net 620ms")
+  end)
+end)
+
+test("lag widget: a recent UI hitch raises a ⚠ UI alert, DISTINCT from the network line", function()
+  with_lag({ ui_ms = 350, ui_age_ms = 400, net_ms = 45, net_age_ms = 1000 }, function()
+    local txt = lag_text(lag_rows(22))
+    expect(txt):contains("⚠ UI hitch 350ms")   -- the UI hitch is flagged...
+    expect(txt):contains("net 45ms")             -- ...and the healthy network line is shown, un-alerted
+  end)
+end)
+
+test("lag widget: an OLD UI hitch reads dim as 'UI last', not a live alert", function()
+  with_lag({ ui_ms = 350, ui_age_ms = 30000, net_ms = 45, net_age_ms = 500 }, function()
+    local txt = lag_text(lag_rows(22))
+    expect(txt):contains("UI last 350ms")
+    expect(txt:find("⚠")):eq(nil)
+  end)
+end)

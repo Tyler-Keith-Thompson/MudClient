@@ -13,6 +13,7 @@ local function capture_choice(hp, mp, sp)
   local sent
   state = { hp = hp, maxhp = 100, mana = mp, maxmana = 100, stam = sp, maxstam = 100 }
   send = function(c) sent = c end
+  _AA_TEST.reset_posture()   -- clear the cross-test posture debounce so a repeated command isn't eaten
   local ok, err = pcall(choose)
   state, send = saved_state, saved_send
   if not ok then error(err, 2) end

@@ -351,6 +351,8 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     /// A GO-AHEAD prompt boundary flushed `text`. No-op unless the script defines `on_prompt(text)`.
     func notifyPrompt(_ text: String) {
+        // A prompt is the server's reply boundary — pair it with the last send for a round-trip sample.
+        Container.lagMonitor().notePrompt()
         lock.lock(); defer { lock.unlock() }
         try? lua.callGlobal("on_prompt", [.string(text)])
     }
@@ -1162,6 +1164,16 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.lock.lock(); let item = self.timers.removeValue(forKey: id); self.lock.unlock()
             item?.cancel()
             return []
+        }
+        // lag_status() -> {ui_ms, ui_age_ms, net_ms, net_age_ms} — a latency snapshot separating a LOCAL
+        // UI hitch (the terminal main-loop stalling) from SERVER round-trip (last command -> next
+        // prompt). Ages are ms since the sample; -1 = never measured. Drives the HUD lag widget.
+        lua.register("lag_status") { _ in
+            let s = Container.lagMonitor().snapshot()
+            return [.table([], [
+                "ui_ms": .number(s.uiHitchMs), "ui_age_ms": .number(s.uiHitchAgeMs),
+                "net_ms": .number(s.netRttMs), "net_age_ms": .number(s.netRttAgeMs),
+            ])]
         }
         // ai_set_endpoint(url) / ai_set_model(id) — let a script implement runtime overrides.
         lua.register("ai_set_endpoint") { [weak self] args in

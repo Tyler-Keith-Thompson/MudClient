@@ -68,9 +68,26 @@ local heal_minions_kick            -- () -> nil: (re)start the minion-heal drive
 local reset_minion_heal            -- () -> nil: clear the minion-heal driver (on recovery end/cancel)
 local recovery                     -- { pct, settle } — the active recovery's target + promise callbacks
 
+-- A posture command (rest/sleep/stand) takes a moment to reflect in state.position (the kxwt_position
+-- update lags the command by a round-trip). choose_recovery_position runs on EVERY prompt, so without a
+-- guard it re-sends the same command many times before position catches up — the "You are already
+-- resting." spam. Debounce: never repeat the SAME posture command within this window; a DIFFERENT command
+-- (escalating rest->sleep, or standing) always goes through immediately. Self-heals if a command didn't
+-- take (after the window, it may resend).
+local POSTURE_REPEAT = 3
+local last_posture_cmd, last_posture_at = nil, 0
+local function send_posture(cmd)
+  local now = os.time()
+  if cmd == last_posture_cmd and (now - last_posture_at) < POSTURE_REPEAT then return end
+  last_posture_cmd, last_posture_at = cmd, now
+  send(cmd)
+end
+local function reset_posture() last_posture_cmd, last_posture_at = nil, 0 end
+
 -- Pick the recovery posture for the current vitals, current posture, AND what the minions still need.
 -- rest keeps more of your guard, so it wins when only mana is lacking (hp/stam already high); otherwise
--- sleep heals fastest. Context aware: only send a command when it actually changes the posture — no spam.
+-- sleep heals fastest. Context aware: only send a command when it actually changes the posture — and
+-- never spams a duplicate while the last one is still in flight (send_posture).
 local function choose_recovery_position()
   local player_done = ready(recovery and recovery.pct or nil)
   local cast_pending = minions_pending_spell_heal and minions_pending_spell_heal()
@@ -80,10 +97,10 @@ local function choose_recovery_position()
     -- ones or just wait standing on the natural-regen ones.
     if cast_pending then
       -- You must cast bolster/soothe on the skeletal minions, which you can't do asleep — wake to resting.
-      if recovery_depth(state.position) >= 2 then send("rest") end
+      if recovery_depth(state.position) >= 2 then send_posture("rest") end
     else
       -- Only natural-regen minions left to wait on — nothing for you to do, so stand back up.
-      if recovery_depth(state.position) > 0 then send("stand") end
+      if recovery_depth(state.position) > 0 then send_posture("stand") end
     end
     return
   end
@@ -95,7 +112,7 @@ local function choose_recovery_position()
   if want == "sleep" and cast_pending then want = "rest" end
   local target = (want == "sleep") and 2 or 1
   if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
-  send(want)
+  send_posture(want)
 end
 
 -- Recovery-as-a-promise. `recovery.pct` is the current target threshold; `recovery.settle` holds the
@@ -312,7 +329,8 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              minion_needs_spell_heal = minion_needs_spell_heal, minion_target_word = minion_target_word,
              minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,
              minion_heal = minion_heal, try_cast_heal = try_cast_heal,
-             minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal }
+             minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal,
+             reset_posture = reset_posture }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -1282,9 +1300,24 @@ function in_combat() return engaged() end
 -- teeth are full / you lack the skill (that reply both advances us and guarantees the loot response
 -- has already arrived, so the empty/dirty decision is never made early).
 local corpse = { on = true, active = false, idx = 1, step = nil, dirty = false, room = nil,
-                 killed = false, settle = nil }
+                 killed = false, settle = nil, watchdog = nil }
 if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the loot/sacrifice decision is unit-tested
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
+
+-- Stall watchdog. Pacing stays STREAM-DRIVEN (each step advances off a real game line); this is only a
+-- last-resort net: the harvest replies vary a lot (a successful `harvest spellcomps` just yields its
+-- comps with no distinct "done" line), so if we ever miss a terminal the machine would hang forever —
+-- corpse.active stuck true (blocking every future loot pass) and the promise row leaking. If no step
+-- has advanced within CORPSE_WATCHDOG seconds, force the pass closed so nothing stays wedged.
+local CORPSE_WATCHDOG = 15
+local function corpse_touch()
+  if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
+  if not corpse.active then return end
+  corpse.watchdog = after(CORPSE_WATCHDOG, function()
+    corpse.watchdog = nil
+    if corpse.active then echo("\27[33m[corpse] loot pass stalled — wrapping it up.\27[0m"); corpse_done() end
+  end)
+end
 
 -- `killed` = a mob actually DIED this fight (kxwt_mdeath), so combat ending means we have corpses to
 -- work. Cleared here (and on a room change), so ending combat by FLEEING — which changes rooms and
@@ -1292,6 +1325,7 @@ local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (gua
 -- the promise widget, whether the pass finished naturally or was stopped (off / room change).
 function corpse_done()
   corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
+  if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   local s = corpse.settle; corpse.settle = nil
   if s then s.resolve() end
 end
@@ -1301,11 +1335,16 @@ function corpse_start()
   corpse.active = true; corpse.idx = 1
   -- Surface the loot pass as a tracked promise so it shows in the HUD promise widget ("looting corpses")
   -- and disappears when corpse_done() resolves it. Guarded so the driver still runs without Promise.lua.
+  -- CRITICAL: start the promise SYNCHRONOUSLY (p.__start()) so corpse.settle is wired *before* we loot.
+  -- The builder otherwise runs its executor on the next tick (after(0)); but corpse_done() — driven by
+  -- stream lines — can fire before that tick, find corpse.settle still nil, and never resolve, leaking
+  -- the widget row forever. Running the executor now removes the timing dependency entirely.
   if __promise then
-    __promise(function(resolve, reject, onCancel)
+    local p = __promise(function(resolve, reject, onCancel)
       corpse.settle = { resolve = resolve, reject = reject }
       onCancel(function() corpse.settle = nil; if corpse.active then corpse_done() end end)
     end, "looting corpses")
+    if p and p.__start then p.__start() end
   end
   corpse_process()
 end
@@ -1314,6 +1353,7 @@ end
 function corpse_process()
   if not corpse.active then return end
   if corpse.idx > CORPSE_MAX then corpse_done(); return end
+  corpse_touch()          -- progress: (re)arm the stall watchdog
   corpse.dirty = false
   corpse.step = "loot"
   send("get all " .. corpse.idx .. ".corpse")     -- no corpse at idx -> "don't see anything named" ends us
@@ -1324,6 +1364,7 @@ end
 -- A harvest terminal line was seen -> next harvest, or on to the sacrifice decision.
 function corpse_harvest_done()
   if not corpse.active then return end
+  corpse_touch()          -- progress: (re)arm the stall watchdog
   if corpse.step == "teeth" then
     corpse.step = "spellcomps"
     send("harvest spellcomps " .. corpse.idx .. ".corpse")
@@ -1345,6 +1386,7 @@ end
 
 function corpse_sac()
   if not corpse.active or corpse.step == "sac" then return end
+  corpse_touch()          -- progress: (re)arm the stall watchdog
   corpse.step = "sac"
   send("sac " .. corpse.idx .. ".corpse")   -- removes it; the next corpse shifts into corpse.idx...
   corpse_process()                          -- ...so re-process the SAME index
@@ -1391,6 +1433,15 @@ trigger([[^You can't safely carry any more teeth]], function() corpse_harvest_do
 trigger([[^Your collected teeth grow restless]], function() corpse_harvest_done() end)    -- teeth full
 trigger([[^You don't know enough about the undead]], function() corpse_harvest_done() end) -- no spellcomp skill
 trigger([[^Looks like the corpse of .+ is too damaged for you to use]], function() corpse_harvest_done() end) -- corpse too mangled to harvest -> skip, keep going
+-- A SUCCESSFUL `harvest spellcomps` has no distinct "done" line — it just yields the component(s) and
+-- stops (unlike teeth, which end on "grow restless"). So the yield line IS the terminal for the
+-- spellcomps step. These are the necromancer fluid/bladder comps (bile + colored fluids); generalized to
+-- catch every colour ("drain … into …", "… tie off the ends …"). Gated to the spellcomps step so a
+-- stray yield can't advance a teeth harvest early — and so an earlier fight's line can't fire it.
+trigger([[^You make a small incision and drain .+ into ]],
+  function() if corpse.active and corpse.step == "spellcomps" then corpse_harvest_done() end end)
+trigger([[^You .+ tie off the ends]],
+  function() if corpse.active and corpse.step == "spellcomps" then corpse_harvest_done() end end)
 
 -- Blood sacrifice result (success OR the undead/"not intact" refusal) -> the final sacrifice.
 trigger([[^You sacrifice blood from]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
@@ -1435,6 +1486,7 @@ local function begin_recovery(frac)
   state.recover = true
   echo(string.format("Recovering — resting/sleeping; I'll stand you up once every vital hits %d%%.",
        math.floor(frac * 100 + 0.5)))
+  reset_posture()       -- fresh recovery → don't let a just-interrupted one's debounce eat the first rest
   choose_recovery_position()
   heal_minions_kick()   -- start topping off no-regen minions right away (roster refreshes drive the rest)
 end

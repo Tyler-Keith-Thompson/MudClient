@@ -218,11 +218,15 @@ local function parse_exits(line)
   return any and set or nil
 end
 
--- A room is a frontier if it has an exit we've never taken (unexplored from there).
+-- A room is a frontier if it has an exit we've never taken (unexplored from there) AND haven't blocked
+-- (a blocked exit is a dead end for routing, so a room whose only untaken exits are blocked is NOT a
+-- frontier — explore shouldn't route toward it).
 local function has_frontier(rid)
   local r = P.rooms[rid]
   if not r then return false end
-  for d in pairs(r.exits) do if not r.moves[d] then return true end end
+  for d in pairs(r.exits) do
+    if not r.moves[d] and not (r.blocked and r.blocked[d]) then return true end
+  end
   return false
 end
 
@@ -1680,6 +1684,66 @@ alias([[^explore$]], function()
   nav_step()
 end)
 
+-- noexit(dir) — mark a direction OUT OF THE CURRENT ROOM as blocked so `explore` and the pilot's
+-- routing never try it, even when the room advertises that exit. The auto-detector only catches "you
+-- cannot go that way"; there are many other reasons a real exit isn't traversable (a locked/closed door,
+-- a guard that stops you, a one-way passage, a level/quest gate) with as many different messages — so
+-- this lets you say so by hand. Per-room, persists with the map (save_map serializes r.blocked), and
+-- hides that edge on the minimap. noexit() lists this room's blocks; noexit('clear <dir>') / noexit('-n')
+-- unblocks one; noexit('clear') clears them all here. Named `noexit`, NOT `block`, because block/unblock
+-- are real AlterAeon commands (player blocking) we must never shadow.
+function noexit(args) return noexit_command(args) end
+doc(noexit, { name = "noexit", sig = "noexit([dir])", group = "map",
+  text = "Block a direction out of the current room so explore()/navigate never route that way — for the "
+      .. "locked doors, guards and one-way exits the auto-detector (which only knows \"cannot go that "
+      .. "way\") misses. noexit() lists this room's blocks; noexit('clear <dir>') unblocks one; "
+      .. "noexit('clear') clears them all here. Per-room, persists with the map, hidden on the minimap.",
+  example = "noexit('north')   -- the north door is locked; stop routing through it" })
+function noexit_command(args)
+  args = trim(args or "")
+  local id = P.current_room
+  local r = id and P.rooms[id]
+  if not r then echo("[noexit] no current room yet — move once so the map knows where you are."); return end
+  -- list
+  if args == "" then
+    local dirs = {}
+    for d in pairs(r.blocked or {}) do dirs[#dirs + 1] = d end
+    if #dirs == 0 then echo("[noexit] nothing blocked here. `noexit <dir>` blocks a direction (e.g. noexit north).")
+    else table.sort(dirs); echo("[noexit] blocked out of " .. (r.name or "this room") .. ": " .. table.concat(dirs, ", ")) end
+    return
+  end
+  -- clear ALL blocks in this room
+  local low = args:lower()
+  if low == "clear" or low == "reset" or low == "clear all" then
+    if r.blocked then r.blocked = nil; schedule_save(); echo("[noexit] cleared every block in " .. (r.name or "this room") .. ".")
+    else echo("[noexit] nothing blocked here.") end
+    return
+  end
+  -- unblock ONE:  clear <dir> | unblock <dir> | -<dir>
+  local un = args:match("^clear%s+(.+)$") or args:match("^unblock%s+(.+)$") or args:match("^%-%s*(.+)$")
+  if un then
+    local d = CANON[trim(un):lower()]
+    if not d then echo("[noexit] '" .. trim(un) .. "' isn't a direction."); return end
+    if r.blocked and r.blocked[d] then
+      r.blocked[d] = nil; if not next(r.blocked) then r.blocked = nil end
+      schedule_save(); echo("[noexit] unblocked " .. d .. " — explore may route that way again.")
+    else echo("[noexit] " .. d .. " wasn't blocked here.") end
+    return
+  end
+  -- block ONE
+  local d = CANON[low]
+  if not d then echo("[noexit] '" .. args .. "' isn't a direction. Use n/s/e/w/u/d/ne/nw/se/sw (or 'clear <dir>')."); return end
+  r.blocked = r.blocked or {}
+  if r.blocked[d] then echo("[noexit] " .. d .. " is already blocked here."); return end
+  r.blocked[d] = true
+  schedule_save()
+  echo("[noexit] blocked " .. d .. " out of " .. (r.name or "this room") .. " — explore won't route that way. `noexit clear " .. d .. "` to undo.")
+end
+-- Game-line aliases so you can type it straight in (like `explore`) — no `#` needed. Safe because
+-- `noexit` is not an AlterAeon command (unlike block/unblock, which are).
+alias([[^noexit$]], function() noexit_command("") end)
+alias([[^noexit (.+)$]], function(_, rest) noexit_command(rest) end)
+
 -- mark(label) tags the CURRENT room with a landmark label (e.g. mark('trainer')) so you can
 -- travel('<label>') back to it later and the pilot can navigate('<label>') to it. mark() with no args
 -- lists every tagged room; mark('del <label>') (or mark('-<label>')) removes one. Marks persist with
@@ -2530,7 +2594,7 @@ _AIP_TEST = {
   waypoint_num_for_room = waypoint_num_for_room, waypoint_cmd_num = waypoint_cmd_num,
   parse_exits = parse_exits, cmd_ends_turn = cmd_ends_turn, untaken_exit = untaken_exit,
   path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,
-  best_explore_dir = best_explore_dir, block_last_move = block_last_move,
+  best_explore_dir = best_explore_dir, block_last_move = block_last_move, noexit_command = noexit_command,
   arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
   extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,
   plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
