@@ -199,6 +199,23 @@ test("engage: target + opener, retry opener on fail, then hand off to the probe 
   expect(failed):eq(nil)
 end)
 
+-- REGRESSION: the DEAD line arrives BEFORE the trailing `kxwt_fighting -1`, and DEAD runs end_fight()
+-- which clears F.fighting. The old guard was `F.fighting and F.on_dead`, so by the time -1 ran F.fighting
+-- was already false and on_dead never fired — the attack() promise (and any `recover | attack` pipe row
+-- adopting it) leaked forever. The fix latches F.fought at combat start; assert on_dead fires on the
+-- normal DEAD-then-(-1) kill order.
+test("engage: on_dead still fires when DEAD (clears F.fighting) precedes the kxwt -1", function()
+  AF.reset()
+  local dead = false
+  autofight.engage("orc", function() dead = true end)
+  AF.tarrants()                                        -- opener landed
+  AF.on_fight(90, ENEMY)                               -- combat truly starts → F.fought latched
+  AF.dead()                                            -- "... is DEAD!" → end_fight() zeroes F.fighting
+  expect(AF.state().fighting):eq(false)
+  AF.on_fight_end()                                    -- trailing kxwt -1 → on_dead must STILL resolve
+  expect(dead):eq(true)
+end)
+
 test("engage: gives up (on_fail) after cfg.max_tries opener failures", function()
   AF.reset()
   local dead, failed = false, nil
@@ -569,4 +586,73 @@ test("a still-valid winner (scorch) is trusted after the swap — skips the prob
   expect(AF.state().phase):eq("nuke")
   expect(AF.sent[#AF.sent]):eq("c scorch")
   AF.on_fight_end()
+end)
+
+-- ---- tank rescue: a dead clay-man/flesh-beast tank → corpse off + re-summon ----------------------
+-- The tank is a minion of ours (group flag M) that's tanking (flag T). When it dies we turn off corpse
+-- automation and re-cast 'clay man' until one rejoins. Detection is name-based and sticky so it survives
+-- the roster dropping the dead row before the mdeath line lands.
+
+local function tank_reset()
+  AF.reset()
+  local T = AF.tank(); T.on, T.name, T.resummoning, T.tries, T.timer = true, nil, false, 0, nil
+  _AA_TEST.corpse.on = true                          -- start with corpse automation ON
+  state.name, state.group = "Vaelith", nil
+end
+
+test("tank_scan: the minion flagged M+T is the tank; a plain minion or an ally player is not", function()
+  state.group = {
+    { name = "Vaelith",     flags = "XL" },          -- you (leader)
+    { name = "A skeletal spider", flags = "M" },     -- your minion, NOT tanking
+    { name = "A clay man",  flags = "MT" },           -- your minion, tanking → the tank
+  }
+  expect(AF.tank_scan()):eq("A clay man")
+  state.name, state.group = nil, nil
+end)
+
+test("tank dies: corpse automation goes OFF and we start re-casting clay man", function()
+  tank_reset()
+  state.group = { { name = "Vaelith", flags = "XL" }, { name = "flesh beast", flags = "MT" } }
+  AF.tank_refresh()                                   -- kxwt_group_end → remember "flesh beast" as tank
+  expect(AF.tank().name):eq("flesh beast")
+  AF.tank_mdeath("flesh beast")                       -- the tank dies
+  expect(_AA_TEST.corpse.on):eq(false)               -- (1) corpse automation disabled
+  expect(AF.sent[#AF.sent]):eq(AF.cfg.clay_cmd)      -- (2) first re-summon cast went out
+  expect(AF.tank().resummoning):eq(true)
+end)
+
+test("a NON-tank minion dying does nothing (no corpse-off, no re-summon)", function()
+  tank_reset()
+  state.group = {
+    { name = "flesh beast", flags = "MT" },           -- the tank
+    { name = "A skeletal spider", flags = "M" },       -- a plain minion
+  }
+  AF.tank_refresh()
+  local before = #AF.sent
+  AF.tank_mdeath("A skeletal spider")                 -- a non-tank minion dies
+  expect(_AA_TEST.corpse.on):eq(true)                -- corpse automation untouched
+  expect(#AF.sent):eq(before)                        -- nothing re-summoned
+  expect(AF.tank().resummoning):eq(false)
+end)
+
+test("re-summon stops as soon as a clay man rejoins the group", function()
+  tank_reset()
+  state.group = { { name = "flesh beast", flags = "MT" } }
+  AF.tank_refresh()
+  AF.tank_mdeath("flesh beast")
+  expect(AF.tank().resummoning):eq(true)
+  AF.tank_resummoned()                                -- "You add A clay man to your group."
+  expect(AF.tank().resummoning):eq(false)             -- loop stopped
+end)
+
+test("tank rescue can be disabled: autofight.tank('off') suppresses the response", function()
+  tank_reset()
+  autofight.tank("off")
+  state.group = { { name = "flesh beast", flags = "MT" } }
+  AF.tank_refresh()
+  local before = #AF.sent
+  AF.tank_mdeath("flesh beast")
+  expect(_AA_TEST.corpse.on):eq(true)                -- disabled → no action
+  expect(#AF.sent):eq(before)
+  autofight.tank("on")                                -- restore for later tests
 end)

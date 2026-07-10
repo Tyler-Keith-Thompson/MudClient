@@ -56,6 +56,10 @@ local cfg = {
   -- so its wire strings survive for a future feature — mana-aware spell switching as we run low. The
   -- routine never casts it, so this string is unused today; nothing sends it.
   shower_cmd       = "c shower",     -- shower of sparks
+  -- Tank rescue (autofight.tank): re-summon a dead clay-man/flesh-beast tank.
+  clay_cmd         = "cast 'clay man'", -- summon a clay man to tank ("You add A clay man to your group." on success)
+  clay_retry       = 4,   -- seconds between re-summon attempts (a success line stops the loop early)
+  clay_max_tries   = 8,   -- backstop: give up after this many (e.g. no clay/dirt in the room to shape)
 }
 
 -- Survive pilot.reload(): keep the on/off toggle and any in-flight fight state in a global. Armed by
@@ -81,6 +85,12 @@ F.engage_tries      = F.engage_tries or 0
 F.opener_primed     = F.opener_primed or false
 F.on_dead           = F.on_dead or nil      -- called once when an engaged fight ends
 F.on_fail           = F.on_fail or nil      -- called if we can't get the opener to land
+-- "Real combat actually started this engagement" latch. Set the moment kxwt_fighting begins the fight
+-- (start_fight); it OUTLIVES the DEAD line, which clears F.fighting via end_fight BEFORE the trailing
+-- `kxwt_fighting -1` reaches on_fight_end. Guarding on_dead's fire on F.fought (not the already-cleared
+-- F.fighting) is what fixes `recover | attack <x>` leaking its promise row: the attack() resolver ran off
+-- F.fighting, which DEAD had zeroed, so on_dead never fired and the pipe row never resolved.
+F.fought            = F.fought or false
 F.soul_latched      = F.soul_latched or false  -- dormant soulsteal latched; keep nuking, don't re-cast it
 -- AOE (crowd) handling. `aoe_mode` is a preference that survives reload: "auto" uses frostflower once we
 -- know it's a pack, "on" always AOEs, "off" never does. `pack` is this-combat belief that there are
@@ -343,6 +353,7 @@ end
 
 local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
+  F.fought = true             -- real combat began; survives the DEAD line so on_fight_end can still resolve on_dead
   begin_fight_promise(name)   -- track this engagement as a promise (once; retitles on target rollover)
   -- Do we already know the winning spell for this target name? If so, skip the probe entirely.
   local key = winner_key(name)
@@ -476,12 +487,16 @@ local function on_fight(pct, name)
 end
 
 local function on_fight_end()
-  local was_engaged_fight = F.fighting and F.on_dead
+  -- Latch on F.fought, NOT F.fighting: the DEAD line runs end_fight() (clearing F.fighting) BEFORE this
+  -- trailing `kxwt_fighting -1` arrives, so F.fighting is already false on a normal kill. F.fought stays
+  -- true from start_fight, so an engaged kill still resolves; a stray -1 during the opener (F.engaging,
+  -- never reached start_fight) leaves F.fought false and correctly does NOT resolve.
+  local was_engaged_fight = F.fought and F.on_dead
   F.pack, F.enemy_est = false, 0                         -- combat truly over → next fight re-evaluates
   if F.fighting then end_fight() end
+  F.fought = false                                       -- engagement fully over; re-armed by the next start_fight
   settle_fight_promise()                                 -- resolve the engagement's promise (combat is over)
-  -- The fight we started via engage() is over (mob dead or fled): fire on_dead exactly once. Guarded on
-  -- was-fighting so a stray -1 while we're still trying to land the opener (F.engaging) doesn't resolve.
+  -- The fight we started via engage() is over (mob dead or fled): fire on_dead exactly once.
   if was_engaged_fight then
     local cb = F.on_dead; F.on_dead, F.on_fail = nil, nil
     if cb then cb() end
@@ -563,6 +578,83 @@ local function observe_input(cmd)
   end) or nil
 end
 
+-- ---- tank rescue: auto-resummon a dead clay-man tank ---------------------------------------------
+-- Your TANK is a MINION of yours (kxwt group flag M) that's TANKING (flag T) — for this character a
+-- summoned clay man (a flesh beast tanks the same way). It dying mid-fight is an emergency: the party
+-- loses its front line. So when the tank dies we (1) turn OFF corpse automation — it would otherwise run
+-- off to sac/loot the corpse the moment combat ends, and we need a clean shot at re-summoning instead —
+-- and (2) re-cast 'clay man' on a pace until one joins the group, restoring the tank. Runs regardless of
+-- F.on (a dead tank is worth handling whether or not auto-fight is armed); disable with autofight.tank('off').
+local TANK = { on = true, name = nil, resummoning = false, tries = 0, timer = nil }
+
+-- Which grouped minion is currently tanking (flags contain both M = ours and T = tanking)? Its name is
+-- remembered stickily (see the kxwt_group_end trigger) so a death — which arrives as a bare
+-- `kxwt_mdeath <name>`, and may land AFTER the roster has already dropped the dead row — is still
+-- recognised as "that was the tank".
+local function current_tank_name()
+  for _, m in ipairs(state.group or {}) do
+    local f = m.flags or ""
+    if f:find("M", 1, true) and f:find("T", 1, true) then return m.name end
+  end
+  return nil
+end
+
+local function stop_resummon()
+  TANK.resummoning, TANK.tries = false, 0
+  if TANK.timer and cancel then cancel(TANK.timer); TANK.timer = nil end
+end
+
+-- One re-summon attempt, then a backstop timer for the next. Capped so a hard, un-retryable failure —
+-- no clay/dirt in the room to shape ("You need nearby clay or dirt for this.") — can't spam forever.
+local resummon_tick
+resummon_tick = function()
+  TANK.timer = nil
+  if not TANK.resummoning then return end
+  if TANK.tries >= cfg.clay_max_tries then
+    say(string.format("gave up re-summoning a tank after %d tries (need clay/dirt nearby?)", TANK.tries))
+    stop_resummon(); return
+  end
+  TANK.tries = TANK.tries + 1
+  say(string.format("tank down — re-summoning clay man (try %d/%d)", TANK.tries, cfg.clay_max_tries))
+  af_send(cfg.clay_cmd)
+  TANK.timer = after and after(cfg.clay_retry, resummon_tick) or nil
+end
+
+local function tank_died()
+  if not TANK.on then return end
+  say("tank died — disabling corpse automation and re-summoning a clay man")
+  if kxwt and kxwt.corpse then kxwt.corpse("off") end   -- clear the way; stop auto-sac/loot
+  if TANK.resummoning then return end                   -- a resummon is already in flight
+  TANK.resummoning, TANK.tries = true, 0
+  resummon_tick()
+end
+
+-- A clay man joined the group (or we already had one) → we have a tank again; stop retrying.
+local function tank_resummoned()
+  if not TANK.resummoning then return end
+  say("new tank up")
+  stop_resummon()
+end
+
+-- kxwt_group_end: remember who's tanking (sticky — only overwrite when a tank is actually present, so the
+-- post-death roster that no longer lists it doesn't wipe the name before the mdeath line matches it).
+local function refresh_tank()
+  local t = current_tank_name()
+  if t then TANK.name = t end
+end
+
+-- kxwt_mdeath <name>: was it the tank? Exact lower-case name match (the convention is_ally/note_mdeath
+-- use — kxwt formats the death name the same as the group row). Clear the remembered name and rescue.
+local function on_mdeath_tank(name)
+  if TANK.name and name and name:lower() == TANK.name:lower() then
+    TANK.name = nil
+    tank_died()
+  end
+end
+
+-- Public toggle for the tank-rescue block is autofight.tank(...) — defined with the other autofight.*
+-- members below (the `autofight` table doesn't exist yet at this point in the file).
+
 -- ---- triggers ------------------------------------------------------------------------------------
 -- Lines reach triggers ANSI-stripped. Register health-bar + resolution triggers that call the same
 -- handlers on_line() does. (Trigger regexes run in Swift and aren't unit-testable — the pure handlers
@@ -597,6 +689,14 @@ if trigger then
   trigger([[^(.+) is here, fighting .+$]], function(_, subject) note_room_fighter(subject) end)
   -- Each enemy death counts down the crowd estimate — this is what drops us out of AOE onto the last one.
   trigger([[^kxwt_mdeath (.+)$]], function(_, name) note_mdeath(name) end)
+  -- Tank rescue: remember who's tanking from each roster (sticky — kept until a new tank is seen), catch
+  -- its death (exact lower-case name match, the same convention is_ally/note_mdeath use), and stop the
+  -- re-summon loop once a clay man rejoins. The group_end handler here runs AFTER AlterAeon's (which sets
+  -- state.group) — same pattern, and AlterAeon loads first — so state.group is fresh when we read it.
+  trigger([[^kxwt_group_end$]], function() refresh_tank() end)
+  trigger([[^kxwt_mdeath (.+)$]], function(_, name) on_mdeath_tank(name) end)
+  trigger([[^You add .*clay man to your group\.$]], function() tank_resummoned() end)
+  trigger([[^You already have .*clay man at your side\.$]], function() tank_resummoned() end)
   -- (No rvnum reset: the server re-sends rvnum on a plain `look`, so resetting here would flicker us out
   -- of AOE on every look. Leaving a room ends combat (kxwt_fighting -1), and on_fight_end already zeroes
   -- the crowd estimate — so the authoritative combat-end signal covers the "walked away" case.)
@@ -622,6 +722,23 @@ end
 
 autofight = {}
 
+-- Public toggle for the tank-rescue block (machinery is defined up above, before the trigger block).
+-- autofight.tank('on'|'off'|'status').
+function autofight.tank(mode)
+  mode = (mode or ""):gsub("^%s+", ""):gsub("%s+$", ""):lower()
+  if mode == "on" then TANK.on = true; say("tank rescue on")
+  elseif mode == "off" then TANK.on = false; stop_resummon(); say("tank rescue off")
+  else
+    say("tank rescue " .. (TANK.on and "on" or "off")
+        .. (TANK.name and (" — tank: " .. TANK.name) or " — no tank seen")
+        .. (TANK.resummoning and (" (re-summoning, try " .. TANK.tries .. ")") or ""))
+  end
+end
+doc(autofight.tank, { name = "autofight.tank", sig = "autofight.tank(['on'|'off'|'status'])", group = "combat",
+  text = "When your TANK — a minion of yours that's tanking (kxwt group flags M+T), e.g. a summoned clay "
+      .. "man or flesh beast — dies, turn OFF corpse automation and re-cast 'clay man' on a pace until one "
+      .. "rejoins the group, restoring your front line. On by default; runs whether or not auto-fight is armed." })
+
 function autofight.on()
   F.on = true
   say("armed — tarrants → icebolt/scorch probe → nuke winner → soulsteal")
@@ -631,6 +748,7 @@ end
 function autofight.off()
   F.on = false
   end_fight()
+  F.fought = false
   say("disarmed")
 end
 
@@ -744,6 +862,7 @@ doc(autofight.winner, { name = "autofight.winner", sig = "autofight.winner(name[
 function autofight.engage(target, on_dead, on_fail)
   F.on = true
   end_fight()                                            -- clear any stale fight/init state
+  F.fought = false                                       -- fresh engagement: re-armed when start_fight lands
   F.on_dead, F.on_fail = on_dead, on_fail
   F.engaging, F.engage_busy, F.engage_tries = true, false, 0
   F.opener_primed = true                                 -- start_fight will skip re-casting the opener
@@ -827,6 +946,11 @@ _AF_TEST = {
   is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS,    save_winners = save_winners,
   frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
   mdeath        = note_mdeath,
+  tank          = function() return TANK end,             -- tank-rescue state (name/resummoning/tries)
+  tank_scan     = current_tank_name,                      -- who's tanking, from the current roster
+  tank_refresh  = refresh_tank,                            -- kxwt_group_end: (re)remember the tank name
+  tank_mdeath   = on_mdeath_tank,                          -- kxwt_mdeath: if it was the tank, rescue
+  tank_resummoned = tank_resummoned,                      -- a clay man rejoined (stop the loop)
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
