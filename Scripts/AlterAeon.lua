@@ -107,6 +107,23 @@ local function send_posture(cmd)
 end
 local function reset_posture() last_posture_cmd, last_posture_at = nil, 0 end
 
+-- Decision narration during recovery — the user asked to SEE what recover decided and why. Two
+-- independent DEDUPED channels (posture + cast): a decision announces once and stays quiet until it
+-- changes, so the choice narrates without spamming every prompt tick. Reset per recovery so a fresh one
+-- re-narrates from scratch.
+local last_posture_key, last_cast_key
+local function narrate(chan, key, msg)
+  if chan == "posture" then
+    if key == last_posture_key then return end
+    last_posture_key = key
+  else
+    if key == last_cast_key then return end
+    last_cast_key = key
+  end
+  if echo then echo("\27[36m[recover]\27[0m " .. msg) end
+end
+local function reset_narration() last_posture_key, last_cast_key = nil, nil end
+
 -- Pick the recovery posture for the current vitals, current posture, AND what the minions still need.
 -- rest keeps more of your guard, so it wins when only mana is lacking (hp/stam already high); otherwise
 -- sleep heals fastest. Context aware: only send a command when it actually changes the posture — and
@@ -123,9 +140,11 @@ local function choose_recovery_position()
     -- There's no point staying asleep (or even resting) when you're full: either cast on the skeletal
     -- ones or just wait standing on the natural-regen ones.
     if cast_pending then
+      narrate("posture", "done-minions-cast", "you're topped off — resting to finish healing your minions")
       -- You must cast bolster/soothe on the skeletal minions, which you can't do asleep — wake to resting.
       if recovery_depth(state.position) >= 2 then send_posture("rest") end
     else
+      narrate("posture", "done-minions-wait", "you're topped off — standing, waiting on your minions to regen")
       -- Only natural-regen minions left to wait on — nothing for you to do, so stand back up.
       if recovery_depth(state.position) > 0 then send_posture("stand") end
     end
@@ -145,6 +164,18 @@ local function choose_recovery_position()
   -- We must be AWAKE (resting, not asleep) to cast: for the minions, or once sharp for our own vitals.
   -- The deepen-only guard below would otherwise leave us asleep, so force the sleep→rest downgrade here.
   local need_awake = cast_pending or (self_want and state.sharp)
+  -- Narrate the posture decision (deduped) so you can see WHY we're resting vs sleeping.
+  if self_want and not state.sharp then
+    narrate("posture", "sleep-sharp", "sleeping to get sharp first — faster regen before I spend any mana on you")
+  elseif self_want and state.sharp then
+    narrate("posture", "rest-cast", "sharp now — resting so I can cast refresh/heals to top you off")
+  elseif cast_pending then
+    narrate("posture", "rest-minions", "resting so I can cast heals on your minions")
+  elseif want == "rest" then
+    narrate("posture", "rest-mana", "resting — only mana's low, keeping your guard up while it comes back")
+  else
+    narrate("posture", "sleep-deep", "sleeping — deepest heal for your hp/stamina")
+  end
   if want == "rest" and need_awake and recovery_depth(state.position) >= 2 then send_posture("rest"); return end
   local target = (want == "sleep") and 2 or 1
   if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
@@ -158,6 +189,7 @@ end
 recovery = { pct = READY_PCT, settle = nil }
 local function end_recovery(completed, reason)
   state.recover = false
+  reset_narration()
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
   recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
@@ -421,6 +453,9 @@ try_self_cast = function()
     local hpf = pct(state.hp, state.maxhp)
     if hpf < frac and cast_beats_waiting(state.hp, state.maxhp, r and r.hp, HEAL_COST) then
       local spell = (hpf < BOLSTER_BELOW) and "bolster" or "soothe"
+      local ticks = ticks_to_target(state.hp, state.maxhp, r and r.hp, frac) or 0
+      narrate("cast", "hp", string.format("casting %s on yourself — hp %d%% is ~%d ticks of regen away; mana to spare",
+        spell, math.floor(hpf * 100 + 0.5), math.ceil(ticks)))
       minion_heal.last = { kind = "self_hp" }
       minion_heal.casting = true
       send("c " .. spell .. " " .. state.name)
@@ -432,12 +467,22 @@ try_self_cast = function()
   if (st == nil or st == "stam") and not minion_heal.self_stam_blocked and not engaged() then
     local spf = pct(state.stam, state.maxstam)
     if spf < frac and cast_beats_waiting(state.stam, state.maxstam, r and r.move, REFRESH_COST) then
+      local ticks = ticks_to_target(state.stam, state.maxstam, r and r.move, frac) or 0
+      narrate("cast", "stam", string.format("casting refresh — stamina %d%% is ~%d ticks of regen away; mana to spare",
+        math.floor(spf * 100 + 0.5), math.ceil(ticks)))
       minion_heal.last = { kind = "self_stam" }
       minion_heal.casting = true
       send("c refresh")
       arm_cast_backstop()
       return
     end
+  end
+  -- Wanted to help a stat but chose NOT to cast (regen is fast enough, or mana can't spare it) — say so
+  -- once, so a quiet rest doesn't look like the feature isn't working. No regen data yet reads separately.
+  if not r then
+    narrate("cast", "nodata", "no regen numbers yet — I'll check `show regen` and decide once I have them")
+  else
+    narrate("cast", "wait", "letting natural regen handle it — not worth spending mana right now")
   end
 end
 
@@ -503,7 +548,8 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal,
              reset_posture = reset_posture,
              ticks_to_target = ticks_to_target, cast_beats_waiting = cast_beats_waiting,
-             self_cast_wanted = self_cast_wanted, try_self_cast = try_self_cast }
+             self_cast_wanted = self_cast_wanted, try_self_cast = try_self_cast,
+             reset_narration = reset_narration }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -1712,6 +1758,7 @@ local function begin_recovery(frac)
     echo(string.format("Recovering — resting/sleeping; I'll stand you up once every vital hits %d%%.", pctlabel))
   end
   reset_posture()       -- fresh recovery → don't let a just-interrupted one's debounce eat the first rest
+  reset_narration()     -- fresh recovery re-narrates its decisions from scratch
   choose_recovery_position()
   -- Kick the recovery-cast driver (heals skeletal minions on a full recovery, and/or spends surplus mana
   -- on your own vitals). It internally respects the mode: minion-only skips self, single-stat skips

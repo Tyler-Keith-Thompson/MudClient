@@ -322,3 +322,38 @@ test("while not sharp, keeps sleeping (earning sharp) instead of waking early", 
   with_self_recovery({ position = "sleeping", mana = 90, stam = 30, sharp = false },
     function(sent) _AA_TEST.choose_recovery_position(); expect(#sent):eq(0) end)
 end)
+
+test("narrates each recovery decision, deduped (same decision announces once)", function()
+  local saved_echo = echo
+  local msgs = {}
+  _G.echo = function(m, ...) msgs[#msgs + 1] = m end
+  _AA_TEST.reset_narration()
+  with_self_recovery({ hp = 30, regen = { hp = 6, mana = 20, move = 10, position = "resting" } },
+    function()
+      _AA_TEST.try_cast_heal()                       -- casts bolster → narrates cast:hp
+      _AA_TEST.minion_heal.casting = false
+      _AA_TEST.try_cast_heal()                       -- SAME decision → no new narration
+    end)
+  _G.echo = saved_echo
+  local casts = 0
+  for _, m in ipairs(msgs) do if type(m) == "string" and m:find("casting bolster") then casts = casts + 1 end end
+  expect(casts):eq(1)                                -- deduped: announced exactly once
+end)
+
+test("narrates the sleep-for-sharp then rest-to-cast posture strategy", function()
+  local saved_echo = echo
+  local msgs = {}
+  _G.echo = function(m, ...) msgs[#msgs + 1] = m end
+  local function last_match(pat)
+    for i = #msgs, 1, -1 do if type(msgs[i]) == "string" and msgs[i]:find(pat) then return true end end
+  end
+  _AA_TEST.reset_narration()
+  with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = false },
+    function() _AA_TEST.choose_recovery_position() end)
+  expect(last_match("get sharp first")):truthy()
+  _AA_TEST.reset_narration()
+  with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = true },
+    function() _AA_TEST.choose_recovery_position() end)
+  _G.echo = saved_echo
+  expect(last_match("resting so I can cast")):truthy()
+end)
