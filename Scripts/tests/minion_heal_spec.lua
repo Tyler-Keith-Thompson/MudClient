@@ -162,6 +162,47 @@ test("multiples: targets N.keyword and a refusal advances the sweep to the next 
   end)
 end)
 
+-- ---- shared keyword: "skeleton" reaches the WHOLE skeletal family (a bare skeleton can't be singled out)
+
+test("keyword_matches: 'skeleton' reaches every skeletal minion; specific nouns stay specific", function()
+  expect(AA.keyword_matches("skeleton", "A skeleton")):truthy()
+  expect(AA.keyword_matches("skeleton", "A skeletal mage")):truthy()
+  expect(AA.keyword_matches("skeleton", "A skeletal spider")):truthy()
+  expect(AA.keyword_matches("mage", "A skeletal mage")):truthy()
+  expect(AA.keyword_matches("mage", "A skeleton")):falsy()          -- 'mage' only matches the mage
+  expect(AA.keyword_matches("spider", "A skeletal mage")):falsy()
+end)
+
+test("keyword_count: 'skeleton' counts EVERY skeletal minion so the ordinal sweep can reach a bare one", function()
+  local group = { me(),
+    minion("A skeleton", 59, 119), minion("A skeletal mage", 79, 79),
+    minion("A skeletal spider", 39, 39), minion("A skeletal spider", 39, 39) }
+  with_group(group, {}, function()
+    expect(AA.keyword_count("skeleton")):eq(4)   -- skeleton + mage + 2 spiders all answer to 'skeleton'
+    expect(AA.keyword_count("mage")):eq(1)       -- 'mage' is specific
+    expect(AA.keyword_count("spider")):eq(2)
+  end)
+end)
+
+test("a hurt bare skeleton SWEEPS N.skeleton instead of forever hitting the full mage (the reported bug)", function()
+  -- Roster from the raw log: a hurt "A skeleton" (the skeletal warrior) beside a FULL "A skeletal mage" and
+  -- full spiders. 'skeleton' matches them all, so with K=1 (old bug) every cast went to the mage. With the
+  -- family count the driver uses ordinals and can sweep past the full ones to the hurt skeleton.
+  local group = { me(),
+    minion("A skeleton", 59, 119),         -- HURT — the only one needing a heal
+    minion("A skeletal mage", 79, 79),     -- full
+    minion("A skeletal spider", 39, 39),   -- full
+    minion("A skeletal spider", 39, 39) }
+  with_group(group, {}, function(sent)
+    AA.try_cast_heal()
+    expect(sent[1]:find("^c %a+ 1%.skeleton$") ~= nil):truthy()   -- ordinal (K>1), NOT bare "skeleton"
+    AA.minion_cast_settled("full")                                -- that slot was a full minion → sweep on
+    expect(sent[2]:find("^c %a+ 2%.skeleton$") ~= nil):truthy()
+    AA.minion_cast_settled("full")
+    expect(sent[3]:find("^c %a+ 3%.skeleton$") ~= nil):truthy()   -- keeps advancing (old code was stuck at 1)
+  end)
+end)
+
 test("no cast when not recovering, asleep, busy, or a cast is already in flight", function()
   local g = { me(), minion("A skeletal spider", 10, 39) }
   with_group(g, { recover = false },   function(sent) AA.try_cast_heal(); expect(#sent):eq(0) end)

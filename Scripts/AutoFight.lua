@@ -4,8 +4,12 @@
 -- combat wire protocol with a fixed opener→probe→nuke→finish routine, opt-in and OFF by default.
 --
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
+--   0. OPENER:           bloodmist when HP is healthy (> cfg.bloodmist_hp_min — it costs hp to cast), else
+--                        the free tarrants. (A known-winner target skips straight past the probe below.)
 --   1. PROBE:            on COMBAT START, cast c icebolt (once) then c scorch (once); compare how much each
 --                        dropped the enemy's health %; the bigger drop WINS. (Coarse % heuristic — fine.)
+--                        If NEITHER cleared cfg.probe_enough, also try c prism once, then pick among all
+--                        three — prism is rarely best, so we only pay for it when the other two flopped.
 --   2. NUKE:             keep casting the WINNER until the enemy is dead.
 --   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
 --                        RESISTED, nuke once more with the winner then retry soulsteal — repeat until it
@@ -23,9 +27,10 @@
 -- health bar (kxwt_fighting) updates several times a second and must NEVER trigger a cast — casting on
 -- every tick was the command-spam bug. Out-of-mana marks the spell and we WAIT (no retry, no spam).
 --
--- NOTE: the single opener is `c tarrants` (tarrant's spectral hand — its landed line is "An ethereal
--- hand appears and attacks <target> from behind!", confirmed against the help corpus + a live log). The
--- earlier earth-wall opener was removed by request.
+-- NOTE: the opener is `c bloodmist` when HP is above cfg.bloodmist_hp_min (a blood demon — landed line
+-- "You tap your life, and a blood red winged demon flaps quickly toward <target>!"; it costs hp, hence the
+-- gate), else `c tarrants` (tarrant's spectral hand — "An ethereal hand appears and attacks <target> from
+-- behind!"). Both are confirmed against the help corpus + live logs.
 --
 -- Wire strings below are VERBATIM from the player's raw logs (mud_raw_copy.log / mud_raw_nomelee.log),
 -- not invented. See Scripts/tests/autofight_spec.lua, which replays a real Gnomian-guard fight.
@@ -47,9 +52,16 @@ local cfg = {
   aoe_min         = 2,   -- >= this many engaged enemies (seen in the room, e.g. on a look) = a pack → AOE
   room_burst      = 2,   -- seconds: window to tally a room-listing burst's "X is here, fighting Y" lines
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
-  opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the one opener (see NOTE at top)
+  opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the DEFAULT opener (see NOTE at top)
+  bloodmist_cmd    = "c bloodmist",  -- summons a blood demon; used as the opener when HP is healthy — it
+                                     -- COSTS hp to cast, so we only lead with it above bloodmist_hp_min
+  bloodmist_hp_min = 0.5,            -- only open with bloodmist when HP is ABOVE this fraction of max
   icebolt_cmd      = "c icebolt",    -- the COLD probe/nuke (replaced shards). See PROBE_SPELLS below.
   scorch_cmd       = "c scorch",     -- the FIRE probe/nuke
+  prism_cmd        = "c prism",      -- the 3rd probe: only TRIED when icebolt/scorch both underwhelm
+  probe_enough     = 5,              -- % health a single icebolt/scorch hit must clear to SKIP the prism
+                                     -- probe (prism is rarely best, so don't bother trying it if one of the
+                                     -- other two already hits hard)
   soulsteal_cmd    = "c soulsteal",
   aoe_cmd          = "c frostflower",-- room AOE, used instead of the single-target probe/nuke on a pack
   -- DORMANT: shower was the 2nd probe before scorch. Kept (with its landed trigger + hit_shower() below)
@@ -76,6 +88,8 @@ F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
 F.icebolt_drop      = F.icebolt_drop or 0
 F.scorch_drop       = F.scorch_drop or 0
+F.prism_drop        = F.prism_drop or 0
+F.prism_tried       = F.prism_tried or false   -- did we already try the prism probe this fight?
 -- engage() state: initiating a fight from out of combat by casting the opener (`target x` alone doesn't
 -- aggro). `engaging` is true from the first opener cast until combat actually starts; `opener_primed`
 -- tells start_fight the tarrants opener was already thrown so it skips straight to the probe.
@@ -131,7 +145,7 @@ end
 -- THE two probe spells the routine compares (cold vs fire). Single source of truth: change these and
 -- the persisted winners file MIGRATES on next load (see load below) instead of being wiped. To swap a
 -- spell later (e.g. icebolt -> some newer cold spell), edit this + its _cmd + its landed trigger.
-local PROBE_SPELLS = { "icebolt", "scorch" }
+local PROBE_SPELLS = { "icebolt", "scorch", "prism" }
 local function is_probe_spell(s) for _, v in ipairs(PROBE_SPELLS) do if v == s then return true end end return false end
 local function probe_spellset_key() local t = {}; for _, v in ipairs(PROBE_SPELLS) do t[#t + 1] = v end; table.sort(t); return table.concat(t, ",") end
 
@@ -231,7 +245,15 @@ end
 -- it up to cfg.max_tries, then give up. Once combat starts, kxwt_fighting fires start_fight (primed by
 -- opener_primed to skip re-casting the opener) and the normal routine takes over. These run only while
 -- F.engaging and not yet F.fighting; the in-combat handlers below are untouched.
-local function send_opener() F.engage_busy = true; af_send(cfg.opener_tarrants) end
+-- The opener spell + its name. bloodmist (a blood demon that keeps attacking) hits harder than tarrants but
+-- COSTS hp to cast, so we only lead with it when HP is comfortably above bloodmist_hp_min; otherwise the
+-- free tarrants opener. Read fresh each time (HP can be low by the time we re-open on an engage retry).
+local function opener_cmd()
+  local hp, mhp = state.hp, state.maxhp
+  if hp and mhp and mhp > 0 and (hp / mhp) > cfg.bloodmist_hp_min then return cfg.bloodmist_cmd, "bloodmist" end
+  return cfg.opener_tarrants, "tarrants"
+end
+local function send_opener() F.engage_busy = true; af_send((opener_cmd())) end
 
 -- Opener fizzled/resisted before combat started: retry, or give up after max_tries.
 local engage_giveup   -- fwd
@@ -277,9 +299,10 @@ end
 -- aoe stays aoe — keep frostflowering the pack until combat ends or the target rolls over.)
 local function next_phase()
   local p = F.phase
-  if     p == "tarrants"  then F.phase = aoe_active() and "aoe" or (F.known_winner and "nuke" or "icebolt")
+  if     p == "opener"    then F.phase = aoe_active() and "aoe" or (F.known_winner and "nuke" or "icebolt")
   elseif p == "icebolt"   then F.phase = "scorch"
   elseif p == "scorch"    then F.phase = "decide"
+  elseif p == "prism"     then F.phase = "decide"      -- prism probe landed → back to the (final) decision
   elseif p == "aoe"       then F.phase = "aoe"
   elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
   end
@@ -292,11 +315,21 @@ end
 fire = function()
   if not F.on or not F.fighting or F.suspended or F.busy then return end
   if F.phase == "decide" then
-    -- Coarse winner pick: whichever probe dropped the enemy health % more. Ties → icebolt.
-    if F.icebolt_drop >= F.scorch_drop then F.winner, F.winner_spell = cfg.icebolt_cmd, "icebolt"
-    else F.winner, F.winner_spell = cfg.scorch_cmd, "scorch" end
-    remember_winner(F.name, F.winner_spell)   -- learn it so the next fight vs this name skips the probe
-    F.phase = "nuke"
+    -- Threshold gate: prism is rarely the best, so only bother probing it when NEITHER icebolt nor scorch
+    -- hit hard enough (best single drop < probe_enough). If one of them already cleared the bar, skip prism
+    -- and pick between the two.
+    if not F.prism_tried and math.max(F.icebolt_drop, F.scorch_drop) < cfg.probe_enough then
+      F.prism_tried, F.phase = true, "prism"
+    else
+      -- Coarse winner pick: the biggest health-% drop. Prefer icebolt, then scorch, then prism — so a tie
+      -- never goes to prism (it has to WIN outright to be chosen).
+      local id, sd, pd = F.icebolt_drop, F.scorch_drop, F.prism_drop or 0
+      if     id >= sd and id >= pd then F.winner, F.winner_spell = cfg.icebolt_cmd, "icebolt"
+      elseif sd >= pd              then F.winner, F.winner_spell = cfg.scorch_cmd, "scorch"
+      else                              F.winner, F.winner_spell = cfg.prism_cmd, "prism" end
+      remember_winner(F.name, F.winner_spell)   -- learn it so the next fight vs this name skips the probe
+      F.phase = "nuke"
+    end
   end
   -- Switch to soulsteal when nearly dead — UNLESS a dormant soulsteal is already latched (then we just
   -- keep nuking to weaken the target so the latch fires; re-casting soulsteal would be wasted).
@@ -304,9 +337,10 @@ fire = function()
     F.phase = "soulsteal"
   end
   local p = F.phase
-  if     p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
+  if     p == "opener"                 then local c, s = opener_cmd(); cast(c, s)
   elseif p == "icebolt"                then F.last_damage_spell = "icebolt"; cast(cfg.icebolt_cmd, "icebolt")
   elseif p == "scorch"                 then F.last_damage_spell = "scorch"; cast(cfg.scorch_cmd, "scorch")
+  elseif p == "prism"                  then F.last_damage_spell = "prism"; cast(cfg.prism_cmd, "prism")
   elseif p == "aoe"                    then F.last_damage_spell = "aoe"; cast(cfg.aoe_cmd, "frostflower")
   elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
   elseif p == "soulsteal"              then cast(cfg.soulsteal_cmd, "soulsteal")
@@ -376,10 +410,11 @@ local function start_fight(pct, name)
   -- single-target fight opens with tarrants.
   local post_opener = F.known_winner and "nuke" or "icebolt"
   if aoe_active() then F.phase = "aoe"
-  else F.phase = F.opener_primed and post_opener or "tarrants" end
+  else F.phase = F.opener_primed and post_opener or "opener" end
   F.engaging, F.engage_busy, F.opener_primed = false, false, false
   F.busy, F.busy_spell = false, nil
-  F.icebolt_drop, F.scorch_drop = 0, 0
+  F.icebolt_drop, F.scorch_drop, F.prism_drop = 0, 0, 0
+  F.prism_tried = false
   if not F.known_winner then F.winner, F.winner_spell = nil, nil end   -- keep the known winner if set above
   F.last_damage_spell = nil
   F.soul_latched = false
@@ -486,7 +521,8 @@ local function on_fight(pct, name)
   if prev and pct < prev then
     local d = prev - pct
     if     F.last_damage_spell == "icebolt" then F.icebolt_drop = F.icebolt_drop + d
-    elseif F.last_damage_spell == "scorch" then F.scorch_drop = F.scorch_drop + d end
+    elseif F.last_damage_spell == "scorch"  then F.scorch_drop  = F.scorch_drop + d
+    elseif F.last_damage_spell == "prism"   then F.prism_drop   = F.prism_drop + d end
   end
   -- A health-% change updates the winner comparison ONLY. It NEVER triggers a cast — casting is driven
   -- solely by a spell's landed line (or a failure). This is the fix for the command-spam bug: the health
@@ -515,16 +551,20 @@ end
 -- same hit_*, so triggers and tests share one implementation.
 local function hit_icebolt()    succeed("icebolt")   end   -- icebolt LANDED line (trigger verified live)
 local function hit_scorch()     succeed("scorch")    end   -- "You throw an intense burst of <color> flames at <target>!"
+local function hit_prism()      succeed("prism")     end   -- "You use a small crystal to focus your powers and throw a confusing wash of color and force at <target>!"
 local function hit_frostflower() succeed("frostflower") end -- "Spiked flowers of ice quickly form on everything in a ring around you!"
 -- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so busy_spell is never "shower" and this
 -- succeed() always hits its guard and no-ops. Wired only to keep the "A shower of … sparks" string live.
 local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs <target>."
-local function hit_tarrants()
-  -- Engage opener landed: combat is about to start (kxwt_fighting → start_fight); just clear the
-  -- init-busy flag and let start_fight take over. Otherwise it's the normal in-combat opener.
+-- Opener landed (tarrants OR bloodmist — either can be the opener now). Engage opener landed: combat is
+-- about to start (kxwt_fighting → start_fight); just clear the init-busy flag and let start_fight take over.
+-- Otherwise it's the normal in-combat opener → advance the phase off the spell we actually cast.
+local function opener_landed(spell)
   if F.engaging and not F.fighting then F.engage_busy = false; return end
-  succeed("tarrants")
+  succeed(spell)
 end
+local function hit_tarrants()  opener_landed("tarrants")  end
+local function hit_bloodmist() opener_landed("bloodmist") end
 local function hit_resist()
   -- Engage opener resisted before combat started: retry the opener.
   if F.engaging and not F.fighting then return engage_retry("resisted") end
@@ -699,6 +739,13 @@ if trigger then
   -- DORMANT shower trigger (see cfg.shower_cmd / hit_shower): fires but no-ops, kept only so the string stays live.
   trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
   trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
+  -- bloodmist opener landed. TWO forms depending on skill / bottled blood: a single "blood red winged
+  -- demon flaps quickly toward <target>!" or a "swarm of blood red demons fly quickly toward <target>!".
+  -- Match both (the "You tap your life, and … toward" shape is bloodmist-only — lifetap says "begin tapping
+  -- your life"). Missing the swarm form stalled the whole routine on the opener (never reached the probe).
+  trigger([[^You tap your life, and .* toward ]], function() hit_bloodmist() end)
+  -- prism probe landed: "You use a small crystal to focus your powers and throw a confusing wash of color and force at <target>!"
+  trigger([[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]], function() hit_prism() end)
   trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
   trigger([[^Target who\?]], function() engage_target_missing() end)
   trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
@@ -829,20 +876,20 @@ end
 
 doc(autofight.winners, { name = "autofight.winners", sig = "autofight.winners()", group = "combat",
   text = "List the learned best-spell-per-target memory: for each target name the script has probed, "
-      .. "which of icebolt/scorch won. Known names skip the probe on the next fight." })
+      .. "which of icebolt/scorch/prism won. Known names skip the probe on the next fight." })
 doc(autofight.forget, { name = "autofight.forget", sig = "autofight.forget([name])", group = "combat",
   text = "Forget a learned winner so it re-probes next time: pass a target name to drop just that one, "
       .. "or call with no argument to clear the whole memory. Persists the change." })
 
 -- winner(name[, spell]) — manually SET (override) the learned attack for a target NAME. Use it when the
 -- probe mislearned: it picked the element the enemy RESISTS, or — worse — one that HEALS it (a cold mob
--- healed by icebolt, a fire one by scorch). `spell` is 'icebolt' (cold) or 'scorch' (fire), the two the
--- routine nukes with. No spell → report the current winner; 'none'/'clear' → forget it (re-probe next
--- fight). Persists, skips the probe forever after for that name, and switches the CURRENT fight on the spot.
+-- healed by icebolt, a fire one by scorch). `spell` is one of PROBE_SPELLS ('icebolt' cold / 'scorch' fire
+-- / 'prism'), the spells the routine nukes with. No spell → report the current winner; 'none'/'clear' →
+-- forget it (re-probe next fight). Persists, skips the probe for that name, and switches the CURRENT fight.
 function autofight.winner(name, spell)
   local key = name and winner_key(name)
   if not key or key == "" then
-    say("usage: autofight.winner('<enemy name>', 'icebolt'|'scorch')  — force which spell to nuke it with")
+    say("usage: autofight.winner('<enemy name>', '" .. table.concat(PROBE_SPELLS, "'|'") .. "')  — force which spell to nuke it with")
     return
   end
   local s = (spell or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -964,6 +1011,7 @@ _AF_TEST = {
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
   icebolt       = hit_icebolt,     scorch       = hit_scorch,      tarrants  = hit_tarrants,
+  prism         = hit_prism,       bloodmist    = hit_bloodmist,   opener_cmd = opener_cmd,
   is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS,    save_winners = save_winners,
   frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
   mdeath        = note_mdeath,

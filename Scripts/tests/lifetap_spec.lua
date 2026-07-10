@@ -113,17 +113,30 @@ test("mana_low: with no regen data, mana below target is treated as low (only ta
   with({ mana = 20 }, function() expect(_AA_TEST.lifetap_mana_low()):truthy() end)  -- regen nil
 end)
 
-test("mana_low keys off ticks-to-target, not raw percent — close mana waits, far mana taps", function()
+test("mana_low keys off ticks-to-FULL, not raw percent — near-full waits, a real deficit taps", function()
   local low  = _AA_TEST.lifetap_mana_low
-  -- mana 20/100, target 90 → deficit 70. At 100/tick that's 0.7 ticks (close → wait); at 10/tick, 7 ticks (far → tap).
-  with({ mana = 20, pct = 0.90, regen = { mana = 100, hp = 5 } }, function() expect(low()):falsy() end)
-  with({ mana = 20, pct = 0.90, regen = { mana = 10,  hp = 5 } }, function() expect(low()):truthy() end)
+  -- deficit to FULL = 80. At 100/tick that's 0.8 ticks (near full → wait); at 10/tick, 8 ticks (far → tap).
+  with({ mana = 20, regen = { mana = 100, hp = 5 } }, function() expect(low()):falsy() end)
+  with({ mana = 20, regen = { mana = 10,  hp = 5 } }, function() expect(low()):truthy() end)
 end)
 
-test("no lifetap campaign when mana is close to target (natural regen will finish it)", function()
-  with({ mana = 20, pct = 0.90, regen = { mana = 100, hp = 5 } },  -- mana < target but only ~1 tick away
+test("the reported case: ~90 mana down at this character's regen IS low enough to tap", function()
+  -- mud_raw log: mana 315/405 (90 down), resting regen ~57/tick → ~1.58 ticks to full (> 1) → tap. The old
+  -- gate measured to the 90% target (~0.87 ticks) and never fired even though HP was full and mana ~90 down.
+  with({ mana = 315, maxmana = 405, regen = { mana = 57, hp = 46 } }, function()
+    expect(_AA_TEST.lifetap_mana_low()):truthy()
+    expect(mana_case()):truthy()
+  end)
+  -- and a nearly-full pool still waits (55 down at 57/tick ≈ 0.96 ticks < 1)
+  with({ mana = 350, maxmana = 405, regen = { mana = 57, hp = 46 } }, function()
+    expect(_AA_TEST.lifetap_mana_low()):falsy()
+  end)
+end)
+
+test("no lifetap campaign when mana is nearly full (natural regen will finish it)", function()
+  with({ mana = 20, regen = { mana = 100, hp = 5 } },  -- <1 tick from full → wait
     function() expect(mana_case()):falsy() end)
-  with({ mana = 20, pct = 0.90, regen = { mana = 10, hp = 5 } },   -- mana genuinely low → campaign on
+  with({ mana = 20, regen = { mana = 10, hp = 5 } },   -- many ticks from full → campaign on
     function() expect(mana_case()):truthy() end)
 end)
 

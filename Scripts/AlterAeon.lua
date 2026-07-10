@@ -279,9 +279,10 @@ end
 -- `lifetap <hp>` is a necromancer skill that trades HP for mana over time (disallowed in combat, cancelled
 -- if you fall asleep). During a mana-limited rest that HP is pure surplus — it regens back for free — so we
 -- dump it into mana to finish recovering faster. Rules the user set:
---   * only tap when MANA IS LOW — more than LIFETAP_MANA_TICKS ticks of natural regen from target. Mana
---     regens faster than HP (we read both rates from `show regen`), so if mana is close we just wait it out
---     for free rather than paying slow-to-regen HP for it; lifetap earns its keep only on a big mana deficit;
+--   * only tap when MANA IS LOW — more than LIFETAP_MANA_TICKS ticks of natural regen from FULL. Mana
+--     regens faster than HP (we read both rates from `show regen`), so if mana is nearly full we just wait
+--     it out rather than paying slow-to-regen HP for it; lifetap earns its keep on a real deficit (roughly
+--     a tick's worth or more — e.g. ~90 points down at this character's regen);
 --   * only START a tap with real surplus in hand — HP above LIFETAP_START of max — then bleed the whole
 --     chunk down to the floor. (Holding/re-picking rest is separate: once tapped down we keep resting and
 --     only re-tap after HP regens back above the start line, so we bleed in big chunks, not scraps.)
@@ -297,7 +298,7 @@ end
 local LIFETAP_FLOOR     = 0.55   -- fraction of max HP we refuse to bleed below (half + buffer)
 local LIFETAP_START     = 0.75   -- only START a fresh tap when HP is above this (bleed real surplus, not scraps)
 local LIFETAP_MIN       = 15     -- don't start a bleed for a surplus smaller than this (avoid churn)
-local LIFETAP_MANA_TICKS = 3     -- only tap when mana is MORE than this many ticks of natural regen from target
+local LIFETAP_MANA_TICKS = 1     -- only tap when mana is MORE than this many ticks of natural regen from FULL
 local LIFETAP_MIN_LEVEL = 21     -- necromancer level the lifetap skill unlocks at
 local LIFETAP_RETRY     = 5      -- seconds to back off after a transient "too weak" refusal before retrying
 local LIFETAP_COOLDOWN  = 15     -- seconds to settle after a bleed binds before opening another
@@ -317,14 +318,15 @@ end
 -- posture picker would read "HP low" and sleep — which binds the wound. Holding rest across that band keeps
 -- the picker and the tap cooperating (no rest/sleep flap). We never actually bleed into the band (the tap
 -- amount stops at the bleed floor); it's only reached by regen sitting us at the floor between taps.
--- Is mana LOW enough to be worth bleeding HP for? Only when natural regen would take more than
--- LIFETAP_MANA_TICKS ticks to reach target. Mana regens faster than HP, so when mana is close we let it
--- finish for free instead of spending slow-to-regen HP. No mana-regen rate known (rate 0 / no `show regen`)
--- → nil ticks → treat as low: natural regen won't fill it, so tapping is the only way up.
+-- Is mana LOW enough to be worth bleeding HP for? Measured against a FULL pool, not the recovery target:
+-- the value of a tap is a topped-up mana bar, so "close" means close to FULL. We tap only when natural
+-- regen would take more than LIFETAP_MANA_TICKS ticks to fill (a real deficit — ~a tick's worth or more),
+-- and let mana finish for free otherwise. Measuring to the 90% recovery target instead used to block this:
+-- with mana's fast regen, a 90-points-down pool sits <1 tick from the target and never tripped the gate.
+-- No mana-regen rate known (rate 0 / no `show regen`) → nil ticks → treat as low: regen won't fill it.
 local function lifetap_mana_low()
   local r = state.regen
-  local frac = (recovery and recovery.pct) or READY_PCT
-  local mt = ticks_to_target(state.mana, state.maxmana, r and r.mana, frac)
+  local mt = ticks_to_target(state.mana, state.maxmana, r and r.mana, 1.0)   -- ticks to reach FULL
   if mt == nil then return true end
   return mt > LIFETAP_MANA_TICKS
 end
@@ -650,11 +652,24 @@ local function most_hurt_spell_minion()
   return best, best_frac
 end
 
--- Count group members sharing a target keyword (so ordinals 1..K line up with the room's N.keyword).
+-- Does the game's target keyword `word` REACH this minion? Normally a minion answers to its last word
+-- (mage/spider/…), so the match is exact. BUT "skeleton" is a keyword shared by EVERY skeletal minion (a
+-- skeletal mage/spider IS a skeleton), so a bare "A skeleton" — whose only distinctive word is "skeleton"
+-- — can't be singled out: `skeleton` matches the whole skeletal family. We must therefore SWEEP across all
+-- of them to reach it. This is the bug where healing a bare skeleton kept hitting the full mage: the count
+-- below saw only ONE "skeleton" (K=1 → no ordinal), so every cast went to `skeleton` = the first skeletal
+-- creature the game found (the mage), never the hurt one. (The player's own logs use `2.skeleton`.)
+local function keyword_matches(word, name)
+  if word == "skeleton" then return (name or ""):lower():find("skelet", 1, true) ~= nil end
+  return minion_target_word(name) == word
+end
+
+-- Count group members the keyword REACHES (so ordinals 1..K line up with the room's N.keyword), skipping
+-- yourself. For a family keyword like "skeleton" this is every skeletal minion, not just bare skeletons.
 local function keyword_count(word)
   local n = 0
   for _, m in ipairs(state.group or {}) do
-    if minion_target_word(m.name) == word then n = n + 1 end
+    if not is_self_row(m) and keyword_matches(word, m.name) then n = n + 1 end
   end
   return n
 end
@@ -807,6 +822,7 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              recovery = recovery, end_recovery = end_recovery,
              maybe_complete_recovery = maybe_complete_recovery,
              minion_needs_spell_heal = minion_needs_spell_heal, minion_target_word = minion_target_word,
+             keyword_count = keyword_count, keyword_matches = keyword_matches,
              minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,
              minion_heal = minion_heal, try_cast_heal = try_cast_heal,
              minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal,
@@ -2133,6 +2149,9 @@ trigger([[^You start harvesting teeth from the corpses? of (.+?)\.?$]], function
 gag([[^You don't see anything named '\d+\.corpse']])
 trigger([[^You don't see anything named]], function() if corpse.active then corpse_done() end end)
 trigger([[^You don't see that here]], function() if corpse.active then corpse_done() end end)
+-- Harvest/sac aimed at an index that isn't there any more (e.g. a corpse a sac just removed) -> the
+-- room's corpses are done. Same "no such target" meaning as above, just the harvest/sac phrasing.
+trigger([[^You do not see anything like that here]], function() if corpse.active then corpse_done() end end)
 
 -- Harvest terminal lines (^-anchored so another player can't fire them). Success-complete OR the
 -- instant "full"/"no skill" rejection — either way the harvest step is finished, so advance.

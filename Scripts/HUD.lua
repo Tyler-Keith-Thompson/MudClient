@@ -496,6 +496,27 @@ local function lag_rows(width)
   return rows
 end
 
+-- The promise/lag widgets used to inherit the minimap's narrow width, leaving them jammed into the far
+-- right column. Instead, widen them so their LEFT edge lands just past the group's stamina (MV) numbers.
+-- We reproduce the group-row column math ([name:26][HP|MP|MV: flex 1 each][minimap: mw]): each vital is
+-- (W - 26 - mw)/3 wide and MV's "MV �<gauge> nnn/nnn" sits in its first ~STAM_W cells, so the widget should
+-- span from there to the right edge. Falls back gracefully (never NARROWER than the minimap) on skinny
+-- terminals or when the width is unknown.
+local GROUP_NAME_W = 26      -- group_member_row's name cell width
+local STAM_W       = 18      -- "MV " + 6-cell gauge + " nnn/nnn": where the stamina numbers end
+local function term_width()
+  if type(__term_cols) ~= "function" then return 80 end
+  local ok, n = pcall(__term_cols)
+  return (ok and type(n) == "number" and n > 0) and n or 80
+end
+local function widget_width(mw)
+  local W = term_width()
+  local vital_w = (W - GROUP_NAME_W - mw) / 3           -- one HP/MP/MV column
+  local left_edge = GROUP_NAME_W + 2 * vital_w + STAM_W -- just past the MV numbers
+  local w = math.floor(W - left_edge + 0.5)
+  return math.max(mw, math.min(w, W - 40))              -- never narrower than the minimap; leave room for ref text
+end
+
 local function update_top()
   local left = {}
   local g = state.group or {}
@@ -517,13 +538,26 @@ local function update_top()
   -- default when there's no map) so both stay aligned with the left content.
   local mini = minimap_cells()
   local mw = (mini and mini[1] and mini[1].width) or 26
+  -- The minimap keeps its own (narrow) width; the promise/lag widgets get a WIDER one so they line up just
+  -- after the group's stamina column instead of being crammed under the minimap.
+  local ww = widget_width(mw)
   local right = {}
   if mini then for _, m in ipairs(mini) do right[#right + 1] = m end end
-  local prows = promise_rows(mw)
-  if #prows > 0 and #right > 0 then right[#right + 1] = { text = "", width = mw } end   -- gap under the map
+  local prows = promise_rows(ww)
+  local lrows = lag_rows(ww)
+  -- Every GROUP-MEMBER row carries the HP/MP/MV bars, and their flex widths depend on the right cell's
+  -- width — so those rows MUST get a minimap-width (mw) cell or the bars compress and misalign (the "last
+  -- spider offset" bug). The group is often TALLER than the minimap, so when we're about to stack the WIDER
+  -- promise/lag widgets, first pad the right column with blank mw cells to cover every group row; the
+  -- widgets then land on the reference rows below, where the wider width is fine. (No widgets → no padding,
+  -- so a widget-less panel stays plain and the group rows fall back to the mw `blank` below.)
+  if #prows > 0 or #lrows > 0 then
+    local group_rows = (#g >= 2) and (1 + #g) or 0   -- header + one row per member
+    while #right < group_rows do right[#right + 1] = { text = "", width = mw } end
+  end
+  if #prows > 0 and #right > 0 then right[#right + 1] = { text = "", width = ww } end   -- gap under the map
   for _, r in ipairs(prows) do right[#right + 1] = r end
-  local lrows = lag_rows(mw)
-  if #lrows > 0 and #right > 0 then right[#right + 1] = { text = "", width = mw } end   -- gap above the lag widget
+  if #lrows > 0 and #right > 0 then right[#right + 1] = { text = "", width = ww } end   -- gap above the lag widget
   for _, r in ipairs(lrows) do right[#right + 1] = r end
   if #right == 0 then panel.top(left); return end
   local blank = { text = "", width = mw }

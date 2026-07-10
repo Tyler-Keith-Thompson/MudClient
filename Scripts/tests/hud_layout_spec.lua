@@ -232,3 +232,30 @@ test("top panel shows the group roster header only once you have 2+ members", fu
   local top = paint(st)
   expect(top[1].text):contains("group (2)")   -- roster header for the 2-member party
 end)
+
+test("group taller than the minimap: the wider lag/promise widgets never compress a member's bars", function()
+  -- Regression for the "last skeletal spider offset" bug: with the layout's minimap nil'd, a group taller
+  -- than the (zero) minimap rows would pair its lower members with the WIDER lag widget cells, shrinking
+  -- their flex vitals. Every group-member row's right cell must stay the minimap width so the bars align.
+  local saved_lag, saved_cols = lag_status, __term_cols
+  _G.lag_status = function() return { ui_ms = 0, ui_age_ms = -1, net_ms = 50, net_age_ms = 100 } end
+  _G.__term_cols = function() return 200 end   -- wide → the widget width (58) exceeds the minimap width (26)
+  local st = {}
+  for k, v in pairs(BASE) do st[k] = v end
+  st.fighting = false
+  st.group = {
+    { flags = "XL", name = "You",   hp = 50, maxhp = 50, mana = 30, maxmana = 30, stam = 40, maxstam = 40 },
+    { flags = "M",  name = "a wolf", hp = 20, maxhp = 20, mana = 0, maxmana = 0, stam = 5, maxstam = 5 },
+    { flags = "M",  name = "a bat",  hp = 10, maxhp = 10, mana = 0, maxmana = 0, stam = 5, maxstam = 5 },
+    { flags = "M",  name = "a rat",  hp = 10, maxhp = 10, mana = 0, maxmana = 0, stam = 5, maxstam = 5 },
+  }
+  local top = paint(st)
+  _G.lag_status, _G.__term_cols = saved_lag, saved_cols
+  -- Rows 1..5 are the header + 4 members; each member row's LAST column is its right cell and must be the
+  -- minimap width (26 with the minimap nil'd), NOT the wider widget width, so the HP/MP/MV bars line up.
+  for i = 2, 5 do
+    local cols = top[i] and top[i].cols
+    expect(cols ~= nil):truthy()
+    expect(cols[#cols].width):eq(26)
+  end
+end)

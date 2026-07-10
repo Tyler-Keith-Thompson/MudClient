@@ -60,6 +60,67 @@ test("full fight: tarrants → icebolt/scorch probe → nuke winner → soulstea
   expect(F.phase):eq("idle")
 end)
 
+-- ---- prism: the conditional third probe (only when icebolt/scorch underwhelm) --------------------
+
+test("prism is SKIPPED when icebolt or scorch already clears the threshold", function()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → icebolt
+  AF.on_fight(70, ENEMY); AF.icebolt()                -- icebolt Δ20 (>= probe_enough) → scorch
+  AF.on_fight(68, ENEMY); AF.scorch()                 -- scorch Δ2 → decide: 20 clears the bar → nuke, no prism
+  local F = AF.state()
+  expect(F.winner_spell):eq("icebolt")
+  for _, c in ipairs(seq()) do expect(c:find("prism", 1, true) == nil):eq(true) end   -- never probed prism
+end)
+
+test("prism IS probed when both icebolt and scorch underwhelm, and can win", function()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → icebolt
+  AF.on_fight(87, ENEMY); AF.icebolt()                -- icebolt Δ3 (< 5) → scorch
+  AF.on_fight(85, ENEMY); AF.scorch()                 -- scorch Δ2 (< 5) → decide: both weak → probe prism
+  expect(seq()[#seq()]):eq("c prism")                 -- the prism probe went out
+  AF.on_fight(63, ENEMY); AF.prism()                  -- prism Δ22 → decide: prism wins → nuke
+  local F = AF.state()
+  expect(F.winner_spell):eq("prism")
+  expect(seq()[#seq()]):eq("c prism")                 -- nuking with the prism winner
+end)
+
+test("prism loses ties: a weak-but-tied icebolt still beats prism after the probe", function()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()
+  AF.on_fight(86, ENEMY); AF.icebolt()                -- icebolt Δ4
+  AF.on_fight(85, ENEMY); AF.scorch()                 -- scorch Δ1 → probe prism (max 4 < 5)
+  AF.on_fight(81, ENEMY); AF.prism()                  -- prism Δ4 — ties icebolt → icebolt keeps it
+  expect(AF.state().winner_spell):eq("icebolt")
+end)
+
+test("a known prism winner skips the probe and nukes prism straight away", function()
+  AF.reset()
+  AF.remember("a Gnomian guard", "prism")             -- learned from a prior fight (prism is a valid winner now)
+  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → nuke
+  expect(seq()[#seq()]):eq("c prism")
+  expect(AF.state().winner_spell):eq("prism")
+end)
+
+-- ---- bloodmist opener (only when HP can spare it) ------------------------------------------------
+
+test("opener_cmd picks bloodmist above 50% HP, tarrants at/below (or unknown)", function()
+  local sh, smh = state.hp, state.maxhp
+  state.hp, state.maxhp = 60, 100; expect(select(2, AF.opener_cmd())):eq("bloodmist")
+  state.hp, state.maxhp = 51, 100; expect(select(2, AF.opener_cmd())):eq("bloodmist")
+  state.hp, state.maxhp = 50, 100; expect(select(2, AF.opener_cmd())):eq("tarrants")   -- exactly 50% is NOT above
+  state.hp, state.maxhp = 20, 100; expect(select(2, AF.opener_cmd())):eq("tarrants")
+  state.hp, state.maxhp = nil, nil; expect(select(2, AF.opener_cmd())):eq("tarrants")  -- unknown → safe default
+  state.hp, state.maxhp = sh, smh
+end)
+
+test("the fight opens with bloodmist when HP is healthy, then hands off to the probe", function()
+  local sh, smh = state.hp, state.maxhp
+  state.hp, state.maxhp = 80, 100
+  AF.reset(); AF.on_fight(90, ENEMY)                  -- opener chosen by HP → bloodmist
+  expect(seq()[#seq()]):eq("c bloodmist")
+  AF.bloodmist()                                      -- opener LANDED → icebolt probe
+  expect(seq()[#seq()]):eq("c icebolt")
+  expect(AF.state().phase):eq("icebolt")
+  state.hp, state.maxhp = sh, smh
+end)
+
 -- ---- (b) THE SPAM GUARD: a flood of health-% updates while busy sends nothing --------------------
 test("spam guard: a burst of health-% updates in flight sends ZERO commands", function()
   to_icebolt()                        -- "c icebolt" in flight (busy)

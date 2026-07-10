@@ -154,6 +154,39 @@ test("after sacrificing corpse 1, a leftover LOOT corpse doesn't cause a phantom
   end)
 end)
 
+test("end-to-end: a barren empty corpse harvests ONCE each and never re-harvests after the sac", function()
+  -- The reported bug (old synchronous sac): teeth barren → learn no-teeth, spellcomps barren → bsac →
+  -- bsac fails ("only blood sacrifice corpses with blood in them") → sac. The old code re-processed the
+  -- index right after sending `sac`, and since no-teeth was just learned it fired a SECOND
+  -- `harvest spellcomps 1.corpse` at the corpse the sac had already removed. Stream-driven sac waits for
+  -- the god's reply, drops `remaining` to 0, and ends — no phantom re-harvest.
+  local hm = _AA_TEST.corpse_harvest()
+  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
+  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
+  local saved_send, sent = send, {}
+  send = function(c) sent[#sent + 1] = c end
+  local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
+  corpse.on, corpse.active, corpse.idx, corpse.remaining = true, true, 1, 1
+  corpse.kills = { ["wall of slime"] = true }; corpse.with_items = {}; corpse.cur_name = nil; corpse.step = nil
+
+  corpse_process()                                                     -- harvest teeth 1.corpse
+  _AA_TEST.learn_no_teeth(_AA_TEST.batch_kind()); corpse_harvest_done() -- barren teeth → harvest spellcomps 1.corpse
+  _AA_TEST.learn_no_spellcomps(_AA_TEST.batch_kind()); corpse_harvest_done() -- barren spellcomps → corpse_finish → bsac
+  corpse_sac()                                                          -- bsac-fail path → sac 1.corpse, then WAIT
+  corpse_sac_done("ok")                                                -- "Draak appreciates…" → remaining 0 → done
+
+  local active = corpse.active
+  send = saved_send
+  for k in pairs(corpse) do corpse[k] = nil end
+  for k, v in pairs(snap) do corpse[k] = v end
+  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
+  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
+
+  expect(table.concat(sent, " | ")):eq(
+    "harvest teeth 1.corpse | harvest spellcomps 1.corpse | bsac 1.corpse | sac 1.corpse")
+  expect(active):eq(false)
+end)
+
 -- ---- learned per-kind harvest memory (skip barren teeth/spellcomps) ------------------------------
 
 -- Reset the learned tables + kill tally so each case is hermetic (module-load may have read a real file).
