@@ -111,6 +111,28 @@ test("exp_spans renders a tie as a slashed class list, single class keeps its ne
   state = saved
 end)
 
+test("next_level carries the cheapest class's micro fraction (partial level-up)", function()
+  local nl = _HUD_TEST.next_level
+  local r = nl(0, { Thief = { level = 0, cost = 500, micro = { done = 0, total = 2 } },
+                    Mage  = { level = 17, cost = 9000 } })
+  expect(r.name):eq("Thief")
+  expect(r.micro.done):eq(0); expect(r.micro.total):eq(2)
+  expect(nl(0, { Mage = { level = 17, cost = 100 } }).micro):eq(nil)   -- full level-up → no micro
+end)
+
+test("exp_spans flags a partial (micro) level-up instead of showing a full next level", function()
+  local saved = state
+  -- Partial single class: show the micro fraction, NOT "Thief 1 in 400".
+  state = { exp = 100, classes = { Thief = { level = 0, cost = 500, micro = { done = 0, total = 2 } } } }
+  expect(exp_text()):contains("Thief micro 0/2 in 400")
+  -- Affordable partial → "micro <class> now", not "level <class> now".
+  state = { exp = 600, classes = { Thief = { level = 0, cost = 500, micro = { done = 1, total = 2 } } } }
+  local now = exp_text()
+  expect(now):contains("micro Thief now")
+  expect(now:find("level Thief now", 1, true) == nil):truthy()
+  state = saved
+end)
+
 -- ---- inferred multi-opponent bars ------------------------------------------------------------------
 
 local function bar_text(row)

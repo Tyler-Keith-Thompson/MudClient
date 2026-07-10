@@ -92,6 +92,12 @@ final class TerminalService {
     /// ended on a newline. Kept separate so the live tail (and the output cursor's column) reproduce
     /// exactly when we snap back to live.
     private var pendingLine = ""
+    /// The SGR (colour/attribute) state the GAME stream currently has active — a colour it set and never
+    /// reset. A script echo carries its own colour plus a trailing `ESC[0m`; injected into the live stream
+    /// that reset clobbers this state, so the game's following output (and the rest of a multi-line
+    /// coloured message) renders in the default colour. We re-assert this after every echo to restore it.
+    /// Advanced only by real output flowing through `print`; touched only on the output path, so no lock.
+    private var liveSGR = ""
     /// Cap on retained history lines; the oldest are dropped past this.
     private let scrollbackLimit = 5000
     /// Serializes the scrollback buffer + its wrap cache. Server output (`recordOutput`, on the pump
@@ -413,9 +419,17 @@ final class TerminalService {
         return (from...through).reduce("") { $0 + "\u{1B}[\($1);1H\u{1B}[2K" }
     }
 
-    func print(_ string: Any, terminator: String = "\n") {
+    func print(_ string: Any, terminator: String = "\n", isEcho: Bool = false) {
         guard let l = layout() else { return }
-        let payload = String(describing: string) + terminator
+        var body = String(describing: string)
+        // A script echo ends in its own `ESC[0m`; re-assert the game's active colour after it so the
+        // carried colour survives — both live (what the next DECSC save records) and in the stored
+        // scrollback (what the next line's SGR carry inherits). No-op when the game is at default.
+        if isEcho { body = Self.echoBodyRestoringSGR(body, carried: liveSGR) }
+        let payload = body + terminator
+        // Track the colour the game stream expects active going forward. Game output advances it; an echo
+        // body ends with liveSGR re-asserted, so this leaves it unchanged for echoes.
+        liveSGR = Self.activeSGRState(liveSGR + body)
         // Hide the cursor for the whole repaint so its round-trip — up to the output region to write,
         // then back down to the input line — happens invisibly (that jump was the flicker).
         writeToStandardOut(data: Data("\u{1B}[?25l".utf8))
@@ -762,6 +776,15 @@ final class TerminalService {
             }
         }
         return active.joined()
+    }
+
+    /// Make a script echo's `body` self-contained against the game's carried colour (`carried` = the SGR
+    /// the game set and never reset). The echo ends in its own reset, which would clear the carry and leave
+    /// the following game output — and the rest of a multi-line coloured message — in the default colour;
+    /// re-asserting `carried` after it keeps the colour alive. No-op when the game is at default. Pure so
+    /// the invariant `activeSGRState(carried + result) == carried` is unit-tested directly.
+    static func echoBodyRestoringSGR(_ body: String, carried: String) -> String {
+        carried.isEmpty ? body : body + carried
     }
 
     /// Wrap a sequence of logical lines into physical rows, each made SELF-CONTAINED by prefixing the

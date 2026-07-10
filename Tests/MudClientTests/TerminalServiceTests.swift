@@ -24,6 +24,20 @@ import Testing
     #expect(TerminalService.activeSGRState("just text") == "")
 }
 
+@Test func echoRestoresTheGameColourSoFollowingOutputSurvives() {
+    // The reported bug: the game set a colour and never reset it (multi-line coloured chat); a dim script
+    // annotation echoed in between ends in its own reset, which strips the colour off everything after it.
+    let game = "\u{1B}[36m"                               // game set cyan, no reset
+    let echo = "\u{1B}[90m  \u{21b3} brb = be right back\u{1B}[0m"   // dim annotation, ends in a reset
+    // Un-restored, the carry after the echo is cleared → following game output renders default.
+    #expect(TerminalService.activeSGRState(game + echo) == "")
+    // Restoring re-asserts the game's SGR after the echo, so the carry is preserved for the next line.
+    let restored = TerminalService.echoBodyRestoringSGR(echo, carried: game)
+    #expect(TerminalService.activeSGRState(game + restored) == game)
+    // When the game is at default there's nothing to restore — the echo is left untouched.
+    #expect(TerminalService.echoBodyRestoringSGR(echo, carried: "") == echo)
+}
+
 @Test func scrolledBackMultiLineBlockCarriesColourPastTheFirstLine() {
     // The reported case: colour set on line one, reset only after line two (a coloured echo/server
     // block split into two stored logical lines). Both must render coloured in the scrolled-back view.

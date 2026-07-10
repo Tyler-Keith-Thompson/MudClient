@@ -43,6 +43,10 @@ local function pct(cur, max) if not cur or not max or max == 0 then return 0 end
 -- "Ready" = recovered enough to keep exploring: every vital at least 90%. Drives the `recover` alias's
 -- auto-stand and the AI's " (ready)" readiness label, so both share one definition.
 local READY_PCT = 0.90
+-- When a buff drops while we're asleep recovering, we wake to rest so it can be recast; hold awake this
+-- many seconds waiting for the corresponding spellup before we're allowed to sleep again (else we sleep
+-- through the recast and bounce). Cleared early when the spellup actually lands.
+local SPELLUP_WAIT = 12
 -- ready([p]) — every vital at least p (fraction, default READY_PCT). recover([pct]) recovers to a
 -- caller-chosen threshold, so this takes an argument; the no-arg callers (AI readiness label, the typed
 -- `recover` alias) keep the 90% default.
@@ -142,6 +146,12 @@ local function choose_recovery_position()
   -- hold the posture at `rest` (cast_pending caps sleep at rest so you can cast).
   local cast_pending = (not (recovery and recovery.stat))
     and minions_pending_spell_heal and minions_pending_spell_heal()
+  -- A buff dropped while we were asleep (the spelldown trigger woke us): hold at rest until the spellup
+  -- lands or we time out, so we don't sleep straight through the recast and bounce awake again.
+  if recovery and recovery.await_spell and os.time() >= (recovery.await_until or 0) then
+    recovery.await_spell, recovery.await_until = nil, nil    -- timed out waiting — give up and recover normally
+  end
+  local awaiting_spellup = recovery and recovery.await_spell ~= nil
   if player_done then
     -- You're fully recovered; you're only still "recovering" because the minions aren't all topped off.
     -- There's no point staying asleep (or even resting) when you're full: cast on any minion that still
@@ -173,7 +183,7 @@ local function choose_recovery_position()
   local cast_now  = self_want and (pick_self_cast() ~= nil)
   if cast_now then want = "rest"
   elseif self_want and not state.sharp then want = "sleep" end
-  if want == "sleep" and cast_pending then want = "rest" end   -- minions need casting → must be awake
+  if want == "sleep" and (cast_pending or awaiting_spellup) then want = "rest" end   -- casting/awaiting a recast → stay awake
   -- Lifetap and sleep are mutually exclusive — falling asleep BINDS the wound and cancels the bleed — and
   -- when surplus HP can feed lagging mana, the tap is the faster path (we optimize for total recovery time,
   -- so trading HP down to the safety floor for mana is fine). So while a bleed is worth doing or already in
@@ -185,6 +195,8 @@ local function choose_recovery_position()
   -- line per decision, matching what we're about to do.
   if tap_rest then
     narrate("posture", "rest-lifetap", "resting to bleed surplus hp into mana")
+  elseif awaiting_spellup then
+    narrate("posture", "rest-spellup", "staying up until " .. recovery.await_spell .. " is recast (or it times out)")
   elseif cast_now then
     narrate("posture", "rest-cast", "resting so I can cast to top off your " .. pick_self_cast().label)
   elseif self_want and not state.sharp then
@@ -223,6 +235,7 @@ local function end_recovery(completed, reason)
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
   recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
+  recovery.await_spell, recovery.await_until = nil, nil   -- drop any "waiting for a recast" hold
   if s then if completed then s.resolve() else s.reject(reason or "recovery interrupted") end end
 end
 
@@ -889,7 +902,8 @@ local function save_classes()
   if not f then return end
   local parts = {}
   for name, c in pairs(state.classes) do
-    parts[#parts + 1] = string.format("[%q]={level=%d,cost=%d}", name, c.level or 0, c.cost or 0)
+    local micro = c.micro and string.format(",micro={done=%d,total=%d}", c.micro.done or 0, c.micro.total or 0) or ""
+    parts[#parts + 1] = string.format("[%q]={level=%d,cost=%d%s}", name, c.level or 0, c.cost or 0, micro)
   end
   f:write("return {" .. table.concat(parts, ",") .. "}")
   f:close()
@@ -909,12 +923,15 @@ if not next(state.classes) then
 end
 
 trigger([[^Class +Level +.*Exp Cost]], function() state.classes = {} end)
--- Row: "<Class>  <level>  [micro]  <exp cost>  ( <pct>%)". The percent is space-padded for alignment
--- (e.g. "( 92%)"), so allow spaces after the "(" — matching only "(100%)" dropped every class you can't
--- yet level, which was the whole point of the widget.
-trigger([[^(Mage|Cleric|Thief|Warrior|Necromancer|Druid) +(\d+) +.*?(\d+) +\( *\d+%\)]],
-  function(_, cls, lvl, cost)
-    state.classes[cls] = { level = tonumber(lvl), cost = tonumber(cost) }
+-- Row: "<Class>  <level>  [<done>/<total>]  <exp cost>  ( <pct>%)". The optional MICRO column ("0/  2")
+-- appears once you're high enough that a level-up is partial — the next "level" is one of `total` micro
+-- steps. We capture it when present (groups 3/4, nil otherwise) so the widget can flag a partial level-up;
+-- the cheapest-class pick is unchanged (still by exp cost). The percent is space-padded ("( 92%)"), so
+-- allow spaces after the "(".
+trigger([[^(Mage|Cleric|Thief|Warrior|Necromancer|Druid) +(\d+)(?: +(\d+)/ *(\d+))? +(\d+) +\( *\d+%\)]],
+  function(_, cls, lvl, mdone, mtotal, cost)
+    local micro = (mdone and mtotal) and { done = tonumber(mdone), total = tonumber(mtotal) } or nil
+    state.classes[cls] = { level = tonumber(lvl), cost = tonumber(cost), micro = micro }
     schedule_classes_save()
   end)
 
@@ -1018,11 +1035,18 @@ local WALK = { ["0"]="north", ["1"]="east", ["2"]="south", ["3"]="west", ["4"]="
 trigger([[^kxwt_walkdir (\d+)]], function(_, d) state.walkdir = WALK[d] end)
 
 -- Spells up/down. Losing a spell while sleeping with mana to spare drops to resting.
-trigger([[^kxwt_spellup (.+)$]], function(_, s) state.spells[s] = true end)
+trigger([[^kxwt_spellup (.+)$]], function(_, s)
+  state.spells[s] = true
+  -- The recast we woke for landed — stop holding awake so recovery can sleep again.
+  if recovery and recovery.await_spell == s then recovery.await_spell, recovery.await_until = nil, nil end
+end)
 trigger([[^kxwt_spelldown (.+)$]], function(_, s)
   state.spells[s] = nil
   if state.recover and state.position == "sleeping" and pct(state.mana, state.maxmana) > 0.3 then
     send("rest"); state.position = "sitting"
+    -- Hold awake for the recast: remember which buff dropped and until when. choose_recovery_position
+    -- won't re-sleep while this is set, so we don't sleep through the spellup and bounce.
+    if recovery then recovery.await_spell, recovery.await_until = s, os.time() + SPELLUP_WAIT end
   end
 end)
 
@@ -1911,7 +1935,7 @@ end
 
 local corpse = { on = true, active = false, idx = 1, step = nil, room = nil,
                  killed = false, settle = nil, promise = nil, watchdog = nil,
-                 kills = {}, with_items = {}, cur_name = nil }
+                 kills = {}, kill_count = 0, with_items = {}, cur_name = nil }
 if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the empty/has-loot decision is unit-tested
 
 -- The distinct mob KIND(s) killed since the last pass reset — the identity for the harvest memory above.
@@ -1921,7 +1945,8 @@ if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the empty/has-loot
 local function note_kill(name)
   if not name or (is_ally and is_ally(name)) then return end   -- our own minions also emit mdeath
   local k = corpse_kind_key(name); if not k then return end
-  corpse.kills[k] = true
+  corpse.kills[k] = true                                        -- kinds (dedup) for the harvest memory
+  corpse.kill_count = (corpse.kill_count or 0) + 1              -- COUNT of corpses we made this batch
 end
 local function batch_kind()
   local only, n = nil, 0
@@ -1959,7 +1984,7 @@ end
 -- the promise widget, whether the pass finished naturally or was stopped (off / room change).
 function corpse_done()
   corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
-  corpse.promise = nil; corpse.kills = {}   -- fresh kind tally for the next batch
+  corpse.promise = nil; corpse.kills = {}; corpse.kill_count = 0   -- fresh kind tally + kill count for the next batch
   if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   local s = corpse.settle; corpse.settle = nil
   if s then s.resolve() end
@@ -1988,7 +2013,14 @@ end
 -- Loot + harvest the corpse at corpse.idx. Loot triggers set `dirty`; harvest terminals advance us.
 function corpse_process()
   if not corpse.active then return end
-  if corpse.idx > CORPSE_MAX then corpse_done(); return end
+  -- Don't walk past what we actually killed: we know how many corpses we made this batch (kill_count), so
+  -- once we've stepped past the last one, stop — rather than probing a `<n>.corpse` that was never there
+  -- (the "harvesting 2.corpse when there's no 2.corpse" the user saw). The gagged 'no such corpse' miss
+  -- line is still a backstop for the rarer case where a sac shifts indices under us. Falls back to
+  -- CORPSE_MAX when the count is unknown (0). (Aside: caps to OUR kills, so a stranger's corpse sharing the
+  -- room won't extend the walk.)
+  local cap = (corpse.kill_count and corpse.kill_count > 0) and math.min(corpse.kill_count, CORPSE_MAX) or CORPSE_MAX
+  if corpse.idx > cap then corpse_done(); return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
   corpse.step, corpse.cur_name = "teeth", nil   -- cur_name is re-learned from this corpse's harvest reply
   -- Learned skip: if we've killed a single, unambiguous kind and know it has no teeth, don't waste the
@@ -2029,7 +2061,15 @@ end
 function corpse_finish()
   if not corpse.active then return end
   local name = corpse.cur_name
-  if name and not corpse.with_items[name] then
+  -- Sacrifice ONLY when we're sure no loot is at risk. Two safe ways to know a corpse is empty:
+  --   * we learned its NAME (from a harvest reply) and it never printed "…contains:" at the kill; OR
+  --   * we never learned a name — a FULLY barren corpse (no teeth AND no spellcomps) names itself in
+  --     neither reply — but NO corpse in this batch printed "…contains:", so there is no loot anywhere to
+  --     destroy. (Without this the common "kill one mob, nothing to harvest, no loot" corpse was left
+  --     un-sacrificed forever.)
+  -- Otherwise (name unknown while SOME corpse held loot) leave it intact — never risk items.
+  local empty = (name and not corpse.with_items[name]) or (not name and next(corpse.with_items) == nil)
+  if empty then
     corpse.step = "bsac"
     send("bsac " .. corpse.idx .. ".corpse")   -- empty → blood-sacrifice, then sac on the bsac result line
   else

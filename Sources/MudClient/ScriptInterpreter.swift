@@ -19,7 +19,9 @@ final class ScriptInterpreter {
 
     init() {
         engine.onSend = { message in try? Container.inputService().send(verbatim: message) }
-        engine.onEcho = { message in Container.terminalService().print(message) }
+        // isEcho: re-assert the game's active colour after the echo so a script line's own `ESC[0m`
+        // doesn't strip the colour off the game output that follows it (e.g. multi-line coloured chat).
+        engine.onEcho = { message in Container.terminalService().print(message, isEcho: true) }
         // Install the text-to-speech + live/history builtins (speak/speech_stop/speech_voices/is_live).
         // Kept out of LuaScriptEngine/bootstrap; see SpeechBuiltins.swift.
         engine.installSpeech()

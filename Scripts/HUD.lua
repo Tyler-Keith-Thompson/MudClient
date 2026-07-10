@@ -317,13 +317,13 @@ local function next_level(exp, classes)
     if c.cost and (not min_cost or c.cost < min_cost) then min_cost = c.cost end
   end
   if not min_cost then return nil end
-  local names, level_of = {}, {}
+  local names, level_of, micro_of = {}, {}, {}
   for name, c in pairs(classes or {}) do
-    if c.cost == min_cost then names[#names + 1] = name; level_of[name] = c.level end
+    if c.cost == min_cost then names[#names + 1] = name; level_of[name] = c.level; micro_of[name] = c.micro end
   end
   table.sort(names)
   return { names = names, name = names[1], level = level_of[names[1]],
-           cost = min_cost, need = min_cost - (exp or 0) }
+           micro = micro_of[names[1]], cost = min_cost, need = min_cost - (exp or 0) }
 end
 
 local function exp_spans()
@@ -336,8 +336,14 @@ local function exp_spans()
   local nl = next_level(state.exp, state.classes)
   if nl then
     local label = table.concat(nl.names, "/")
+    -- A partial (micro) level-up: the game splits this class's next level into `total` steps. Flag it so
+    -- "▲ thief 1" doesn't read as a full level-up when it's really the next micro step ("micro 0/2").
+    local micro = (#nl.names == 1) and nl.micro or nil
     if nl.need <= 0 then
-      b[#b + 1] = { text = "  ▲ level " .. label .. " now", fg = "brightgreen", bold = true }
+      local verb = micro and "micro " or "level "
+      b[#b + 1] = { text = "  ▲ " .. verb .. label .. " now", fg = "brightgreen", bold = true }
+    elseif micro then
+      b[#b + 1] = { text = string.format("  ▲ %s micro %d/%d in %d", label, micro.done, micro.total, nl.need), fg = "magenta" }
     elseif #nl.names == 1 and nl.level then
       b[#b + 1] = { text = string.format("  ▲ %s %d in %d", label, nl.level + 1, nl.need), fg = "magenta" }
     else

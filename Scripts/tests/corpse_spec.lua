@@ -39,10 +39,20 @@ test("an EMPTY corpse (no auto-printed contents) is blood-sacrificed", function(
   end)
 end)
 
-test("a corpse whose name we never learned is left intact (never risk destroying loot)", function()
+test("a fully barren corpse (no name learned) IS sacrificed when the batch printed no loot", function()
+  -- The reported case: "a wall of sludge" with no teeth and no spellcomps never names itself, but nothing
+  -- in the room printed "…contains:", so it's safe (and correct) to bsac it rather than leave it forever.
   with_corpse({ on = true, active = true, idx = 1, cur_name = nil, with_items = {} }, function(sent)
     corpse_finish()
-    for _, c in ipairs(sent) do expect(c:find("^bsac") == nil):eq(true) end
+    expect(sent[1]):eq("bsac 1.corpse")
+  end)
+end)
+
+test("an un-named corpse is left intact when SOME corpse in the batch DID hold loot (can't tell which)", function()
+  with_corpse({ on = true, active = true, idx = 1, cur_name = nil,
+                with_items = { ["a jaguar"] = true } }, function(sent)
+    corpse_finish()
+    for _, c in ipairs(sent) do expect(c:find("^bsac") == nil):eq(true) end   -- never risk the loot corpse
     expect(corpse.idx):eq(2)
   end)
 end)
@@ -64,6 +74,43 @@ test("a SUCCESSFUL spellcomps harvest (a yield line, no 'done' line) advances to
     corpse_harvest_done()
     expect(sent[1]):eq("bsac 1.corpse")
     expect(corpse.step):eq("bsac")
+  end)
+end)
+
+-- ---- the walk is bounded by how many we actually killed (no phantom 2.corpse probe) --------------
+
+test("note_kill counts every corpse we made (not just distinct kinds)", function()
+  local snap = corpse.kills; corpse.kills = {}; corpse.kill_count = 0
+  _AA_TEST.note_kill("a jaguar")
+  _AA_TEST.note_kill("a jaguar")     -- same KIND, but a second corpse
+  _AA_TEST.note_kill("a kobold")
+  expect(corpse.kill_count):eq(3)
+  corpse.kills = snap; corpse.kill_count = 0
+end)
+
+test("the walk STOPS once we've stepped past our kill count — no probe of a corpse we never made", function()
+  -- One kill, its single corpse was left intact (loot/unknown name) so idx advanced to 2. With only one
+  -- kill there is no 2.corpse, so the pass must end WITHOUT sending `harvest ... 2.corpse`.
+  with_corpse({ on = true, active = true, idx = 2, kill_count = 1, killed = true, settle = nil }, function(sent)
+    corpse_process()
+    for _, c in ipairs(sent) do expect(c:find("harvest") == nil):eq(true) end   -- nothing probed
+    expect(corpse.active):eq(false)                                             -- pass wrapped up
+  end)
+end)
+
+test("the walk still harvests every index UP TO the kill count", function()
+  with_corpse({ on = true, active = true, idx = 2, kill_count = 2, killed = true, with_items = {} }, function(sent)
+    corpse_process()
+    expect(sent[1]):eq("harvest teeth 2.corpse")   -- idx 2 <= 2 kills → still processed
+    expect(corpse.active):eq(true)
+  end)
+end)
+
+test("an unknown kill count (0) falls back to walking until the game says no such corpse", function()
+  with_corpse({ on = true, active = true, idx = 2, kill_count = 0, killed = true, with_items = {} }, function(sent)
+    corpse_process()
+    expect(sent[1]):eq("harvest teeth 2.corpse")   -- no cap → old behaviour (miss line terminates)
+    expect(corpse.active):eq(true)
   end)
 end)
 

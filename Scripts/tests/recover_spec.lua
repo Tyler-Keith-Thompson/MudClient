@@ -85,6 +85,30 @@ test("already sleeping: a deeper 'sleep' target never re-sends, but a 'rest' dec
   with_posture(90, 50, 90, "sleeping", function(sent) choose(); expect(sent[1]):eq("rest") end)
 end)
 
+-- ---- awaiting a spellup: a buff that dropped while asleep holds us awake for the recast -----------
+
+test("a dropped buff (await_spell) holds recovery at rest instead of re-sleeping", function()
+  local rec = _AA_TEST.recovery
+  rec.await_spell, rec.await_until = nil, nil
+  with_posture(40, 40, 40, "sleeping", function(sent)   -- everything low → would normally sleep
+    rec.await_spell, rec.await_until = "bless", os.time() + 100   -- a buff dropped, still waiting
+    choose()
+    expect(sent[1]):eq("rest")     -- woken/held at rest for the recast, NOT left asleep
+  end)
+  rec.await_spell, rec.await_until = nil, nil
+end)
+
+test("a timed-out await_spell is cleared and normal (deep-sleep) recovery resumes", function()
+  local rec = _AA_TEST.recovery
+  rec.await_spell, rec.await_until = "bless", os.time() - 100   -- the recast never came → expired
+  with_posture(40, 40, 40, "sitting", function(sent)
+    choose()
+    expect(rec.await_spell):eq(nil)   -- cleared on the timeout
+    expect(sent[1]):eq("sleep")       -- back to the deepest heal
+  end)
+  rec.await_spell, rec.await_until = nil, nil
+end)
+
 -- ---- rvnum: a `look` (same room) must NOT abort recovery; a real move must ----------------------
 
 local note_room = _AA_TEST.note_room
