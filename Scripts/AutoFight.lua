@@ -248,6 +248,13 @@ engage_giveup = function(reason)
   if cb then cb(reason) end
 end
 
+-- The engage target simply isn't in the room ("Target who?  You do not see that person here.") — there's
+-- nothing to aggro, so retrying the opener is pointless. Give up immediately (rejecting attack()'s promise).
+-- Guarded to the engage window so a stray bad `target` you type mid-fight doesn't abort anything.
+local function engage_target_missing()
+  if F.engaging and not F.fighting then engage_giveup("target not here") end
+end
+
 -- Send the cast for `spell` and go `busy`. NO timer — we stay busy until we SEE that spell's own
 -- success line (succeed) or a failure line (fail_again). `busy` is the only thing gating sends, so we
 -- can never have two casts outstanding and can never spam.
@@ -693,6 +700,7 @@ if trigger then
   trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
   trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
   trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
+  trigger([[^Target who\?]], function() engage_target_missing() end)
   trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
   trigger([[^You fail to cast the spell]], function() hit_fail() end)
   trigger([[^.+ is DEAD!$]], function() hit_dead() end)
@@ -966,6 +974,7 @@ _AF_TEST = {
   tank_resummoned = tank_resummoned,                      -- a clay man rejoined (stop the loop)
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
+  target_missing = engage_target_missing,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
   winner_key    = winner_key,
   winners       = function() return _AUTOFIGHT.winners end,

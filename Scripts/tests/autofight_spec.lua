@@ -235,6 +235,24 @@ test("engage: out of mana on the opener gives up immediately", function()
   expect(AF.state().engaging):eq(false)
 end)
 
+test("engage: target not in the room ('Target who?') gives up immediately (rejects attack)", function()
+  AF.reset()
+  local failed = nil
+  autofight.engage("wombat", function() end, function(r) failed = r end)
+  AF.target_missing()                                  -- "Target who?  You do not see that person here."
+  expect(failed):eq("target not here")
+  expect(AF.state().engaging):eq(false)
+end)
+
+test("engage: 'Target who?' does nothing once the fight is actually underway", function()
+  AF.reset()
+  local failed = nil
+  autofight.engage("orc", function() end, function(r) failed = r end)
+  AF.on_fight(90, "orc")                                -- combat started → no longer engaging
+  AF.target_missing()                                  -- a stray bad target mid-fight must not abort
+  expect(failed):eq(nil)
+end)
+
 test("engage: a stray fight-end while still landing the opener does NOT resolve on_dead", function()
   AF.reset()
   local dead = false
