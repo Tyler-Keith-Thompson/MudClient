@@ -4,7 +4,7 @@
 -- combat wire protocol with a fixed opener→probe→nuke→finish routine, opt-in and OFF by default.
 --
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
---   1. PROBE:            on COMBAT START, cast c shards (once) then c scorch (once); compare how much each
+--   1. PROBE:            on COMBAT START, cast c icebolt (once) then c scorch (once); compare how much each
 --                        dropped the enemy's health %; the bigger drop WINS. (Coarse % heuristic — fine.)
 --   2. NUKE:             keep casting the WINNER until the enemy is dead.
 --   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
@@ -48,8 +48,8 @@ local cfg = {
   room_burst      = 2,   -- seconds: window to tally a room-listing burst's "X is here, fighting Y" lines
   -- Exact commands to send. In-combat casts auto-target the current enemy, so these go out bare.
   opener_tarrants  = "c tarrants",   -- tarrant's spectral hand — the one opener (see NOTE at top)
-  shards_cmd       = "c shards",
-  scorch_cmd       = "c scorch",
+  icebolt_cmd      = "c icebolt",    -- the COLD probe/nuke (replaced shards). See PROBE_SPELLS below.
+  scorch_cmd       = "c scorch",     -- the FIRE probe/nuke
   soulsteal_cmd    = "c soulsteal",
   aoe_cmd          = "c frostflower",-- room AOE, used instead of the single-target probe/nuke on a pack
   -- DORMANT: shower was the 2nd probe before scorch. Kept (with its landed trigger + hit_shower() below)
@@ -70,7 +70,7 @@ F.busy              = F.busy or false
 F.suspended         = F.suspended or false
 F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (echo/suspend disambiguation)
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
-F.shards_drop       = F.shards_drop or 0
+F.icebolt_drop      = F.icebolt_drop or 0
 F.scorch_drop       = F.scorch_drop or 0
 -- engage() state: initiating a fight from out of combat by casting the opener (`target x` alone doesn't
 -- aggro). `engaging` is true from the first opener cast until combat actually starts; `opener_primed`
@@ -107,7 +107,7 @@ local function say(s) if echo then echo("\27[1;35m[autofight]\27[0m " .. s) end 
 
 -- ---- learned winners (per target NAME) -----------------------------------------------------------
 -- Remember which probe spell won against a given target so the next fight against the same name skips
--- the shards/scorch probe and nukes the known winner straight away. Keyed by a normalized name (lower-
+-- the icebolt/scorch probe and nukes the known winner straight away. Keyed by a normalized name (lower-
 -- cased, leading article stripped) so "a Gnomian guard" / "The Gnomian guard" collapse to one entry.
 -- Persisted to disk (mirrors AlterAeon's classes.lua) so it survives a relaunch; kept on _AUTOFIGHT so
 -- it also survives a live pilot.reload().
@@ -118,13 +118,26 @@ local function winner_key(name)
   return (k ~= "" and k) or nil
 end
 
+-- THE two probe spells the routine compares (cold vs fire). Single source of truth: change these and
+-- the persisted winners file MIGRATES on next load (see load below) instead of being wiped. To swap a
+-- spell later (e.g. icebolt -> some newer cold spell), edit this + its _cmd + its landed trigger.
+local PROBE_SPELLS = { "icebolt", "scorch" }
+local function is_probe_spell(s) for _, v in ipairs(PROBE_SPELLS) do if v == s then return true end end return false end
+local function probe_spellset_key() local t = {}; for _, v in ipairs(PROBE_SPELLS) do t[#t + 1] = v end; table.sort(t); return table.concat(t, ",") end
+
 local WINNERS_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/autofight_winners.lua"
+-- File format v2: { spells = "<sorted probe set>", winners = { [name] = spell } }. v1 was a flat
+-- { [name] = spell } (no `spells`); loaded transparently below.
 local function save_winners()
   local f = io.open(WINNERS_FILE, "w")
   if not f then return end
   local parts = {}
-  for name, spell in pairs(_AUTOFIGHT.winners) do parts[#parts + 1] = string.format("[%q]=%q", name, spell) end
-  f:write("return {" .. table.concat(parts, ",") .. "}")
+  -- Only persist CURRENT probe-spell entries — never write a retired spell back (belt against a stale
+  -- in-memory entry from a live reload that predates a spell swap).
+  for name, spell in pairs(_AUTOFIGHT.winners) do
+    if is_probe_spell(spell) then parts[#parts + 1] = string.format("[%q]=%q", name, spell) end
+  end
+  f:write(string.format("return {[%q]=%q,[%q]={%s}}", "spells", probe_spellset_key(), "winners", table.concat(parts, ",")))
   f:close()
 end
 -- Debounce writes: coalesce a burst of updates into one save 2s after the last (same trick as classes).
@@ -134,17 +147,56 @@ local function schedule_winners_save()
   winners_save_timer = after and after(2, save_winners) or nil
 end
 -- Load from disk ONCE per session (not on a live reload, where _AUTOFIGHT.winners already holds the
--- current, possibly-newer table).
+-- current, possibly-newer table). VERSIONED MIGRATION: we NEVER wipe the file on a spell change. We keep
+-- every entry whose winning spell is still one of the current PROBE_SPELLS, and DROP only the entries
+-- whose spell was retired (e.g. old "shards" after the icebolt swap) — those targets simply re-probe
+-- fresh on the next fight. Entries for a still-valid spell (e.g. "scorch") are trusted as-is.
 if not _AUTOFIGHT.winners then
   _AUTOFIGHT.winners = {}
   local chunk = loadfile and loadfile(WINNERS_FILE)
-  if chunk then local ok, t = pcall(chunk); if ok and type(t) == "table" then _AUTOFIGHT.winners = t end end
+  if chunk then
+    local ok, t = pcall(chunk)
+    if ok and type(t) == "table" then
+      local raw = (type(t.winners) == "table") and t.winners or t   -- v2 has .winners; v1 was flat
+      local recorded = t.spells                                     -- nil for a v1 file
+      local dropped = 0
+      for name, spell in pairs(raw) do
+        if is_probe_spell(spell) then _AUTOFIGHT.winners[name] = spell
+        else dropped = dropped + 1 end                              -- retired spell (e.g. "shards") → re-probe
+      end
+      -- Re-save (in v2 form) if we migrated: a v1 file, a changed spell set, or anything dropped.
+      if recorded ~= probe_spellset_key() or dropped > 0 then
+        if dropped > 0 and echo then
+          echo(string.format("\27[1;35m[autofight]\27[0m spell set changed → kept %d learned winner(s), "
+            .. "re-probing %d target(s) whose old spell was retired.",
+            (function() local n = 0 for _ in pairs(_AUTOFIGHT.winners) do n = n + 1 end return n end)(), dropped))
+        end
+        if after then after(0, save_winners) end                   -- rewrite the file in v2/migrated form
+      end
+    end
+  end
+end
+
+-- Runs on EVERY load (not just a fresh one): a live `#pilot.reload()` after a spell swap keeps the old
+-- in-memory _AUTOFIGHT.winners (the `if not` above is skipped), so prune retired-spell entries here too —
+-- otherwise a later save would write "shards" back into the migrated file.
+do
+  local dropped = 0
+  for name, spell in pairs(_AUTOFIGHT.winners) do
+    if not is_probe_spell(spell) then _AUTOFIGHT.winners[name] = nil; dropped = dropped + 1 end
+  end
+  if dropped > 0 then
+    if echo then
+      echo(string.format("\27[1;35m[autofight]\27[0m spell set changed → re-probing %d target(s) whose old spell was retired.", dropped))
+    end
+    if after then after(0, save_winners) end
+  end
 end
 
 -- Record (and persist) the probe's verdict for this target. Only writes on a real change.
 local function remember_winner(name, spell)
   local key = winner_key(name)
-  if not key or (spell ~= "shards" and spell ~= "scorch") then return end
+  if not key or not is_probe_spell(spell) then return end
   if _AUTOFIGHT.winners[key] ~= spell then
     _AUTOFIGHT.winners[key] = spell
     schedule_winners_save()
@@ -208,8 +260,8 @@ end
 -- aoe stays aoe — keep frostflowering the pack until combat ends or the target rolls over.)
 local function next_phase()
   local p = F.phase
-  if     p == "tarrants"  then F.phase = aoe_active() and "aoe" or (F.known_winner and "nuke" or "shards")
-  elseif p == "shards"    then F.phase = "scorch"
+  if     p == "tarrants"  then F.phase = aoe_active() and "aoe" or (F.known_winner and "nuke" or "icebolt")
+  elseif p == "icebolt"   then F.phase = "scorch"
   elseif p == "scorch"    then F.phase = "decide"
   elseif p == "aoe"       then F.phase = "aoe"
   elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
@@ -223,8 +275,8 @@ end
 fire = function()
   if not F.on or not F.fighting or F.suspended or F.busy then return end
   if F.phase == "decide" then
-    -- Coarse winner pick: whichever probe dropped the enemy health % more. Ties → shards.
-    if F.shards_drop >= F.scorch_drop then F.winner, F.winner_spell = cfg.shards_cmd, "shards"
+    -- Coarse winner pick: whichever probe dropped the enemy health % more. Ties → icebolt.
+    if F.icebolt_drop >= F.scorch_drop then F.winner, F.winner_spell = cfg.icebolt_cmd, "icebolt"
     else F.winner, F.winner_spell = cfg.scorch_cmd, "scorch" end
     remember_winner(F.name, F.winner_spell)   -- learn it so the next fight vs this name skips the probe
     F.phase = "nuke"
@@ -236,7 +288,7 @@ fire = function()
   end
   local p = F.phase
   if     p == "tarrants"               then cast(cfg.opener_tarrants, "tarrants")
-  elseif p == "shards"                 then F.last_damage_spell = "shards"; cast(cfg.shards_cmd, "shards")
+  elseif p == "icebolt"                then F.last_damage_spell = "icebolt"; cast(cfg.icebolt_cmd, "icebolt")
   elseif p == "scorch"                 then F.last_damage_spell = "scorch"; cast(cfg.scorch_cmd, "scorch")
   elseif p == "aoe"                    then F.last_damage_spell = "aoe"; cast(cfg.aoe_cmd, "frostflower")
   elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
@@ -295,21 +347,21 @@ local function start_fight(pct, name)
   -- Do we already know the winning spell for this target name? If so, skip the probe entirely.
   local key = winner_key(name)
   local known = key and _AUTOFIGHT.winners[key]
-  F.known_winner = (known == "shards" or known == "scorch") and known or nil
+  F.known_winner = is_probe_spell(known) and known or nil
   if F.known_winner then
     F.winner, F.winner_spell = cfg[F.known_winner .. "_cmd"], F.known_winner
     say(string.format("%s known → %s (skipping probe)", key, F.known_winner))
   end
   -- Phase: AOE (a pack) skips the single-target opener AND probe — we're already in combat, so go
   -- straight to frostflower. Otherwise engage() may have already thrown the opener (opener_primed); the
-  -- post-opener phase is the nuke when we know the winner, else the shards/scorch probe; a fresh
+  -- post-opener phase is the nuke when we know the winner, else the icebolt/scorch probe; a fresh
   -- single-target fight opens with tarrants.
-  local post_opener = F.known_winner and "nuke" or "shards"
+  local post_opener = F.known_winner and "nuke" or "icebolt"
   if aoe_active() then F.phase = "aoe"
   else F.phase = F.opener_primed and post_opener or "tarrants" end
   F.engaging, F.engage_busy, F.opener_primed = false, false, false
   F.busy, F.busy_spell = false, nil
-  F.shards_drop, F.scorch_drop = 0, 0
+  F.icebolt_drop, F.scorch_drop = 0, 0
   if not F.known_winner then F.winner, F.winner_spell = nil, nil end   -- keep the known winner if set above
   F.last_damage_spell = nil
   F.soul_latched = false
@@ -349,12 +401,12 @@ local function enter_pack_mode()
 end
 
 -- Leave AOE: the crowd thinned below pack size, so resume single target on the CURRENT enemy (its known
--- winner, else re-probe from shards). No-op if we weren't AOEing (or AOE is force-"on", which pins it).
+-- winner, else re-probe from icebolt). No-op if we weren't AOEing (or AOE is force-"on", which pins it).
 local function exit_pack_mode()
   if not F.pack then return end
   F.pack = false
   if F.on and F.fighting and not aoe_active() and F.phase == "aoe" then
-    F.phase = F.known_winner and "nuke" or "shards"
+    F.phase = F.known_winner and "nuke" or "icebolt"
     if not F.busy then fire() end
   end
 end
@@ -415,7 +467,7 @@ local function on_fight(pct, name)
   end
   if prev and pct < prev then
     local d = prev - pct
-    if     F.last_damage_spell == "shards" then F.shards_drop = F.shards_drop + d
+    if     F.last_damage_spell == "icebolt" then F.icebolt_drop = F.icebolt_drop + d
     elseif F.last_damage_spell == "scorch" then F.scorch_drop = F.scorch_drop + d end
   end
   -- A health-% change updates the winner comparison ONLY. It NEVER triggers a cast — casting is driven
@@ -439,7 +491,7 @@ end
 -- ---- combat line resolutions ---------------------------------------------------------------------
 -- Each hit_* is what a trigger fires; on_line() (the test seam) classifies a verbatim line and calls the
 -- same hit_*, so triggers and tests share one implementation.
-local function hit_shards()     succeed("shards")    end   -- "You create and magically throw white shards…"
+local function hit_icebolt()    succeed("icebolt")   end   -- icebolt LANDED line (trigger verified live)
 local function hit_scorch()     succeed("scorch")    end   -- "You throw an intense burst of <color> flames at <target>!"
 local function hit_frostflower() succeed("frostflower") end -- "Spiked flowers of ice quickly form on everything in a ring around you!"
 -- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so busy_spell is never "shower" and this
@@ -524,7 +576,9 @@ if trigger then
   -- variable mob name (resist / DEAD) also anchor the tail with $ so a quoted say ("…DEAD!'") is excluded.
   trigger([[^You cast the spell to separate soul from body]], function() hit_soulsteal_ok() end)
   trigger([[^You magically latch onto .+ soul and wait for .+ to weaken]], function() hit_soul_latched() end)
-  trigger([[^You create and magically throw white shards of crystal at]], function() hit_shards() end)
+  -- icebolt LANDED line — VERIFIED live: "You create and magically throw bolts of ice at <target>!"
+  -- (^ anchors out say-spoofs; the tail after "at " is the variable mob name).
+  trigger([[^You create and magically throw bolts of ice at ]], function() hit_icebolt() end)
   -- scorch (replaced shower as the 2nd probe). Line from live play: "You throw an intense burst of
   -- yellow flames at <target>!" — the flame COLOUR varies, so wildcard it; ^ anchors out say-spoofs.
   trigger([[^You throw an intense burst of .* flames at ]], function() hit_scorch() end)
@@ -570,7 +624,7 @@ autofight = {}
 
 function autofight.on()
   F.on = true
-  say("armed — tarrants → shards/scorch probe → nuke winner → soulsteal")
+  say("armed — tarrants → icebolt/scorch probe → nuke winner → soulsteal")
   if F.fighting and not F.busy then fire() end
 end
 
@@ -636,20 +690,20 @@ end
 
 doc(autofight.winners, { name = "autofight.winners", sig = "autofight.winners()", group = "combat",
   text = "List the learned best-spell-per-target memory: for each target name the script has probed, "
-      .. "which of shards/scorch won. Known names skip the probe on the next fight." })
+      .. "which of icebolt/scorch won. Known names skip the probe on the next fight." })
 doc(autofight.forget, { name = "autofight.forget", sig = "autofight.forget([name])", group = "combat",
   text = "Forget a learned winner so it re-probes next time: pass a target name to drop just that one, "
       .. "or call with no argument to clear the whole memory. Persists the change." })
 
 -- winner(name[, spell]) — manually SET (override) the learned attack for a target NAME. Use it when the
 -- probe mislearned: it picked the element the enemy RESISTS, or — worse — one that HEALS it (a cold mob
--- healed by shards, a fire one by scorch). `spell` is 'shards' (cold) or 'scorch' (fire), the two the
+-- healed by icebolt, a fire one by scorch). `spell` is 'icebolt' (cold) or 'scorch' (fire), the two the
 -- routine nukes with. No spell → report the current winner; 'none'/'clear' → forget it (re-probe next
 -- fight). Persists, skips the probe forever after for that name, and switches the CURRENT fight on the spot.
 function autofight.winner(name, spell)
   local key = name and winner_key(name)
   if not key or key == "" then
-    say("usage: autofight.winner('<enemy name>', 'shards'|'scorch')  — force which spell to nuke it with")
+    say("usage: autofight.winner('<enemy name>', 'icebolt'|'scorch')  — force which spell to nuke it with")
     return
   end
   local s = (spell or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -662,8 +716,8 @@ function autofight.winner(name, spell)
     _AUTOFIGHT.winners[key] = nil; schedule_winners_save(); say("forgot '" .. key .. "' — will re-probe")
     return
   end
-  if s ~= "shards" and s ~= "scorch" then
-    say("winner must be 'shards' or 'scorch' (the two spells the routine nukes with) — got '" .. s .. "'")
+  if not is_probe_spell(s) then
+    say("winner must be one of " .. table.concat(PROBE_SPELLS, "/") .. " (the spells the routine nukes with) — got '" .. s .. "'")
     return
   end
   remember_winner(name, s)   -- set + persist; the next fight vs this name skips the probe and nukes `s`
@@ -671,14 +725,14 @@ function autofight.winner(name, spell)
   -- healing!) spell until the fight ends.
   if F.fighting and F.name and winner_key(F.name) == key then
     F.known_winner, F.winner, F.winner_spell = s, cfg[s .. "_cmd"], s
-    if F.phase == "shards" or F.phase == "scorch" or F.phase == "decide" then F.phase = "nuke" end
+    if F.phase == "icebolt" or F.phase == "scorch" or F.phase == "decide" then F.phase = "nuke" end
     say("overriding the CURRENT fight → " .. s)
   end
   say("'" .. key .. "' → " .. s .. " (set, persisted)")
 end
-doc(autofight.winner, { name = "autofight.winner", sig = "autofight.winner(name[, 'shards'|'scorch'])",
+doc(autofight.winner, { name = "autofight.winner", sig = "autofight.winner(name[, 'icebolt'|'scorch'])",
   group = "combat", text = "Manually override the learned attack spell for a target NAME — for when the "
-      .. "probe mislearned and picked the element the enemy RESISTS or is HEALED by. 'shards' (cold) or "
+      .. "probe mislearned and picked the element the enemy RESISTS or is HEALED by. 'icebolt' (cold) or "
       .. "'scorch' (fire); no spell reports the current winner; 'none' forgets it. Persists, skips the "
       .. "probe for that name, and switches the current fight immediately if you're fighting it." })
 
@@ -718,7 +772,7 @@ doc("attack", { sig = "attack(target) -> promise", group = "combat",
 
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
   text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes "
-      .. "shards vs scorch and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
+      .. "icebolt vs scorch and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
       .. "dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by default; any command "
       .. "YOU type suspends it briefly so you can intervene." })
 doc(autofight.off, { name = "autofight.off", sig = "autofight.off()", group = "combat",
@@ -742,7 +796,7 @@ setmetatable(autofight, { __call = function(_, rest)
     -- If the last word isn't a spell keyword, treat the whole thing as a name (report the current winner).
     local last = arg:match("(%S+)%s*$")
     local lw = last and last:lower()
-    if lw == "shards" or lw == "scorch" or lw == "none" or lw == "clear" or lw == "forget" then
+    if is_probe_spell(lw) or lw == "none" or lw == "clear" or lw == "forget" then
       autofight.winner(arg:match("^(.-)%s+%S+%s*$"), last)
     else
       autofight.winner(arg ~= "" and arg or nil)
@@ -760,7 +814,7 @@ end
 
 -- ---- test seam -----------------------------------------------------------------------------------
 -- The spec drives the state machine by calling the SAME handlers the live triggers call — there is no
--- second line-matching path to drift. on_fight is the kxwt_fighting handler; shards/scorch/… are the
+-- second line-matching path to drift. on_fight is the kxwt_fighting handler; icebolt/scorch/… are the
 -- resolution handlers each trigger dispatches to.
 _AF_TEST = {
   cfg           = cfg,
@@ -769,7 +823,8 @@ _AF_TEST = {
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
-  shards        = hit_shards,      scorch       = hit_scorch,      tarrants  = hit_tarrants,
+  icebolt       = hit_icebolt,     scorch       = hit_scorch,      tarrants  = hit_tarrants,
+  is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS,    save_winners = save_winners,
   frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
   mdeath        = note_mdeath,
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified

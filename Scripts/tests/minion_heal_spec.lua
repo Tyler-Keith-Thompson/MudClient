@@ -262,3 +262,38 @@ test("recovery doesn't complete until skeletal minions are topped off", function
   expect(now):truthy()
   expect(resolved):truthy()
 end)
+
+-- ---- recover minions (minion-only recovery) ------------------------------------------------------
+
+test("minion-only recovery: choose_recovery_position is a no-op (never rests/sleeps/stands you)", function()
+  local saved_state, saved_send = state, send
+  local sent = {}
+  state = { name = "Me", hp = 40, maxhp = 100, mana = 40, maxmana = 100, stam = 40, maxstam = 100,
+            position = "standing", recover = true,
+            group = { me(), minion("A skeletal spider", 10, 39) } }
+  AA.recovery.minions_only = true
+  _G.send = function(c) sent[#sent + 1] = c end
+  AA.reset_posture()
+  AA.choose_recovery_position()
+  AA.recovery.minions_only = nil
+  state, _G.send = saved_state, saved_send
+  expect(#sent):eq(0)                     -- no rest/sleep/stand — YOUR posture is untouched
+end)
+
+test("minion-only recovery completes when no skeletal minion still needs a cast", function()
+  local saved_state, saved_send = state, send
+  state = { name = "Me", hp = 40, maxhp = 100, mana = 40, maxmana = 100, stam = 40, maxstam = 100,
+            recover = true, group = { me(), minion("A skeletal spider", 38, 39) } }
+  _G.send = function() end
+  AA.recovery.minions_only = true
+  local resolved
+  AA.recovery.settle = { resolve = function() resolved = true end, reject = function() end }
+  local not_yet = AA.maybe_complete_recovery()   -- spider 38/39, pool<100 → must be full → still pending
+  state.group[2].hp = 39                          -- topped off
+  local now = AA.maybe_complete_recovery()
+  AA.recovery.settle, AA.recovery.minions_only, AA.recovery.pct = nil, nil, AA.READY_PCT
+  state, _G.send = saved_state, saved_send
+  expect(not_yet):falsy()
+  expect(now):truthy()
+  expect(resolved):truthy()
+end)

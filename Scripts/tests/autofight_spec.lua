@@ -1,7 +1,7 @@
 -- Specs for AutoFight.lua — the deterministic auto-fight state machine.
 --
 -- These drive the ACTUAL state machine by calling the SAME resolution handlers the live Swift triggers
--- dispatch to (AF.shards/AF.scorch/AF.resist/… via _AF_TEST) plus the kxwt_fighting handler (AF.on_fight)
+-- dispatch to (AF.icebolt/AF.scorch/AF.resist/… via _AF_TEST) plus the kxwt_fighting handler (AF.on_fight)
 -- and the input observer (AF.on_input). The trigger REGEXES live in one place — the trigger() block in
 -- AutoFight.lua — and run in Swift; there is no second Lua line-matcher to drift, so the specs test the
 -- state-machine LOGIC, not the matching.
@@ -23,46 +23,46 @@ local function expect_seq(got, want)
   end
 end
 
--- Get to "c shards in flight": start the fight (casts the tarrants opener), land tarrants → shards.
-local function to_shards()
+-- Get to "c icebolt in flight": start the fight (casts the tarrants opener), land tarrants → icebolt.
+local function to_icebolt()
   AF.reset()
   AF.on_fight(90, ENEMY)   -- combat start → "c tarrants"
-  AF.tarrants()            -- tarrants LANDED → "c shards"
+  AF.tarrants()            -- tarrants LANDED → "c icebolt"
 end
 
 -- ---- (a) full fight command sequence -------------------------------------------------------------
-test("full fight: tarrants → shards/scorch probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
-  to_shards()                        -- sent: c tarrants, c shards
-  AF.on_fight(70, ENEMY)             -- shards Δ20 — a % change NEVER casts
-  AF.shards()                        -- shards LANDED → "c scorch"
+test("full fight: tarrants → icebolt/scorch probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
+  to_icebolt()                        -- sent: c tarrants, c icebolt
+  AF.on_fight(70, ENEMY)             -- icebolt Δ20 — a % change NEVER casts
+  AF.icebolt()                        -- icebolt LANDED → "c scorch"
   AF.on_fight(65, ENEMY)             -- scorch Δ5
-  AF.scorch()                        -- scorch LANDED → decide (shards wins) → nuke "c shards"
-  AF.on_fight(50, ENEMY); AF.shards()  -- landed → "c shards"
-  AF.on_fight(35, ENEMY); AF.shards()  -- landed → "c shards"
-  AF.on_fight(20, ENEMY); AF.shards()  -- landed → "c shards"
-  AF.on_fight(10, ENEMY); AF.shards()  -- landed, now ≤15% → "c soulsteal"
-  AF.resist()                        -- soulsteal RESISTED → re-nuke → "c shards"
-  AF.shards()                        -- re-nuke landed → "c soulsteal"
+  AF.scorch()                        -- scorch LANDED → decide (icebolt wins) → nuke "c icebolt"
+  AF.on_fight(50, ENEMY); AF.icebolt()  -- landed → "c icebolt"
+  AF.on_fight(35, ENEMY); AF.icebolt()  -- landed → "c icebolt"
+  AF.on_fight(20, ENEMY); AF.icebolt()  -- landed → "c icebolt"
+  AF.on_fight(10, ENEMY); AF.icebolt()  -- landed, now ≤15% → "c soulsteal"
+  AF.resist()                        -- soulsteal RESISTED → re-nuke → "c icebolt"
+  AF.icebolt()                        -- re-nuke landed → "c soulsteal"
   AF.soulsteal_ok()                  -- landed → done (no further sends)
   AF.dead()                          -- enemy dead → fight ends
 
   expect_seq(seq(), {
     "c tarrants",
-    "c shards", "c scorch",                          -- probes
-    "c shards", "c shards", "c shards", "c shards",  -- winner nuked (65→50→35→20→10)
+    "c icebolt", "c scorch",                          -- probes
+    "c icebolt", "c icebolt", "c icebolt", "c icebolt",  -- winner nuked (65→50→35→20→10)
     "c soulsteal",                                   -- finish attempt
-    "c shards",                                      -- re-nuke after the resist
+    "c icebolt",                                      -- re-nuke after the resist
     "c soulsteal",                                   -- retry — lands
   })
   local F = AF.state()
-  expect(F.winner_spell):eq("shards")
+  expect(F.winner_spell):eq("icebolt")
   expect(F.fighting):eq(false)
   expect(F.phase):eq("idle")
 end)
 
 -- ---- (b) THE SPAM GUARD: a flood of health-% updates while busy sends nothing --------------------
 test("spam guard: a burst of health-% updates in flight sends ZERO commands", function()
-  to_shards()                        -- "c shards" in flight (busy)
+  to_icebolt()                        -- "c icebolt" in flight (busy)
   local n = #AF.sent
   expect(AF.state().busy):eq(true)
   -- the real health bar from the spam log: many kxwt_fighting ticks per second.
@@ -70,35 +70,35 @@ test("spam guard: a burst of health-% updates in flight sends ZERO commands", fu
     AF.on_fight(p, ENEMY)
   end
   expect(#AF.sent):eq(n)             -- NOT ONE extra command — this was the bug
-  expect(AF.state().busy):eq(true)   -- still waiting on the shards landed line
-  AF.shards()                        -- only the actual LANDED line releases the next cast
+  expect(AF.state().busy):eq(true)   -- still waiting on the icebolt landed line
+  AF.icebolt()                        -- only the actual LANDED line releases the next cast
   expect(#AF.sent):eq(n + 1)
   expect(AF.sent[n + 1]):eq("c scorch")
 end)
 
 -- ---- (c) pacing + retry --------------------------------------------------------------------------
 test("pacing: a non-resolution line sends nothing; the landed line advances", function()
-  to_shards()
+  to_icebolt()
   local n = #AF.sent
   AF.on_fight(80, ENEMY)             -- a % tick: nothing
   expect(#AF.sent):eq(n)
-  AF.shards()                        -- shards landed → next cast
+  AF.icebolt()                        -- icebolt landed → next cast
   expect(#AF.sent):eq(n + 1)
   expect(AF.sent[n + 1]):eq("c scorch")
 end)
 
 test("a FAILED cast retries the SAME spell (not the next)", function()
-  to_shards()                        -- "c shards" in flight
+  to_icebolt()                        -- "c icebolt" in flight
   local n = #AF.sent
-  AF.fail()                          -- "You fail to cast the spell 'shards'." → retry
+  AF.fail()                          -- "You fail to cast the spell 'icebolt'." → retry
   expect(#AF.sent):eq(n + 1)
-  expect(AF.sent[n + 1]):eq("c shards")   -- same spell
+  expect(AF.sent[n + 1]):eq("c icebolt")   -- same spell
 end)
 
 test("an opener that keeps failing is given up after max_tries — never stalls", function()
   AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants"
   for _ = 1, AF.cfg.max_tries do AF.fail() end   -- fizzles max_tries times (each after a fail line)
-  expect(AF.sent[#AF.sent]):eq("c shards")       -- gave up on tarrants, moved on
+  expect(AF.sent[#AF.sent]):eq("c icebolt")       -- gave up on tarrants, moved on
 end)
 
 -- ---- (d) manual-input suspend --------------------------------------------------------------------
@@ -107,12 +107,12 @@ test("suspend: a user-typed command halts sends until the resume window", functi
   expect(#AF.sent):eq(1)
   AF.on_input("kick guard")                -- the USER intervenes
   expect(AF.state().suspended):eq(true)
-  AF.tarrants()                            -- tarrants lands, but suspended → no "c shards"
+  AF.tarrants()                            -- tarrants lands, but suspended → no "c icebolt"
   expect(#AF.sent):eq(1)
   AF.expire_resume()                       -- resume window elapses
   expect(AF.state().suspended):eq(false)
   expect(#AF.sent):eq(2)
-  expect(AF.sent[2]):eq("c shards")
+  expect(AF.sent[2]):eq("c icebolt")
 end)
 
 test("suspend: our OWN sends echoing back do NOT suspend", function()
@@ -122,20 +122,20 @@ test("suspend: our OWN sends echoing back do NOT suspend", function()
 end)
 
 -- ---- (e) winner pick: bigger %-drop wins ---------------------------------------------------------
-test("winner pick: shards drops more than scorch → nuke with shards", function()
-  to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()      -- shards Δ20 → "c scorch"
+test("winner pick: icebolt drops more than scorch → nuke with icebolt", function()
+  to_icebolt()
+  AF.on_fight(70, ENEMY); AF.icebolt()      -- icebolt Δ20 → "c scorch"
   AF.on_fight(65, ENEMY); AF.scorch()      -- scorch Δ5  → decide → nuke
   local F = AF.state()
-  expect(F.shards_drop):eq(20)
+  expect(F.icebolt_drop):eq(20)
   expect(F.scorch_drop):eq(5)
-  expect(F.winner_spell):eq("shards")
-  expect(AF.sent[#AF.sent]):eq("c shards")
+  expect(F.winner_spell):eq("icebolt")
+  expect(AF.sent[#AF.sent]):eq("c icebolt")
 end)
 
-test("winner pick: scorch drops more than shards → nuke with scorch", function()
-  to_shards()
-  AF.on_fight(85, ENEMY); AF.shards()      -- shards Δ5  → "c scorch"
+test("winner pick: scorch drops more than icebolt → nuke with scorch", function()
+  to_icebolt()
+  AF.on_fight(85, ENEMY); AF.icebolt()      -- icebolt Δ5  → "c scorch"
   AF.on_fight(60, ENEMY); AF.scorch()      -- scorch Δ25 → decide → nuke
   local F = AF.state()
   expect(F.scorch_drop):eq(25)
@@ -145,22 +145,22 @@ end)
 
 -- ---- (f) robustness ------------------------------------------------------------------------------
 test("out-of-mana stops that spell (no spam) and waits", function()
-  to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()      -- → "c scorch"
-  AF.on_fight(60, ENEMY); AF.scorch()      -- → winner shards → nuke "c shards"
+  to_icebolt()
+  AF.on_fight(70, ENEMY); AF.icebolt()      -- → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- → winner icebolt → nuke "c icebolt"
   local n = #AF.sent
   AF.mana()                                -- "You don't have enough mana."
-  expect(AF.state().no_mana["shards"]):eq(true)
+  expect(AF.state().no_mana["icebolt"]):eq(true)
   expect(#AF.sent):eq(n)                   -- nothing more sent
   AF.on_fight(55, ENEMY)                   -- a later % tick doesn't re-cast the broke spell
   expect(#AF.sent):eq(n)
 end)
 
 test("soulsteal success line ends the routine cleanly", function()
-  to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()
-  AF.on_fight(60, ENEMY); AF.scorch()      -- winner shards → nuke
-  AF.on_fight(8, ENEMY);  AF.shards()      -- landed, ≤15% → "c soulsteal"
+  to_icebolt()
+  AF.on_fight(70, ENEMY); AF.icebolt()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner icebolt → nuke
+  AF.on_fight(8, ENEMY);  AF.icebolt()      -- landed, ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   local n = #AF.sent
   AF.soulsteal_ok()
@@ -190,10 +190,10 @@ test("engage: target + opener, retry opener on fail, then hand off to the probe 
   expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
   AF.tarrants()                                        -- opener LANDED → wait for combat to start (no send)
   expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
-  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → "c shards"
+  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → "c icebolt"
   expect(AF.state().engaging):eq(false)
-  expect(AF.state().phase):eq("shards")
-  expect(AF.sent[#AF.sent]):eq("c shards")
+  expect(AF.state().phase):eq("icebolt")
+  expect(AF.sent[#AF.sent]):eq("c icebolt")
   AF.on_fight_end()                                    -- fight over → on_dead fires once
   expect(dead):eq(true)
   expect(failed):eq(nil)
@@ -232,18 +232,18 @@ end)
 -- casting we'd stall. So we keep nuking the winner (never re-casting soulsteal) until the latch fires.
 
 test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it fires", function()
-  to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()      -- → "c scorch"
-  AF.on_fight(60, ENEMY); AF.scorch()      -- winner shards → nuke "c shards"
-  AF.on_fight(8, ENEMY);  AF.shards()      -- landed, ≤15% → "c soulsteal"
+  to_icebolt()
+  AF.on_fight(70, ENEMY); AF.icebolt()      -- → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner icebolt → nuke "c icebolt"
+  AF.on_fight(8, ENEMY);  AF.icebolt()      -- landed, ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   AF.soul_latched()                        -- LATCHED (not stolen) → resume nuking the winner
   expect(AF.state().soul_latched):eq(true)
   expect(AF.state().phase):eq("nuke")
-  expect(AF.sent[#AF.sent]):eq("c shards") -- nuked again, NOT soulsteal
+  expect(AF.sent[#AF.sent]):eq("c icebolt") -- nuked again, NOT soulsteal
   -- Still ≤15%, but the latch guard keeps us nuking — never flips back to soulsteal.
-  AF.on_fight(5, ENEMY); AF.shards()
-  expect(AF.sent[#AF.sent]):eq("c shards")
+  AF.on_fight(5, ENEMY); AF.icebolt()
+  expect(AF.sent[#AF.sent]):eq("c icebolt")
   -- The latch finally activates: the steal success line, then DEAD, ends the fight cleanly.
   AF.soulsteal_ok()
   expect(AF.state().phase):eq("done")
@@ -254,10 +254,10 @@ test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it
 end)
 
 test("a fresh fight clears the soul_latched flag", function()
-  to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()       -- → scorch
-  AF.on_fight(60, ENEMY); AF.scorch()       -- decide → winner shards → nuke
-  AF.on_fight(8, ENEMY);  AF.shards()       -- ≤15% → soulsteal
+  to_icebolt()
+  AF.on_fight(70, ENEMY); AF.icebolt()       -- → scorch
+  AF.on_fight(60, ENEMY); AF.scorch()       -- decide → winner icebolt → nuke
+  AF.on_fight(8, ENEMY);  AF.icebolt()       -- ≤15% → soulsteal
   AF.soul_latched()
   expect(AF.state().soul_latched):eq(true)
   AF.dead()                                 -- fight ends
@@ -275,10 +275,10 @@ test("shower's command string is retained in cfg", function()
 end)
 
 test("shower is never cast during a fight (dormant, not in the routine)", function()
-  to_shards()
-  AF.on_fight(70, ENEMY); AF.shards()
+  to_icebolt()
+  AF.on_fight(70, ENEMY); AF.icebolt()
   AF.on_fight(60, ENEMY); AF.scorch()      -- decide → nuke
-  AF.on_fight(8, ENEMY);  AF.shards()      -- ≤15% → soulsteal
+  AF.on_fight(8, ENEMY);  AF.icebolt()      -- ≤15% → soulsteal
   AF.soulsteal_ok(); AF.dead()
   for _, cmd in ipairs(seq()) do
     expect(cmd == AF.cfg.shower_cmd):eq(false)   -- "c shower" never appears
@@ -286,13 +286,13 @@ test("shower is never cast during a fight (dormant, not in the routine)", functi
 end)
 
 test("the dormant shower handler no-ops (a stray shower line can't advance the routine)", function()
-  to_shards()                              -- "c shards" in flight (busy on shards)
+  to_icebolt()                              -- "c icebolt" in flight (busy on icebolt)
   local n = #AF.sent
   local phase = AF.state().phase
   AF.shower()                              -- the dead trigger fires → succeed('shower') → guard no-ops
   expect(#AF.sent):eq(n)                   -- nothing sent
-  expect(AF.state().phase):eq(phase)       -- phase unchanged (busy_spell was 'shards', not 'shower')
-  expect(AF.state().busy):eq(true)         -- still waiting on the real shards landed line
+  expect(AF.state().phase):eq(phase)       -- phase unchanged (busy_spell was 'icebolt', not 'shower')
+  expect(AF.state().busy):eq(true)         -- still waiting on the real icebolt landed line
 end)
 
 -- ---- learned winners (per target name) -----------------------------------------------------------
@@ -307,8 +307,8 @@ test("winner_key normalizes: lowercased, leading article stripped", function()
 end)
 
 test("a decided probe is remembered under the target's name", function()
-  to_shards()                              -- reset() clears the winners table (hermetic)
-  AF.on_fight(85, ENEMY); AF.shards()      -- shards Δ5  → scorch
+  to_icebolt()                              -- reset() clears the winners table (hermetic)
+  AF.on_fight(85, ENEMY); AF.icebolt()      -- icebolt Δ5  → scorch
   AF.on_fight(60, ENEMY); AF.scorch()      -- scorch Δ25 → decide → scorch wins → learned
   expect(AF.winners()["gnomian guard"]):eq("scorch")
 end)
@@ -318,31 +318,31 @@ test("a known winner SKIPS the probe: opener → straight to the known nuke", fu
   AF.winners()["gnomian guard"] = "scorch" -- …then seed a known winner
   AF.on_fight(90, ENEMY)                   -- combat start → "c tarrants" (no probe scheduled)
   expect(AF.state().known_winner):eq("scorch")
-  AF.tarrants()                            -- opener landed → skip shards/scorch → nuke the known winner
+  AF.tarrants()                            -- opener landed → skip icebolt/scorch → nuke the known winner
   expect(AF.state().phase):eq("nuke")
   expect(AF.sent[#AF.sent]):eq("c scorch")
   -- keep nuking scorch to the end; the probe spells never appear
   AF.on_fight(40, ENEMY); AF.scorch()
-  for _, cmd in ipairs(seq()) do expect(cmd == "c shards"):eq(false) end
+  for _, cmd in ipairs(seq()) do expect(cmd == "c icebolt"):eq(false) end
 end)
 
 test("engage() with a known winner goes opener → known nuke (no probe)", function()
   AF.reset()
-  AF.winners()["gnomian guard"] = "shards"
+  AF.winners()["gnomian guard"] = "icebolt"
   autofight.engage(ENEMY)                  -- target + opener; opener_primed
   AF.tarrants()                            -- opener landed (engaging)…
   AF.on_fight(90, ENEMY)                   -- …combat starts → primed + known → straight to nuke
   expect(AF.state().phase):eq("nuke")
-  expect(AF.sent[#AF.sent]):eq("c shards")
+  expect(AF.sent[#AF.sent]):eq("c icebolt")
 end)
 
 test("forget(name) drops one entry; forget() clears all", function()
   AF.reset()
   AF.winners()["gnomian guard"] = "scorch"
-  AF.winners()["orc"] = "shards"
+  AF.winners()["orc"] = "icebolt"
   autofight.forget("a Gnomian guard")      -- normalized to "gnomian guard"
   expect(AF.winners()["gnomian guard"]):eq(nil)
-  expect(AF.winners()["orc"]):eq("shards")
+  expect(AF.winners()["orc"]):eq("icebolt")
   autofight.forget()                       -- clear all
   expect(next(AF.winners())):eq(nil)
 end)
@@ -355,16 +355,16 @@ end)
 -- holds ONLY the new fight: exactly the fresh opener. (#==1 distinguishes a real restart from "no
 -- restart, stale scorch still the last thing sent".)
 test("a NAME change mid-combat (no -1) starts the routine over on the new enemy", function()
-  to_shards(); AF.state().aoe_mode = "off"     -- c tarrants, c shards; probing ENEMY (single-target)
-  AF.on_fight(70, ENEMY); AF.shards()          -- → c scorch (mid-probe, scorch in flight)
+  to_icebolt(); AF.state().aoe_mode = "off"     -- c tarrants, c icebolt; probing ENEMY (single-target)
+  AF.on_fight(70, ENEMY); AF.icebolt()          -- → c scorch (mid-probe, scorch in flight)
   AF.on_fight(72, "a crimson topaz")           -- DIFFERENT target, no -1 → start over
   expect(AF.sent[1]):eq("c tarrants")          -- fresh opener on the new enemy
   expect(#AF.sent):eq(1)
 end)
 
 test("a health bar that jumps UP (same name, new instance) also starts over", function()
-  to_shards(); AF.state().aoe_mode = "off"     -- c tarrants, c shards
-  AF.on_fight(70, ENEMY); AF.shards()          -- c scorch
+  to_icebolt(); AF.state().aoe_mode = "off"     -- c tarrants, c icebolt
+  AF.on_fight(70, ENEMY); AF.icebolt()          -- c scorch
   AF.on_fight(6, ENEMY)                         -- previous ape nearly dead
   AF.on_fight(78, ENEMY)                        -- same name but 6→78 jump ⇒ new instance → start over
   expect(AF.sent[1]):eq("c tarrants")
@@ -372,7 +372,7 @@ test("a health bar that jumps UP (same name, new instance) also starts over", fu
 end)
 
 test("ordinary health drops (and a tiny up-bounce) never restart or cast", function()
-  to_shards()                                  -- c tarrants, c shards
+  to_icebolt()                                  -- c tarrants, c icebolt
   local before = #AF.sent
   AF.on_fight(70, ENEMY)                        -- drop
   AF.on_fight(50, ENEMY)                        -- drop
@@ -393,7 +393,7 @@ end)
 
 test("aoe 'auto': a rollover ALONE does not AOE — AOE is driven by the crowd COUNT", function()
   AF.reset()                                   -- aoe_mode auto, no crowd counted
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → c shards
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → c icebolt
   AF.on_fight(72, "a crimson topaz")           -- rollover, no count set → still single-target
   expect(AF.sent[1]):eq("c tarrants")          -- fresh single-target opener on the new enemy
   expect(AF.aoe_active()):eq(false)
@@ -401,7 +401,7 @@ end)
 
 test("aoe 'auto': crowd whittled to the last one drops back to single target (the exit fix)", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → c shards in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → c icebolt in flight
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- look: 2 hostiles → AOE
   expect(AF.aoe_active()):eq(true)
   expect(AF.state().enemy_est):eq(2)
@@ -444,14 +444,14 @@ end)
 
 test("aoe 'auto': a look showing multiple enemies fighting flips to AOE WITHOUT a kill", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- single-target: c tarrants → c shards in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- single-target: c tarrants → c icebolt in flight
   expect(AF.aoe_active()):eq(false)
   AF.room_fighter("A dire ape")                -- look: one engaged hostile
   expect(AF.aoe_active()):eq(false)            -- one enemy is not a pack
   AF.room_fighter("A dire ape")                -- a SECOND engaged hostile (own line) → pack!
   expect(AF.aoe_active()):eq(true)
-  expect(AF.state().phase):eq("aoe")           -- plan switched immediately (still busy on shards)
-  AF.shards()                                  -- the in-flight shards lands → next cast is AOE
+  expect(AF.state().phase):eq("aoe")           -- plan switched immediately (still busy on icebolt)
+  AF.icebolt()                                  -- the in-flight icebolt lands → next cast is AOE
   expect(AF.sent[#AF.sent]):eq("c frostflower")
 end)
 
@@ -521,13 +521,13 @@ test("autofight.winner sets/overrides the learned attack for a target and persis
   local key = AF.winner_key("undead marsh troll")
   autofight.winner("undead marsh troll", "scorch")
   expect(_AUTOFIGHT.winners[key]):eq("scorch")
-  autofight.winner("undead marsh troll", "shards")     -- re-override to the other element
-  expect(_AUTOFIGHT.winners[key]):eq("shards")
+  autofight.winner("undead marsh troll", "icebolt")     -- re-override to the other element
+  expect(_AUTOFIGHT.winners[key]):eq("icebolt")
   autofight.winner("undead marsh troll", "none")        -- forget → re-probe next time
   expect(_AUTOFIGHT.winners[key]):eq(nil)
 end)
 
-test("autofight.winner rejects a spell that isn't shards/scorch (memory untouched)", function()
+test("autofight.winner rejects a spell that isn't icebolt/scorch (memory untouched)", function()
   AF.reset()
   autofight.winner("a rat", "frostflower")
   expect(_AUTOFIGHT.winners[AF.winner_key("a rat")]):eq(nil)
@@ -540,5 +540,33 @@ test("autofight.winner switches the CURRENT fight immediately (stops casting the
   autofight.winner("a wraith", "scorch")                 -- override mid-fight
   expect(F.winner_spell):eq("scorch")
   expect(F.known_winner):eq("scorch")
+  AF.on_fight_end()
+end)
+
+-- ---- probe-spell swap + versioned winners migration ----------------------------------------------
+test("is_probe_spell knows only the CURRENT probe spells", function()
+  expect(AF.is_probe_spell("icebolt")):truthy()
+  expect(AF.is_probe_spell("scorch")):truthy()
+  expect(AF.is_probe_spell("shards")):falsy()      -- retired by the icebolt swap
+  expect(AF.is_probe_spell(nil)):falsy()
+end)
+
+test("a RETIRED spell left in the winners table is ignored → the target re-probes (not a stale nuke)", function()
+  AF.reset()
+  AF.winners()["gnomian guard"] = "shards"          -- a pre-swap entry the migration would drop / ignore
+  AF.on_fight(90, ENEMY)                             -- fresh fight vs "a Gnomian guard"
+  AF.tarrants()                                      -- opener landed → 'shards' isn't current → PROBE, don't nuke
+  expect(AF.state().phase):eq("icebolt")
+  expect(AF.sent[#AF.sent]):eq("c icebolt")
+  AF.on_fight_end()
+end)
+
+test("a still-valid winner (scorch) is trusted after the swap — skips the probe", function()
+  AF.reset()
+  AF.winners()["gnomian guard"] = "scorch"          -- scorch survived the swap
+  AF.on_fight(90, ENEMY)
+  AF.tarrants()                                      -- opener → straight to the known nuke, no probe
+  expect(AF.state().phase):eq("nuke")
+  expect(AF.sent[#AF.sent]):eq("c scorch")
   AF.on_fight_end()
 end)

@@ -89,6 +89,7 @@ local function reset_posture() last_posture_cmd, last_posture_at = nil, 0 end
 -- sleep heals fastest. Context aware: only send a command when it actually changes the posture — and
 -- never spams a duplicate while the last one is still in flight (send_posture).
 local function choose_recovery_position()
+  if recovery and recovery.minions_only then return end   -- minion-only recovery never touches YOUR posture
   local player_done = ready(recovery and recovery.pct or nil)
   local cast_pending = minions_pending_spell_heal and minions_pending_spell_heal()
   if player_done then
@@ -124,13 +125,24 @@ local function end_recovery(completed, reason)
   state.recover = false
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
-  recovery.settle, recovery.pct = nil, READY_PCT
+  recovery.settle, recovery.pct, recovery.minions_only = nil, READY_PCT, nil
   if s then if completed then s.resolve() else s.reject(reason or "recovery interrupted") end end
 end
 
 -- Called from the kxwt_prompt trigger on every vitals update: stand + resolve once the target is met.
 -- Factored out (and exposed via _AA_TEST) so the spec can drive completion without the Swift trigger.
 local function maybe_complete_recovery()
+  -- Minion-only recovery (`recover minions`): heal the skeletal minions and finish as soon as none still
+  -- need a cast — YOUR vitals and posture are left entirely alone. Driven off the group roster, not the
+  -- player prompt (minion HP changes with kxwt_group, not kxwt_prompt), so this is also checked there.
+  if recovery.minions_only then
+    if state.recover and not (minions_pending_spell_heal and minions_pending_spell_heal()) then
+      echo("Minions topped off.")
+      end_recovery(true)
+      return true
+    end
+    return false
+  end
   -- Done only when YOU are recovered AND every minion is topped off: skeletal (no-regen) minions we
   -- healed to full, natural-regen minions we simply waited on. Until then, keep resting (and, if the
   -- skeletal minions are now all healed but you still want to sleep for your own vitals, re-pick the
@@ -525,8 +537,9 @@ trigger([[^kxwt_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
 trigger([[^kxwt_group_end$]], function()
   if group_capturing then state.group = group_buf end
   group_capturing = false
-  -- Fresh roster: if we're recovering, this is the cue to (re)pick the next minion to heal.
-  if state.recover then heal_minions_kick() end
+  -- Fresh roster: if we're recovering, this is the cue to (re)pick the next minion to heal, and — since
+  -- minion HP only changes here (not on the player prompt) — to check whether recovery is now done.
+  if state.recover then heal_minions_kick(); maybe_complete_recovery() end
 end)
 
 -- Minion-heal pacing: settle the outstanding cast on the game's own reply lines (see the minion-healing
@@ -1549,6 +1562,32 @@ doc("recover", { sig = "recover([pct]) -> promise", group = "combat",
       .. "the next action with .andThen — e.g. recover(95).andThen(attack('orc')).",
   example = "#recover(95).andThen(attack('orc'))" })
 
+-- recover_minions() — heal JUST your skeletal minions (bolster/soothe) until they're topped off, leaving
+-- your own vitals and posture completely alone (no rest/sleep). Returns a promise that resolves when no
+-- minion still needs a cast (or immediately if none do) and rejects if cancelled/superseded. Shares the
+-- singleton `recovery.settle` slot with recover(), so starting one supersedes the other. Typed: `recover
+-- minions`.
+function recover_minions()
+  return __promise(function(resolve, reject, onCancel)
+    if not minions_pending_spell_heal() then
+      echo("No minions need healing right now."); resolve(); return
+    end
+    if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
+    recovery.settle = { resolve = resolve, reject = reject }
+    recovery.minions_only, state.recover = true, true
+    echo("Healing your minions — casting until they're topped off (leaving your own vitals alone).")
+    heal_minions_kick()
+    onCancel(function()
+      recovery.settle, recovery.minions_only, state.recover = nil, nil, false
+      reset_minion_heal()
+    end)
+  end, "recover minions")
+end
+doc("recover_minions", { sig = "recover_minions() -> promise", group = "combat",
+  text = "Heal ONLY your skeletal minions (bolster/soothe) until topped off, leaving your own vitals and "
+      .. "posture alone — no rest/sleep. Returns a promise; resolves when no minion needs a cast. Typed "
+      .. "form: `recover minions` (and `recover minions off` to stop)." })
+
 -- Aliases: `state` dumps the snapshot; `recover` rests/sleeps until ready, then auto-stands.
 alias([[^state$]], function() echo(describe_state()) end)
 -- `recover` — sit/sleep to heal and STAND automatically once every vital is back to 90%+ (the auto-stand
@@ -1574,6 +1613,22 @@ alias([[^autoassist\s*(\w*)$]], function(_, arg)
   elseif a ~= "" then echo("Usage: autoassist [on|off]"); return end
   echo("Auto-assist is " .. (state.auto_assist and "ON" or "OFF")
     .. " — I " .. (state.auto_assist and "will" or "won't") .. " `assist` when your minions are fighting and you aren't.")
+end)
+
+-- `recover minions` — heal ONLY your minions (bolster/soothe), leaving your own vitals/posture alone.
+-- `recover minions off` stops it. (More specific than `^recover$`, so it wins the alias match.)
+alias([[^recover minions$]], function()
+  if state.recover then
+    echo("Already recovering — 'recover off' to stop.")
+  elseif not minions_pending_spell_heal() then
+    echo("No minions need healing right now.")
+  else
+    recover_minions()   -- promise-backed, so it shows in the promise widget as "recover minions"
+  end
+end)
+alias([[^recover minions off$]], function()
+  if state.recover then echo("Ending minion healing."); end_recovery(false, "cancelled")
+  else echo("Not recovering.") end
 end)
 
 -- `recover off` — the only way to end an in-progress recovery (bare `recover` no longer toggles).

@@ -392,8 +392,17 @@ final class TerminalService {
         if lastTopHeight > 0 { out += clearRows(from: 1, through: lastTopHeight + 1) }
         if lastOutputBottom >= 0 { out += clearRows(from: lastOutputBottom + 1, through: l.height) }
         out += "\u{1B}[\(l.regionTop);\(l.outputBottom)r"      // scroll region = the output band only
-        out += "\u{1B}[\(l.outputBottom);1H\u{1B}7"            // park output cursor at region bottom, save it
         writeToStandardOut(data: Data(out.utf8))
+        // REPAINT the output band from the scrollback tail at the NEW geometry. Without this, a region that
+        // shrinks — e.g. the bottom panel gaining a widget row, pushing the scroll divider up — leaves the
+        // old bottom output line stranded on what is now the divider row, so it reads as "a line got
+        // overwritten". Repainting shifts the visible tail correctly (top line scrolls off, nothing lost),
+        // and re-parks the output cursor AFTER the last line's text so the next write continues cleanly
+        // (partial line) or on a fresh row (complete line) — same as resumeLive.
+        let rows = physicalRows(width: l.width)
+        paintRegion(l, rows: rows)                             // scrollOffset == 0 here → the live tail
+        let col = visibleLength(rows.last ?? "") + 1
+        writeToStandardOut(data: Data("\u{1B}[\(l.outputBottom);\(col)H\u{1B}7".utf8))  // re-park + save output cursor
         lastTopHeight = l.topHeight
         lastOutputBottom = l.outputBottom
         drawFurniture(l)
