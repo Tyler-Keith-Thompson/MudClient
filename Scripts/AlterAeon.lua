@@ -24,6 +24,7 @@ do
     fighting = false,
     opponents = {},                      -- inferred multi-opponent tracker (name -> {pct,exact,t})
     spells = {}, recover = false,
+    lifetapping = false,                 -- true while a `lifetap` bleed is in progress (recovery mana boost)
     inventory = {}, inv_known = false,   -- kxwt does NOT report inventory; we parse it from `inventory` output
     equipment = {}, eq_known = false,    -- nor what's worn/wielded; parsed from `equipment` output
     group = {},                          -- roster of you + pets/groupmates (kxwt_group_start..end)
@@ -201,6 +202,10 @@ recovery = { pct = READY_PCT, settle = nil }
 local function end_recovery(completed, reason)
   state.recover = false
   reset_narration()
+  -- A recovery-driven lifetap must not outlive the recovery. On completion the auto-`stand` already binds
+  -- the wound in-game; on an interrupt (combat/move) nothing else stops the bleed, so do it explicitly.
+  if state.lifetapping then send("lifetap stop") end
+  state.lifetap_manafull = false   -- clear the "mana almost full" suppression for the next recovery
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
   recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
@@ -240,6 +245,73 @@ local function maybe_complete_recovery()
   -- actually deepens the posture, so this is a no-op on the common tick.
   if state.recover then choose_recovery_position() end
   return false
+end
+
+-- ---- Lifetap: bleed surplus HP into mana during recovery ----------------------------------------
+--
+-- `lifetap <hp>` is a necromancer skill that trades HP for mana over time (a stoppable bleed, disallowed
+-- in combat, cancelled if you fall asleep). During a mana-limited rest that HP is pure surplus — it regens
+-- back for free — so we dump it into mana to finish recovering faster. Two hard rules, per the user:
+--   * never bleed past a floor of LIFETAP_FLOOR of max HP (half + a buffer, so a stray hit mid-bleed can't
+--     dip you under half);
+--   * always issue a direct HP amount (`lifetap <n>`), never open-ended — we tap the whole surplus down to
+--     the floor in one shot ("max safe chunk"), and re-tap on later ticks once HP has regenerated back up.
+-- Gated to necromancers who actually have the skill (level >= 21); self-disables on everyone else.
+local LIFETAP_FLOOR     = 0.55   -- fraction of max HP we refuse to bleed below (half + buffer)
+local LIFETAP_MIN       = 15     -- don't start a bleed for a surplus smaller than this (avoid churn)
+local LIFETAP_MIN_LEVEL = 21     -- necromancer level the lifetap skill unlocks at
+
+-- Round to nearest (not ceil) so the floor reads as a clean N% of max HP — `100 * 0.55` is 55.0000…1 in
+-- double, and ceil would surprise a reader with 56. The buffer above half absorbs the sub-HP rounding.
+local function lifetap_floor_hp() return math.floor((state.maxhp or 0) * LIFETAP_FLOOR + 0.5) end
+local function has_lifetap()
+  local n = state.classes and state.classes.Necromancer
+  return n and (n.level or 0) >= LIFETAP_MIN_LEVEL
+end
+
+-- Should a lifetap bleed be running RIGHT NOW? True only during an active recovery whose mana is still
+-- below target, while awake (sleep cancels the bleed) and out of combat, with HP still above the floor.
+-- Used both to keep an in-flight bleed alive and — with the surplus check below — to decide to start one.
+local function lifetap_wanted()
+  if not state.recover or state.fighting then return false end
+  if state.lifetap_manafull then return false end                        -- game refused: mana already ~full
+  if recovery and recovery.minions_only then return false end            -- minion-only recovery: never touch YOU
+  if recovery and recovery.stat and recovery.stat ~= "mana" then return false end  -- `recover hp` must not bleed HP
+  if not has_lifetap() then return false end
+  if recovery_depth(state.position) >= 2 then return false end            -- asleep → can't tap
+  local frac = (recovery and recovery.pct) or READY_PCT
+  if pct(state.mana, state.maxmana) >= frac then return false end         -- mana already at target → done
+  return (state.hp or 0) > lifetap_floor_hp()                             -- must have room above the floor
+end
+
+-- The HP amount to bleed if we START a fresh tap now, or nil if we shouldn't. "Max safe chunk": the whole
+-- surplus above the floor, but only if it clears LIFETAP_MIN (a tap too small to matter just churns rounds).
+local function lifetap_amount()
+  if not lifetap_wanted() then return nil end
+  local surplus = (state.hp or 0) - lifetap_floor_hp()
+  if surplus < LIFETAP_MIN then return nil end
+  return surplus
+end
+
+-- Run every prompt tick during recovery. Start a bleed when there's safe surplus and mana still lags; stop
+-- an in-flight bleed the moment it's no longer wanted (mana hit target, we're about to sleep, HP at floor).
+-- Only acts on transitions (start once, stop once) because state.lifetapping gates the send — so no per-tick
+-- spam, and the echo below narrates only when something actually changes.
+local function maybe_lifetap()
+  if state.lifetapping then
+    if not lifetap_wanted() then
+      send("lifetap stop")
+      if echo then echo("\27[36m[recover]\27[0m mana's topped off — binding the wound and stopping lifetap") end
+    end
+    return
+  end
+  local amt = lifetap_amount()
+  if amt then
+    send("lifetap " .. amt)
+    if echo then echo(string.format(
+      "\27[36m[recover]\27[0m tapping %d hp into mana (keeping you above %d%% hp)",
+      amt, math.floor(LIFETAP_FLOOR * 100 + 0.5))) end
+  end
 end
 
 -- ---- Minion healing during recovery -------------------------------------------------------------
@@ -658,6 +730,9 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              reset_posture = reset_posture,
              ticks_to_target = ticks_to_target, cast_beats_waiting = cast_beats_waiting,
              self_cast_wanted = self_cast_wanted, try_self_cast = try_self_cast,
+             lifetap_wanted = lifetap_wanted, lifetap_amount = lifetap_amount,
+             maybe_lifetap = maybe_lifetap, lifetap_floor_hp = lifetap_floor_hp,
+             has_lifetap = has_lifetap, LIFETAP_FLOOR = LIFETAP_FLOOR, LIFETAP_MIN = LIFETAP_MIN,
              pick_self_cast = pick_self_cast, reset_narration = reset_narration,
              regen_cache = regen_cache, regen_key = regen_key, regen_fresh = regen_fresh,
              total_level = total_level, ensure_regen = ensure_regen, cache_regen = cache_regen,
@@ -774,6 +849,9 @@ trigger([[^kxwt_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]], function(_, chp, m
   state.mana, state.maxmana = tonumber(cm), tonumber(mm)
   state.stam, state.maxstam = tonumber(cs), tonumber(ms)
   maybe_complete_recovery()
+  -- After completion checks (which may have stood us up and ended recovery): if we're still recovering,
+  -- consider bleeding surplus HP into mana. Guarded on state.recover so a just-finished recovery won't tap.
+  if state.recover then maybe_lifetap() end
 end)
 
 -- Position. Starting a recovery sits/sleeps as appropriate.
@@ -785,6 +863,24 @@ trigger([[^kxwt_position (.+)$]], function(_, p)
   -- Regen rates are per-posture — refresh them (from cache, else a gagged query) so the cast-vs-wait
   -- decision uses the right numbers for this posture.
   if state.recover and changed and (not state.regen or state.regen.position ~= p) then ensure_regen() end
+end)
+
+-- Lifetap bleed state (drives maybe_lifetap's start/stop transitions). The bleed begins on the cut, and
+-- ends when we bind the wound — whether we asked to (`lifetap stop`) or the game did it for us (falling
+-- asleep, or finishing the requested amount both print the same bind line).
+trigger([[^You make a shallow yet bloody cut and begin tapping your life\.]], function()
+  state.lifetapping = true
+end)
+trigger([[^You are busy tapping your life for mana\.]], function()
+  state.lifetapping = true               -- defensive: a bleed is running even if we missed the start line
+end)
+trigger([[^You quickly bind your wound and stop tapping your life\.]], function()
+  state.lifetapping = false
+end)
+-- The game refuses the bleed when mana is essentially capped. Nothing bled, so HP/mana won't move — set a
+-- suppression flag (cleared at the next recovery boundary) so we don't re-issue `lifetap` every tick.
+trigger([[^Your mana is already almost full\.]], function()
+  state.lifetapping, state.lifetap_manafull = false, true
 end)
 
 -- Combat. -1 = not fighting; otherwise "<pct> <gender> <name>".
