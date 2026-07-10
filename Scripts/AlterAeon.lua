@@ -138,15 +138,17 @@ local function choose_recovery_position()
     and minions_pending_spell_heal and minions_pending_spell_heal()
   if player_done then
     -- You're fully recovered; you're only still "recovering" because the minions aren't all topped off.
-    -- There's no point staying asleep (or even resting) when you're full: either cast on the skeletal
-    -- ones or just wait standing on the natural-regen ones.
+    -- There's no point staying asleep (or even resting) when you're full: cast on any minion that still
+    -- needs it — the skeletal ones, AND (now that you have surplus mana) our own natural-regen tank/pets
+    -- via minion_heal_eligible. Only stand-and-wait when nothing of OURS is left to heal.
     if cast_pending then
       narrate("posture", "done-minions-cast", "you're topped off — resting to finish healing your minions")
-      -- You must cast bolster/soothe on the skeletal minions, which you can't do asleep — wake to resting.
+      -- You must cast bolster/soothe on the minions, which you can't do asleep — wake to resting.
       if recovery_depth(state.position) >= 2 then send_posture("rest") end
     else
       narrate("posture", "done-minions-wait", "you're topped off — standing, waiting on your minions to regen")
-      -- Only natural-regen minions left to wait on — nothing for you to do, so stand back up.
+      -- Nothing of ours left to actively heal (only other players / given-up minions regen on their
+      -- own) — nothing for you to do, so stand back up.
       if recovery_depth(state.position) > 0 then send_posture("stand") end
     end
     return
@@ -425,13 +427,32 @@ local function minion_target_word(name)
   return (name or ""):match("(%S+)%s*$") or ""
 end
 
--- () -> bool: any skeletal (no-regen) minion still below its ready target — used to keep posture at rest.
+-- () -> bool: are YOUR own vitals at the recovery target? (stat_ready against the active threshold.)
+local function player_recovered()
+  return stat_ready(recovery and recovery.pct or nil)
+end
+
+-- Should we spend mana casting a heal on this minion RIGHT NOW? Skeletal/bone constructs always — they
+-- have no natural regen, so a cast is the only way their HP comes back. Everything else of OURS (the
+-- flesh beast / clay man tank, summoned pets) ONLY once YOU are fully recovered: then there's surplus
+-- mana, so top the tank off with bolster/soothe instead of idling while it slowly self-regens (the
+-- old "standing, waiting on your minions to regen" case). Gated on the M group flag so we never start
+-- healing OTHER players in the group — only our own minions. (`f`, if given, is the minion's HP frac,
+-- to avoid recomputing pct.)
+local function minion_heal_eligible(m, f)
+  if is_self_row(m) then return false end
+  f = f or pct(m.hp, m.maxhp)
+  if f >= minion_ready_target(m) then return false end
+  if minion_needs_spell_heal(m.name) then return true end            -- skeletal: always (no natural regen)
+  if (m.flags or ""):find("M", 1, true) == nil then return false end -- only OUR minions (M) get surplus heals
+  return player_recovered()                                          -- natural-regen: only when you're topped off
+end
+
+-- () -> bool: any minion we should be casting a heal on right now — skeletal always, our natural-regen
+-- minions once you're topped off. Keeps the recovery posture at rest (awake to cast) rather than asleep.
 minions_pending_spell_heal = function()
   for _, m in ipairs(state.group or {}) do
-    if not is_self_row(m) and minion_needs_spell_heal(m.name)
-       and pct(m.hp, m.maxhp) < minion_ready_target(m) then
-      return true
-    end
+    if minion_heal_eligible(m) then return true end
   end
   return false
 end
@@ -457,14 +478,14 @@ reset_minion_heal = function()
   minion_heal.token = minion_heal.token + 1   -- kill any in-flight timeout
 end
 
--- Pick the most-hurt skeletal minion still below its ready target (skipping any keyword we gave up on).
+-- Pick the most-hurt heal-eligible minion still below its ready target (skipping any keyword we gave up
+-- on). Eligibility (minion_heal_eligible) is skeletal-always plus our natural-regen minions once you're
+-- topped off, so a full player rolls straight onto healing the tank rather than just waiting on it.
 local function most_hurt_spell_minion()
   local best, best_frac
   for _, m in ipairs(state.group or {}) do
-    if not is_self_row(m) and minion_needs_spell_heal(m.name)
-       and pct(m.hp, m.maxhp) < minion_ready_target(m)
-       and not minion_heal.blocked[minion_target_word(m.name)] then
-      local f = pct(m.hp, m.maxhp)
+    local f = pct(m.hp, m.maxhp)
+    if minion_heal_eligible(m, f) and not minion_heal.blocked[minion_target_word(m.name)] then
       if not best_frac or f < best_frac then best, best_frac = m, f end
     end
   end

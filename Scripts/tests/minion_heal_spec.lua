@@ -56,15 +56,41 @@ end)
 
 -- ---- readiness gates -----------------------------------------------------------------------------
 
-test("minions_pending_spell_heal: only a below-full SKELETAL minion counts", function()
+test("minions_pending_spell_heal: skeletal always; our natural-regen minion only when YOU'RE topped off", function()
+  -- Player full → a hurt regen minion of OURS is now worth casting on (surplus mana tops the tank off).
   with_group({ me(), minion("A flesh beast", 100, 485) }, {}, function()
-    expect(AA.minions_pending_spell_heal()):falsy()          -- a hurt regen minion doesn't count
+    expect(AA.minions_pending_spell_heal()):truthy()
   end)
+  -- Player still low (mana) → don't spend it on a regen minion yet; let it self-regen while we recover.
+  with_group({ me(), minion("A flesh beast", 100, 485) }, { mana = 40 }, function()
+    expect(AA.minions_pending_spell_heal()):falsy()
+  end)
+  -- A hurt regen minion that ISN'T ours (no M group flag — another player) is never our job.
+  with_group({ me(), { name = "Ally", hp = 100, maxhp = 485, flags = "P" } }, {}, function()
+    expect(AA.minions_pending_spell_heal()):falsy()
+  end)
+  -- Skeletal minions still count regardless of your state (no natural regen — a cast is the only heal).
   with_group({ me(), minion("A skeletal spider", 30, 39) }, {}, function()
     expect(AA.minions_pending_spell_heal()):truthy()
   end)
   with_group({ me(), minion("A skeletal spider", 39, 39) }, {}, function()
     expect(AA.minions_pending_spell_heal()):falsy()          -- already full
+  end)
+end)
+
+test("full player actively heals a hurt natural-regen minion: bolster when low, soothe near full", function()
+  with_group({ me(), minion("A flesh beast", 100, 485) }, {}, function(sent)   -- ~21% → bolster
+    AA.try_cast_heal()
+    expect(sent[1]):eq("c bolster beast")
+  end)
+  with_group({ me(), minion("A flesh beast", 400, 485) }, {}, function(sent)   -- ~82% → soothe (>= BOLSTER_BELOW)
+    AA.try_cast_heal()
+    expect(sent[1]):eq("c soothe beast")
+  end)
+  -- While YOU still need mana, leave the regen minion alone — don't spend recovery mana on it yet.
+  with_group({ me(), minion("A flesh beast", 100, 485) }, { mana = 40 }, function(sent)
+    AA.try_cast_heal()
+    expect(#sent):eq(0)
   end)
 end)
 
@@ -235,14 +261,19 @@ test("full player with a skeletal minion still to heal WAKES from sleep to rest"
   expect(sent[1]):eq("rest")   -- can't cast asleep → drop to resting
 end)
 
-test("full player waiting only on natural-regen minions STANDS UP (nothing to do)", function()
+test("full player with a hurt natural-regen minion WAKES to rest to heal it (surplus mana)", function()
   local sent = choose_with("sleeping", { me(), minion("A flesh beast", 300, 485) })
-  expect(sent[1]):eq("stand")
+  expect(sent[1]):eq("rest")   -- topped off → wake and cast on the tank instead of just waiting
 end)
 
-test("full player already standing while waiting on regen minions sends nothing", function()
+test("full player already standing while healing a regen minion sends nothing (standing can cast)", function()
   local sent = choose_with("standing", { me(), minion("A flesh beast", 300, 485) })
-  expect(#sent):eq(0)
+  expect(#sent):eq(0)          -- already awake enough to cast; try_cast_heal drives the actual heal
+end)
+
+test("full player only waiting on ANOTHER PLAYER's regen (not ours) stands up — nothing to heal", function()
+  local sent = choose_with("sleeping", { me(), { name = "Ally", hp = 300, maxhp = 485, flags = "P" } })
+  expect(sent[1]):eq("stand")  -- no M-flag minion to heal → nothing to do → stand
 end)
 
 test("recovery doesn't complete until skeletal minions are topped off", function()
