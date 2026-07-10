@@ -49,9 +49,10 @@ extension Character {
     }
 }
 
-extension AsyncSequence where Self: Sendable, Element == String {
-    func processScriptInput() -> AnyAsyncSequence<String> {
-        compactMap { rawInput -> String? in
+extension AsyncSequence where Self: Sendable, Element == OutboundCommand {
+    func processScriptInput() -> AnyAsyncSequence<OutboundCommand> {
+        compactMap { command -> OutboundCommand? in
+            let rawInput = command.text
             let interpreter = Container.scriptInterpreter()
             // Trim surrounding whitespace once, up front, so every downstream stage sees the clean
             // command: anchored aliases (`^recover$`) match "recover " too, `;`-split segments like the
@@ -67,6 +68,12 @@ extension AsyncSequence where Self: Sendable, Element == String {
             }
             // Let scripts observe the typed command without swallowing it (e.g. the AI pilot).
             interpreter.engine.notifyUserInput(input)
+            // `-|` on its own — the inverse of `+|`: drop the last segment off the current in-flight
+            // promise chain. Checked before the pipe cases since "-|" also contains a pipe.
+            if input == "-|" {
+                interpreter.engine.popPipe()
+                return nil
+            }
             // A leading `+|` APPENDS to the current in-flight promise ("recover", then "+| explore" ⇒
             // recover | explore). Checked before the plain `|` case, since "+| x" also contains a pipe.
             if input.hasPrefix("+|") {
@@ -89,11 +96,14 @@ extension AsyncSequence where Self: Sendable, Element == String {
             if interpreter.engine.processAlias(input) {
                 return nil
             }
-            return input
+            // Surviving command: carry the (trimmed) text plus its origin on to the transmit point.
+            return OutboundCommand(text: input, origin: command.origin)
         }
         .eraseToAnyAsyncSequence()
     }
+}
 
+extension AsyncSequence where Self: Sendable, Element == String {
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
         map { output in
             let lines = output
@@ -112,6 +122,11 @@ extension AsyncSequence where Self: Sendable, Element == String {
             // history via is_live() — the replay() path deliberately doesn't set this, so speech and
             // other live-only reactions stay silent on history.
             let out = LiveGate.shared.live { lines.compactMap { engine.processLine($0) } }
+            // Record the DISPLAYED server output (post-gag/rewrite) into the searchable transcript for
+            // `#grep`/`#received`. Gagged protocol lines (kxwt_*) are already dropped by compactMap, so
+            // this stays human-meaningful rather than filling with wire noise.
+            let store = Container.transcriptStore()
+            for line in out { store.recordReceived(line) }
             return out.joined(separator: "\n")
         }
         .eraseToAnyAsyncSequence()

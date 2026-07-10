@@ -46,7 +46,10 @@ struct Connect: ParsableCommand {
             for try await command in stream {
                 // Consult the optional Lua `on_send` hook per final atomic command (may drop it,
                 // replace it, or inject additional commands), then transmit and log what's sent.
-                for outbound in Container.scriptInterpreter().engine.filterOutbound(command) {
+                for outbound in Container.scriptInterpreter().engine.filterOutbound(command.text) {
+                    // Record every wire-level send with the origin of the command that produced it
+                    // (on_send-injected sends inherit that origin) for the searchable transcript.
+                    Container.transcriptStore().recordSent(outbound, origin: command.origin)
                     Container.sessionLog().logCommand(outbound)
                     Container.connectionManager().send(outbound)
                 }

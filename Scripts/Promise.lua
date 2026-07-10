@@ -123,6 +123,25 @@ local function current_promise()
   return best
 end
 
+-- Pop the TAIL segment off a chain (the `-|` operator, inverse of `+|`). Detach the last continuation
+-- from its parent so an unstarted last segment never runs, and cancel the tail itself — running its
+-- action's cancel hook if the segment already STARTED (e.g. `attack` → autofight.off()) — WITHOUT the
+-- usual upstream cascade, so the earlier segments keep running. cancel() climbs `_parent`, so we sever
+-- the tail's parent link first. Returns the new tail (the parent), or nil when `tail` had no parent (it
+-- WAS the whole chain, so it's simply cancelled). No-op-safe on nil.
+local function pop_tail(tail)
+  if not tail then return nil end
+  local parent = tail._parent
+  if parent and parent._handlers then                 -- drop the handler that spawns this tail (if parent
+    local hs = parent._handlers                        -- is still pending; once it settles _handlers is
+    for i = #hs, 1, -1 do if hs[i].result == tail then table.remove(hs, i) end end  -- already cleared)
+  end
+  tail._parent = nil                                   -- sever upstream so cancel() can't climb the chain
+  tail.cancel()                                        -- cancel just this segment (+ its running hook)
+  untrack(tail)
+  return parent
+end
+
 -- Core constructor (no auto-start). `builder` (below) wraps this to add the next-tick auto-start that
 -- makes a bare `recover(95)` run on its own; result promises from andThen/finally/timeout use `make`
 -- directly and are driven by their parent, never a timer.
@@ -297,6 +316,7 @@ _G.active_promises = active_promises   -- _G. is REQUIRED: `active_promises` is 
 _G.__track_promise    = track          -- assignment would just rebind the local, never create the global
 _G.__untrack_promise  = untrack        -- the HUD/pipe look up. (This was the "widget never shows" bug.)
 _G.__current_promise  = current_promise
+_G.__pop_tail         = pop_tail       -- the `-|` operator: drop the tail segment, keep the chain running
 doc("active_promises", { sig = "active_promises() -> { {desc, state}, ... }", group = "combat",
   text = "The in-flight promises for the HUD widget, oldest first: each is { desc, state } where desc "
       .. "is the typed pipe line (e.g. \"recover | explore\") or the action's label, and state is "
@@ -304,4 +324,5 @@ doc("active_promises", { sig = "active_promises() -> { {desc, state}, ... }", gr
 
 _PROMISE_TEST = { make = make, builder = builder, normalize = normalize, is_promise = is_promise,
                   live = live, cancel_all = cancel_all,
-                  active = active_promises, track = track, untrack = untrack, current = current_promise }
+                  active = active_promises, track = track, untrack = untrack, current = current_promise,
+                  pop_tail = pop_tail }

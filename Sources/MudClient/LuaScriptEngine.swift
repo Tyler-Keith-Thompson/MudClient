@@ -239,6 +239,14 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("__pipe_append", [.table(segments.map { .string($0) }, [:])])
     }
 
+    /// `-|` — the inverse of `+|`, an operator on its own: drop the END (last segment) of the current
+    /// in-flight promise chain, cancelling it (and running its cancel hook if it had started) while the
+    /// earlier segments keep running. See bootstrap `__pipe_pop`.
+    func popPipe() {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("__pipe_pop", [])
+    }
+
     /// Consult the optional Lua `on_send(cmd)` hook for one final, atomic outbound command (already
     /// past alias handling and `;` splitting) and return the commands that should actually be
     /// transmitted, in order. No hook defined → `[command]` unchanged. The hook's return value governs
@@ -869,6 +877,29 @@ final class LuaScriptEngine: @unchecked Sendable {
             let lines = Container.terminalService().scrollbackFind(pattern: pat, max: max)
             return [.table(lines.map(LuaValue.string), [:])]
         }
+        // grep(text) — print every transcript line (sent AND received) containing `text` (case-
+        // insensitive substring), each labeled by kind/origin. Backs `#grep foo` and `#grep('foo')`.
+        lua.register("grep") { [weak self] args in
+            guard case .string(let pat)? = args.first, !pat.isEmpty else {
+                self?.onEcho("\u{1B}[31musage: #grep <text>\u{1B}[0m"); return []
+            }
+            self?.echoTranscript(Container.transcriptStore().grep(pat), header: "grep \u{201C}\(pat)\u{201D}")
+            return []
+        }
+        // sent([n]) — print the last n (default 20) commands SENT, labeled by origin (you vs a script).
+        // Backs `#sent` and `#sent 10`.
+        lua.register("sent") { [weak self] args in
+            let n = args.first.flatMap(Self.countArg) ?? 20
+            self?.echoTranscript(Container.transcriptStore().sent(last: n), header: "last \(n) sent")
+            return []
+        }
+        // received([n]) — print the last n (default 20) lines RECEIVED from the server. Backs `#received`
+        // and `#received 10`.
+        lua.register("received") { [weak self] args in
+            let n = args.first.flatMap(Self.countArg) ?? 20
+            self?.echoTranscript(Container.transcriptStore().received(last: n), header: "last \(n) received")
+            return []
+        }
         // bell() — ring the terminal bell.
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
         // spellcheck(word) -> suggestion|nil. Native macOS spell-check (NSSpellChecker, local dictionary
@@ -1273,6 +1304,35 @@ final class LuaScriptEngine: @unchecked Sendable {
     }
     private static func boolArg(_ v: LuaValue?) -> Bool {
         switch v { case .bool(let b)?: return b; case .int(let i)?: return i != 0; default: return false }
+    }
+    /// A count that may arrive as a number OR a string (`#sent 10` legacy-rewrites to `sent("10")`).
+    private static func countArg(_ v: LuaValue) -> Int? {
+        switch v {
+        case .int(let i): return Int(i)
+        case .number(let d): return Int(d)
+        case .string(let s): return Int(s.trimmingCharacters(in: .whitespaces))
+        default: return nil
+        }
+    }
+
+    /// Render transcript entries as labeled display lines (sent = origin-tagged, received = dimmed).
+    /// Static + pure so the labeling can be unit-tested without the echo sink.
+    static func formatTranscript(_ entries: [TranscriptStore.Entry]) -> [String] {
+        entries.map { e in
+            switch (e.kind, e.origin) {
+            case (.sent, .user):   return "\u{1B}[33m» you\u{1B}[0m \(e.text)"
+            case (.sent, .script): return "\u{1B}[36m» lua\u{1B}[0m \(e.text)"
+            case (.sent, nil):     return "\u{1B}[33m»\u{1B}[0m \(e.text)"
+            case (.received, _):   return "\u{1B}[90m«\u{1B}[0m \(e.text)"
+            }
+        }
+    }
+
+    private func echoTranscript(_ entries: [TranscriptStore.Entry], header: String) {
+        onEcho("\u{1B}[1m── \(header) (\(entries.count)) ──\u{1B}[0m")
+        let lines = Self.formatTranscript(entries)
+        if lines.isEmpty { onEcho("\u{1B}[90m  (nothing)\u{1B}[0m") }
+        else { for line in lines { onEcho(line) } }
     }
 
     // MARK: - Timers

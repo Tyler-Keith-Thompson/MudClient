@@ -30,7 +30,7 @@ final class TranscriptStore: @unchecked Sendable {
     private var entries: [Entry] = []
     private let limit: Int
 
-    fileprivate init(limit: Int = 10_000) { self.limit = limit }
+    init(limit: Int = 10_000) { self.limit = limit }
 
     // MARK: Recording
 

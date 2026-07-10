@@ -1674,7 +1674,7 @@ function in_combat() return engaged() end
 -- We stop when there's no corpse at the current index. Each step advances off a real STREAM line; the
 -- watchdog below is only a last-resort net for a missed line.
 local corpse = { on = true, active = false, idx = 1, step = nil, room = nil,
-                 killed = false, settle = nil, watchdog = nil,
+                 killed = false, settle = nil, promise = nil, watchdog = nil,
                  with_items = {}, cur_name = nil }
 if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the empty/has-loot decision is unit-tested
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
@@ -1700,6 +1700,7 @@ end
 -- the promise widget, whether the pass finished naturally or was stopped (off / room change).
 function corpse_done()
   corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
+  corpse.promise = nil
   if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   local s = corpse.settle; corpse.settle = nil
   if s then s.resolve() end
@@ -1720,6 +1721,7 @@ function corpse_start()
       onCancel(function() corpse.settle = nil; if corpse.active then corpse_done() end end)
     end, "harvesting corpses")
     if p and p.__start then p.__start() end
+    corpse.promise = p   -- keep the handle so turning corpse OFF mid-pass can CANCEL (abort) it, not resolve it
   end
   corpse_process()
 end
@@ -1834,7 +1836,18 @@ function corpse_command(verb, rest)
     corpse.on = true
     echo("[kxwt] corpse automation ON — out of combat, per corpse (by index): harvest teeth -> harvest spellcomps -> (if EMPTY) bsac -> sac; corpses holding loot are left intact (never `get all`, never sac loot)")
   elseif m == "off" then
-    corpse.on = false; corpse_done()
+    corpse.on = false
+    if corpse.active then
+      -- Mid-pass: if a timed action is actually running (state.action >= 50 — the same "busy" the HUD
+      -- can't-cast widget shows, e.g. a harvest in progress), interrupt it on the MUD with `stop`.
+      if (state.action or 0) >= 50 then send("stop") end
+      -- Abort the pass by CANCELLING its promise — not resolving it, since the harvest didn't finish.
+      -- cancel() runs the onCancel hook, which tears the pass state down (corpse_done) and cascades the
+      -- cancellation to anything chained off it. Falls back to corpse_done() if the promise layer is off.
+      if corpse.promise and corpse.promise.cancel then corpse.promise.cancel() else corpse_done() end
+    else
+      corpse_done()   -- nothing running; keep the original tidy-up
+    end
     echo("[kxwt] corpse automation OFF")
   else
     echo(string.format("[kxwt] corpse %s | active=%s idx=%d step=%s",

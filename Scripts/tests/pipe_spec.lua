@@ -136,3 +136,60 @@ test("+| with nothing in flight falls back to just running the segments", functi
   expect(cur ~= nil):eq(true)
   expect(cur._track_desc):eq("wtestfallback")
 end)
+
+-- ---- -| : drop the tail segment off the current chain (inverse of +|) -----------------------------
+
+local function present(d)
+  for _, e in ipairs(_PROMISE_TEST.active()) do if e.desc == d then return true end end
+  return false
+end
+
+test("-| drops the last (unstarted) segment; the earlier segment keeps running and never spawns it", function()
+  _PROMISE_TEST.cancel_all()
+  local head = _PROMISE_TEST.builder(function(res) _G.__pp_res = res end, "wpophead")
+  head.__start()                                       -- running; the current
+  local sent, real_send = {}, send; _G.send = function(c) sent[#sent + 1] = c end
+  _PIPE_TEST.append({ "wpoptail" })                    -- chain: wpophead | wpoptail (tail still cold)
+  expect(present("wpophead | wpoptail")):eq(true)
+  local ok = _PIPE_TEST.pop()                          -- like typing `-|`
+  expect(ok):eq(true)
+  expect(present("wpophead | wpoptail")):eq(false)     -- the tail row is gone
+  expect(present("wpophead")):eq(true)                 -- back to just the head, still running
+  _G.__pp_res()                                        -- head resolves → the dropped tail must NOT run
+  expect(#sent):eq(0)
+  _G.send, _G.__pp_res = real_send, nil
+end)
+
+test("-| on a one-segment chain cancels it and runs its cancel hook", function()
+  _PROMISE_TEST.cancel_all()
+  local cancelled = false
+  local solo = _PROMISE_TEST.builder(function(_, _, onCancel) onCancel(function() cancelled = true end) end, "wpopsolo")
+  solo.__start()
+  expect(_PROMISE_TEST.current() == solo):eq(true)
+  expect(_PIPE_TEST.pop()):eq(true)
+  expect(solo.state):eq("cancelled")
+  expect(cancelled):eq(true)                           -- the sole segment's cancel hook fired
+  expect(_PROMISE_TEST.current()):eq(nil)              -- nothing in flight now
+end)
+
+test("-| cancels an ALREADY-STARTED tail (runs its cancel hook), leaving the finished head alone", function()
+  _PROMISE_TEST.cancel_all()
+  local disarmed = false
+  _G.wpopact = function()
+    return _PROMISE_TEST.builder(function(_, _, onCancel) onCancel(function() disarmed = true end) end, "wpopact")
+  end
+  local head = _PROMISE_TEST.builder(function(res) _G.__pp2_res = res end, "wpophd2")
+  head.__start()
+  _PIPE_TEST.append({ "wpopact" })                     -- head | wpopact
+  _G.__pp2_res()                                       -- head resolves → wpopact is invoked + started (adopted)
+  expect(disarmed):eq(false)                           -- tail running, hook not fired yet
+  expect(_PIPE_TEST.pop()):eq(true)
+  expect(disarmed):eq(true)                            -- the running tail's cancel hook fired
+  _G.wpopact, _G.__pp2_res = nil, nil
+end)
+
+test("-| with nothing in flight is a harmless no-op", function()
+  _PROMISE_TEST.cancel_all()
+  expect(_PROMISE_TEST.current()):eq(nil)
+  expect(_PIPE_TEST.pop()):eq(false)
+end)

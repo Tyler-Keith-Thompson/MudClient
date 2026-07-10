@@ -496,6 +496,17 @@ doc("scrollback_find", { sig = "scrollback_find(pattern[, max]) -> array", group
   text = "Up to `max` (default 100) most-recent scrollback lines matching the pattern (ANSI stripped), oldest-first.",
   example = "scrollback_find(\"tells you\", 10)" })
 
+-- session transcript (sent + received) search
+doc("grep", { sig = "grep(text)", group = "history",
+  text = "Print every transcript line — SENT and RECEIVED — containing `text` (case-insensitive substring), each labeled by kind and (for sends) origin: you-typed vs a script/the AI pilot.",
+  example = "#grep orc" })
+doc("sent", { sig = "sent([n])", group = "history",
+  text = "Print the last n (default 20) commands sent to the server, each labeled by origin (you vs a script/the AI pilot).",
+  example = "#sent 10" })
+doc("received", { sig = "received([n])", group = "history",
+  text = "Print the last n (default 20) lines received (displayed) from the server.",
+  example = "#received 10" })
+
 -- logging / replay
 doc("log_start", { sig = "log_start(path[, opts]) -> bool", group = "logging",
   text = "Log displayed server lines to a file (appends). opts = { timestamps=bool, ansi=bool, commands=bool }, all default false.",
@@ -810,9 +821,37 @@ function __pipe_append(segments)
   return true
 end
 
--- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder + append. (Split +
--- escaping is Swift's job now — InputService.pipeSegments — tested on that side.)
-_PIPE_TEST = { run = pipe_run_segment, pipe = __pipe, append = __pipe_append, callable = pipe_is_callable }
+-- `-|` — the inverse of `+|`: an operator on its own that removes the END (last segment) of the current
+-- in-flight promise chain. So after `recover | explore` you can `-|` to drop `explore` and just keep
+-- recovering; another `-|` drops `recover` too (a one-segment chain is simply cancelled). If the dropped
+-- segment had already STARTED, its cancel hook runs (e.g. `attack` disarms auto-fight). The earlier
+-- segments keep running untouched. Returns true if anything was trimmed.
+function __pipe_pop()
+  local tail = __current_promise and __current_promise()
+  if not tail then
+    if echo then echo("\27[90m[pipe] nothing in flight to trim\27[0m") end
+    return false
+  end
+  local desc = tail._track_desc or tail.label or "?"
+  local dropped = (desc:match("([^|]*)$") or desc):match("^%s*(.-)%s*$")   -- text after the last '|'
+  local parent = __pop_tail and __pop_tail(tail)
+  if parent then
+    -- Retitle the widget row to the chain minus its last segment (cosmetic; falls back if the desc has
+    -- no '|' to split on, e.g. a segment that itself contained an escaped pipe).
+    local trimmed = desc:match("^(.-)%s*|[^|]*$")
+    trimmed = (trimmed and trimmed ~= "" and trimmed) or parent._track_desc or parent.label or dropped
+    if __track_promise then __track_promise(parent, trimmed) end
+    if echo then echo("\27[90m[pipe] dropped \27[0m" .. dropped .. "\27[90m — now: \27[0m" .. tostring(trimmed)) end
+  else
+    if echo then echo("\27[90m[pipe] cancelled \27[0m" .. dropped) end
+  end
+  return true
+end
+
+-- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder + append/pop. (Split
+-- + escaping is Swift's job now — InputService.pipeSegments — tested on that side.)
+_PIPE_TEST = { run = pipe_run_segment, pipe = __pipe, append = __pipe_append, pop = __pipe_pop,
+               callable = pipe_is_callable }
 
 -- scripts / documentation
 doc("load", { sig = "load(path)", group = "scripts",

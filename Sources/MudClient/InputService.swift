@@ -10,7 +10,19 @@ import Parsing
 import DependencyInjection
 import Afluent
 
-final class InputService: @unchecked Sendable {    
+/// Where an outbound command came from: the user typed it, or a script / the AI pilot issued it. Known
+/// unambiguously ONLY at the two InputService entry points (`parse(input:)` = user, `send(verbatim:)` =
+/// script); downstream (aliases, pipes, the `on_send` hook) the two are indistinguishable, so we carry
+/// the origin through the command stream rather than trying to recover it later.
+enum CommandOrigin: Sendable { case user, script }
+
+/// One outbound command plus its origin, flowing through the input pipeline to the transmit point.
+struct OutboundCommand: Sendable {
+    let text: String
+    let origin: CommandOrigin
+}
+
+final class InputService: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var _lastCommand: String?
     private var lastCommand: String? {
@@ -24,7 +36,7 @@ final class InputService: @unchecked Sendable {
             _lastCommand = newValue
         }
     }
-    private let (stream, continuation) = AsyncThrowingStream<String, any Swift.Error>.makeStream()
+    private let (stream, continuation) = AsyncThrowingStream<OutboundCommand, any Swift.Error>.makeStream()
     private let parser = Many {
         Many(into: "") { string, fragment in
             string.append(contentsOf: fragment)
@@ -47,13 +59,13 @@ final class InputService: @unchecked Sendable {
     
     private var subscriptions = Set<AnyCancellable>()
     
-    var commandStream: AnyAsyncSequence<String> {
+    var commandStream: AnyAsyncSequence<OutboundCommand> {
         stream.map { [weak self] command in
             guard let self else { return command }
-            if command == "!", let lastCommand {
-                return lastCommand
-            } else if !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                self.lastCommand = command
+            if command.text == "!", let lastCommand {
+                return OutboundCommand(text: lastCommand, origin: command.origin)
+            } else if !command.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.lastCommand = command.text
             }
             return command
         }
@@ -64,7 +76,7 @@ final class InputService: @unchecked Sendable {
     
     func parse(input: String) throws {
         for command in try parser.parse(input) {
-            continuation.yield(command)
+            continuation.yield(OutboundCommand(text: command, origin: .user))
         }
     }
 
@@ -99,7 +111,7 @@ final class InputService: @unchecked Sendable {
     }
     
     func send(verbatim: String) throws {
-        continuation.yield(verbatim)
+        continuation.yield(OutboundCommand(text: verbatim, origin: .script))
     }
     
     func handleSigInt() {

@@ -91,6 +91,42 @@ test("a stall watchdog is armed while harvesting and cleared when the pass ends"
   expect(cleared):eq(true)
 end)
 
+test("corpse OFF mid-pass CANCELS the promise (not resolve) and sends `stop` when busy", function()
+  _PROMISE_TEST.cancel_all()
+  local saved_state, saved_send, sent = state, send, {}
+  state = { opponents = {}, engaged_until = nil, action = 60 }   -- in_combat() false; action>=50 = busy
+  send = function(c) sent[#sent + 1] = c end
+  local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
+  corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
+  corpse_start()                                     -- begins the pass + its tracked promise
+  expect(widget_has("harvesting corpses")):eq(true)
+  corpse_command("corpse", "off")                    -- kxwt.corpse("off") while a harvest is running
+  local stopped = false; for _, c in ipairs(sent) do if c == "stop" then stopped = true end end
+  expect(stopped):eq(true)                           -- busy → interrupt the MUD action
+  expect(widget_has("harvesting corpses")):eq(false) -- promise cancelled → row gone
+  expect(corpse.active):eq(false)
+  for k in pairs(corpse) do corpse[k] = nil end
+  for k, v in pairs(snap) do corpse[k] = v end
+  state, send = saved_state, saved_send
+end)
+
+test("corpse OFF when NOT busy still cancels the pass but sends no `stop`", function()
+  _PROMISE_TEST.cancel_all()
+  local saved_state, saved_send, sent = state, send, {}
+  state = { opponents = {}, engaged_until = nil, action = 0 }     -- not busy
+  send = function(c) sent[#sent + 1] = c end
+  local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
+  corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
+  corpse_start()
+  corpse_command("corpse", "off")
+  local stopped = false; for _, c in ipairs(sent) do if c == "stop" then stopped = true end end
+  expect(stopped):eq(false)
+  expect(widget_has("harvesting corpses")):eq(false)
+  for k in pairs(corpse) do corpse[k] = nil end
+  for k, v in pairs(snap) do corpse[k] = v end
+  state, send = saved_state, saved_send
+end)
+
 test("corpse_start surfaces a 'harvesting corpses' promise; corpse_done settles it off the widget", function()
   _PROMISE_TEST.cancel_all()                       -- clear any leftovers from other specs
   local saved_state, saved_send = state, send

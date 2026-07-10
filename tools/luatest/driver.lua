@@ -25,6 +25,7 @@ for _, n in ipairs({
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
   "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send",
   "log_start", "log_stop", "log_active", "replay",
+  "grep", "sent", "received",
   "speak", "speech_stop",
 }) do stub(n) end
 -- Speech / live-vs-history stubs (SpeechService + SpeechBuiltins). is_live defaults to true so specs
