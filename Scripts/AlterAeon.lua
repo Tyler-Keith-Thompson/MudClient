@@ -1673,10 +1673,82 @@ function in_combat() return engaged() end
 --     own "You start harvesting…" reply, so we only sac the ones we're sure are empty.
 -- We stop when there's no corpse at the current index. Each step advances off a real STREAM line; the
 -- watchdog below is only a last-resort net for a missed line.
+-- ---- learned per-KIND harvest memory (persisted) -------------------------------------------------
+-- We learn which mob KINDS yield no teeth / no spellcomps and skip that harvest command on the next
+-- corpse of the same kind. The barren-teeth reply ("You don't see any usable teeth here.") does NOT name
+-- the corpse (only a SUCCESSFUL teeth harvest prints "You start harvesting teeth from the corpse of X"),
+-- so the identity comes from what we KILLED (kxwt_mdeath) — batch_kind() below — trusted only when the
+-- kill batch is a single unambiguous kind. Keyed by a normalized name (lowercased, leading article
+-- stripped), exactly like the autofight winners; persisted to disk and kept on a global so a live reload
+-- doesn't lose it. SAFETY: skipping teeth never changes the sacrifice decision — a barren-teeth corpse is
+-- already left un-named and therefore intact today, so we only drop the wasted command.
+local function corpse_kind_key(name)
+  if not name then return nil end
+  local k = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  k = k:gsub("^an? ", ""):gsub("^the ", "")     -- drop a leading "a "/"an "/"the "
+  return (k ~= "" and k) or nil
+end
+local CORPSE_HARVEST_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/corpse_harvest.lua"
+local function save_corpse_harvest()
+  local f = io.open(CORPSE_HARVEST_FILE, "w"); if not f then return end
+  local function set_parts(t)
+    local p = {}; for k in pairs(t) do p[#p + 1] = string.format("[%q]=true", k) end
+    return table.concat(p, ",")
+  end
+  f:write(string.format("return {no_teeth={%s},no_spellcomps={%s}}",
+    set_parts(_CORPSE_HARVEST.no_teeth), set_parts(_CORPSE_HARVEST.no_spellcomps)))
+  f:close()
+end
+local corpse_save_timer
+local function schedule_corpse_save()   -- debounce a burst of learns into one write (like the winners file)
+  if cancel and corpse_save_timer then cancel(corpse_save_timer) end
+  corpse_save_timer = after and after(2, save_corpse_harvest) or nil
+end
+if not _CORPSE_HARVEST then             -- load ONCE per session (a live reload keeps the in-memory table)
+  _CORPSE_HARVEST = { no_teeth = {}, no_spellcomps = {} }
+  local chunk = loadfile and loadfile(CORPSE_HARVEST_FILE)
+  if chunk then
+    local ok, t = pcall(chunk)
+    if ok and type(t) == "table" then
+      if type(t.no_teeth) == "table" then for k in pairs(t.no_teeth) do _CORPSE_HARVEST.no_teeth[k] = true end end
+      if type(t.no_spellcomps) == "table" then for k in pairs(t.no_spellcomps) do _CORPSE_HARVEST.no_spellcomps[k] = true end end
+    end
+  end
+end
+local function learn_no_teeth(key)
+  if key and not _CORPSE_HARVEST.no_teeth[key] then _CORPSE_HARVEST.no_teeth[key] = true; schedule_corpse_save() end
+end
+local function learn_no_spellcomps(key)
+  if key and not _CORPSE_HARVEST.no_spellcomps[key] then _CORPSE_HARVEST.no_spellcomps[key] = true; schedule_corpse_save() end
+end
+
 local corpse = { on = true, active = false, idx = 1, step = nil, room = nil,
                  killed = false, settle = nil, promise = nil, watchdog = nil,
-                 with_items = {}, cur_name = nil }
+                 kills = {}, with_items = {}, cur_name = nil }
 if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the empty/has-loot decision is unit-tested
+
+-- The distinct mob KIND(s) killed since the last pass reset — the identity for the harvest memory above.
+-- note_kill records each non-ally kill; batch_kind() returns the single kind when the batch is
+-- unambiguous (one kind of mob), else nil — we only trust a learned skip then, so we can never mis-skip a
+-- different mob's corpse.
+local function note_kill(name)
+  if not name or (is_ally and is_ally(name)) then return end   -- our own minions also emit mdeath
+  local k = corpse_kind_key(name); if not k then return end
+  corpse.kills[k] = true
+end
+local function batch_kind()
+  local only, n = nil, 0
+  for k in pairs(corpse.kills) do only, n = k, n + 1 end
+  return (n == 1) and only or nil
+end
+if _AA_TEST then
+  _AA_TEST.corpse_harvest = function() return _CORPSE_HARVEST end
+  _AA_TEST.note_kill = note_kill
+  _AA_TEST.batch_kind = batch_kind
+  _AA_TEST.corpse_kind_key = corpse_kind_key
+  _AA_TEST.learn_no_teeth = learn_no_teeth          -- what the barren-line triggers call
+  _AA_TEST.learn_no_spellcomps = learn_no_spellcomps
+end
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
 
 -- Stall watchdog. Pacing stays STREAM-DRIVEN (each step advances off a real game line); this is only a
@@ -1700,7 +1772,7 @@ end
 -- the promise widget, whether the pass finished naturally or was stopped (off / room change).
 function corpse_done()
   corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
-  corpse.promise = nil
+  corpse.promise = nil; corpse.kills = {}   -- fresh kind tally for the next batch
   if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   local s = corpse.settle; corpse.settle = nil
   if s then s.resolve() end
@@ -1732,6 +1804,17 @@ function corpse_process()
   if corpse.idx > CORPSE_MAX then corpse_done(); return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
   corpse.step, corpse.cur_name = "teeth", nil   -- cur_name is re-learned from this corpse's harvest reply
+  -- Learned skip: if we've killed a single, unambiguous kind and know it has no teeth, don't waste the
+  -- teeth harvest — go straight to spellcomps. cur_name stays nil (as it already is on any teeth failure),
+  -- so the sacrifice decision is unchanged. NOTE: we must still send SOMETHING — the harvest doubles as
+  -- the "does this index exist?" probe that ends the walk ("You don't see anything named '<n>.corpse'"),
+  -- so we can skip AT MOST one of the two commands, never both.
+  local kind = batch_kind()
+  if kind and _CORPSE_HARVEST.no_teeth[kind] then
+    corpse.step = "spellcomps"
+    send("harvest spellcomps " .. corpse.idx .. ".corpse")
+    return
+  end
   -- Harvest is the FIRST thing we send now — no `get all`. On a missing corpse this yields "You don't see
   -- anything named '<n>.corpse'" (or the watchdog fires), which ends the walk.
   send("harvest teeth " .. corpse.idx .. ".corpse")
@@ -1743,6 +1826,10 @@ function corpse_harvest_done()
   corpse_touch()          -- progress: (re)arm the stall watchdog
   if corpse.step == "teeth" then
     corpse.step = "spellcomps"
+    -- Learned skip: this corpse's kind (named by the teeth harvest we just finished, else the batch kill)
+    -- is known to yield no spellcomps → don't send the harvest, go straight to the empty/has-loot decision.
+    local key = corpse_kind_key(corpse.cur_name) or batch_kind()
+    if key and _CORPSE_HARVEST.no_spellcomps[key] then corpse_finish(); return end
     send("harvest spellcomps " .. corpse.idx .. ".corpse")
   elseif corpse.step == "spellcomps" then
     corpse_finish()
@@ -1776,7 +1863,7 @@ end
 -- bails; the real start is when combat ENDS below). kxwt_fighting -1 fires when combat ends for ANY
 -- reason, so only walk corpses if a kill actually happened this fight — fleeing ends combat with no
 -- corpse of ours (and moves us), and must NOT trigger looting.
-trigger([[^kxwt_mdeath (.+)$]], function() corpse.killed = true; corpse_start() end)
+trigger([[^kxwt_mdeath (.+)$]], function(_, name) corpse.killed = true; note_kill(name); corpse_start() end)
 trigger([[^kxwt_fighting -1$]], function() if corpse.killed then corpse_start() end end)
 
 -- Room change abandons this room's corpses (they don't follow you) -> stop, so we never target a
@@ -1810,6 +1897,17 @@ trigger([[^You can't safely carry any more teeth]], function() corpse_harvest_do
 trigger([[^Your collected teeth grow restless]], function() corpse_harvest_done() end)    -- teeth full
 trigger([[^You don't know enough about the undead]], function() corpse_harvest_done() end) -- no spellcomp skill
 trigger([[^You can't harvest spell components from that]], function() corpse_harvest_done() end) -- this corpse yields no spellcomps
+
+-- Learn barren KINDS (persisted) so the next corpse of the same kind skips the wasted harvest command.
+-- Only "no teeth HERE" (a truly barren kind) teaches no_teeth — "no teeth REMAINING" just means THIS
+-- corpse is already picked clean, not that the kind never has any. Keyed by the single killed kind
+-- (batch_kind); a mixed-kind pack teaches nothing (batch_kind nil), so we can never mislearn. These only
+-- RECORD — the terminal triggers above still advance the pass. Guarded on corpse.active alone (not step)
+-- so firing order vs the advance trigger doesn't matter.
+trigger([[^You don't see any usable teeth here]],
+  function() if corpse.active then learn_no_teeth(batch_kind()) end end)
+trigger([[^You can't harvest spell components from that]],
+  function() if corpse.active then learn_no_spellcomps(corpse_kind_key(corpse.cur_name) or batch_kind()) end end)
 trigger([[^Looks like the corpses? of .+ (is|are) too damaged for you to use]], function() corpse_harvest_done() end) -- corpse(s) too mangled to harvest -> skip, keep going (plural for swarm/group mobs)
 -- A SUCCESSFUL `harvest spellcomps` has no distinct "done" line — it just yields the component(s) and
 -- stops (unlike teeth, which end on "grow restless"). So the yield line IS the terminal for the

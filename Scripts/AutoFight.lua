@@ -585,12 +585,10 @@ end
 -- off to sac/loot the corpse the moment combat ends, and we need a clean shot at re-summoning instead —
 -- and (2) re-cast 'clay man' on a pace until one joins the group, restoring the tank. Runs regardless of
 -- F.on (a dead tank is worth handling whether or not auto-fight is armed); disable with autofight.tank('off').
-local TANK = { on = true, name = nil, resummoning = false, tries = 0, timer = nil }
+local TANK = { on = true, name = nil, resummoning = false, tries = 0, timer = nil, death_pending = false }
 
 -- Which grouped minion is currently tanking (flags contain both M = ours and T = tanking)? Its name is
--- remembered stickily (see the kxwt_group_end trigger) so a death — which arrives as a bare
--- `kxwt_mdeath <name>`, and may land AFTER the roster has already dropped the dead row — is still
--- recognised as "that was the tank".
+-- remembered stickily (see refresh_tank) so we still know who the tank WAS the moment it leaves the group.
 local function current_tank_name()
   for _, m in ipairs(state.group or {}) do
     local f = m.flags or ""
@@ -636,19 +634,34 @@ local function tank_resummoned()
   stop_resummon()
 end
 
--- kxwt_group_end: remember who's tanking (sticky — only overwrite when a tank is actually present, so the
--- post-death roster that no longer lists it doesn't wipe the name before the mdeath line matches it).
-local function refresh_tank()
-  local t = current_tank_name()
-  if t then TANK.name = t end
+local function minion_in_group(name)
+  if not name then return false end
+  local low = name:lower()
+  for _, m in ipairs(state.group or {}) do
+    if m.name and m.name:lower() == low then return true end
+  end
+  return false
 end
 
--- kxwt_mdeath <name>: was it the tank? Exact lower-case name match (the convention is_ally/note_mdeath
--- use — kxwt formats the death name the same as the group row). Clear the remembered name and rescue.
-local function on_mdeath_tank(name)
-  if TANK.name and name and name:lower() == TANK.name:lower() then
+-- kxwt_ydeath <name> — one of YOUR OWN minions just DIED (enemies emit kxwt_mdeath; a benign leave — you
+-- dismiss it, it flees — emits NEITHER). The death name is a pet nickname ("flesh beastie") that does NOT
+-- match the group-roster name ("A flesh beast"), so we can't tell FROM this line whether it was the tank;
+-- we just latch "a minion died" and let the next roster say which one.
+local function tank_ydeath() TANK.death_pending = true end
+
+-- kxwt_group_end: (re)track the tank and, using the ydeath latch, detect the TANK's death specifically.
+-- The roster update immediately follows the death, so we consume the latch here: if our remembered tank is
+-- now gone from the group AND a minion death was just announced, the tank was the one that died → rescue.
+-- Gone WITHOUT a death (dismiss/flee — no ydeath) just drops the tracking, no rescue. A tank merely between
+-- fights stays listed (just without the T flag), so it's never seen as "gone".
+local function refresh_tank()
+  local t = current_tank_name()
+  local died = TANK.death_pending
+  TANK.death_pending = false                       -- this roster reflects any just-announced death
+  if t then TANK.name = t; return end              -- someone's tanking → track it
+  if TANK.name and not minion_in_group(TANK.name) then
     TANK.name = nil
-    tank_died()
+    if died then tank_died() end                   -- gone + a minion death announced → the tank died
   end
 end
 
@@ -689,12 +702,12 @@ if trigger then
   trigger([[^(.+) is here, fighting .+$]], function(_, subject) note_room_fighter(subject) end)
   -- Each enemy death counts down the crowd estimate — this is what drops us out of AOE onto the last one.
   trigger([[^kxwt_mdeath (.+)$]], function(_, name) note_mdeath(name) end)
-  -- Tank rescue: remember who's tanking from each roster (sticky — kept until a new tank is seen), catch
-  -- its death (exact lower-case name match, the same convention is_ally/note_mdeath use), and stop the
-  -- re-summon loop once a clay man rejoins. The group_end handler here runs AFTER AlterAeon's (which sets
-  -- state.group) — same pattern, and AlterAeon loads first — so state.group is fresh when we read it.
+  -- Tank rescue: kxwt_ydeath latches "one of my minions died"; the following group_end says whether it was
+  -- the tank (our remembered tank is now gone) and, if so, triggers the rescue; a clay man rejoining stops
+  -- the re-summon loop. The group_end handler here runs AFTER AlterAeon's (which sets state.group) — same
+  -- pattern, and AlterAeon loads first — so state.group is fresh when we read it.
+  trigger([[^kxwt_ydeath ]], function() tank_ydeath() end)
   trigger([[^kxwt_group_end$]], function() refresh_tank() end)
-  trigger([[^kxwt_mdeath (.+)$]], function(_, name) on_mdeath_tank(name) end)
   trigger([[^You add .*clay man to your group\.$]], function() tank_resummoned() end)
   trigger([[^You already have .*clay man at your side\.$]], function() tank_resummoned() end)
   -- (No rvnum reset: the server re-sends rvnum on a plain `look`, so resetting here would flicker us out
@@ -948,8 +961,8 @@ _AF_TEST = {
   mdeath        = note_mdeath,
   tank          = function() return TANK end,             -- tank-rescue state (name/resummoning/tries)
   tank_scan     = current_tank_name,                      -- who's tanking, from the current roster
-  tank_refresh  = refresh_tank,                            -- kxwt_group_end: (re)remember the tank name
-  tank_mdeath   = on_mdeath_tank,                          -- kxwt_mdeath: if it was the tank, rescue
+  tank_refresh  = refresh_tank,                            -- kxwt_group_end: (re)track tank + detect its death
+  tank_ydeath   = tank_ydeath,                             -- kxwt_ydeath: latch "a minion of mine died"
   tank_resummoned = tank_resummoned,                      -- a clay man rejoined (stop the loop)
   shower        = hit_shower,       -- dormant handler, exposed so its no-op can be verified
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,

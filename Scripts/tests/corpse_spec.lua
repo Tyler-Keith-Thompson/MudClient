@@ -67,6 +67,86 @@ test("a SUCCESSFUL spellcomps harvest (a yield line, no 'done' line) advances to
   end)
 end)
 
+-- ---- learned per-kind harvest memory (skip barren teeth/spellcomps) ------------------------------
+
+-- Reset the learned tables + kill tally so each case is hermetic (module-load may have read a real file).
+local function reset_harvest_mem()
+  local hm = _AA_TEST.corpse_harvest()
+  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
+  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
+  for k in pairs(corpse.kills) do corpse.kills[k] = nil end
+end
+
+test("batch_kind: one killed kind is trusted; a mixed pack (or an ally) yields nil", function()
+  reset_harvest_mem()
+  _AA_TEST.note_kill("a jaguar")
+  expect(_AA_TEST.batch_kind()):eq("jaguar")            -- normalized (article dropped), unambiguous
+  _AA_TEST.note_kill("A jaguar")                        -- same kind, different casing/article → still one kind
+  expect(_AA_TEST.batch_kind()):eq("jaguar")
+  _AA_TEST.note_kill("a kobold")                        -- second distinct kind → ambiguous
+  expect(_AA_TEST.batch_kind()):eq(nil)
+  reset_harvest_mem()
+  local saved = state; state = { name = "Me", group = { { name = "A skeletal spider" } } }
+  _AA_TEST.note_kill("A skeletal spider")               -- our minion (is_ally) → not a kill kind
+  expect(_AA_TEST.batch_kind()):eq(nil)
+  state = saved
+end)
+
+test("a known no-teeth kind SKIPS the teeth harvest (jumps to spellcomps), leaving the corpse un-named", function()
+  reset_harvest_mem()
+  _AA_TEST.corpse_harvest().no_teeth["jaguar"] = true
+  with_corpse({ on = true, active = true, idx = 1, kills = { jaguar = true } }, function(sent)
+    corpse_process()
+    expect(sent[1]):eq("harvest spellcomps 1.corpse")   -- teeth skipped
+    for _, c in ipairs(sent) do expect(c:find("harvest teeth") == nil):eq(true) end
+    expect(corpse.step):eq("spellcomps")
+    expect(corpse.cur_name):eq(nil)                      -- still un-named → sac decision unchanged (left intact)
+  end)
+end)
+
+test("a both-barren kind still sends ONE harvest (the existence probe) — teeth skipped, spellcomps stands in", function()
+  -- We can skip AT MOST one command: the harvest doubles as the "does this corpse index exist?" probe that
+  -- terminates the walk, so a both-barren kind skips teeth but must still send spellcomps.
+  reset_harvest_mem()
+  local hm = _AA_TEST.corpse_harvest(); hm.no_teeth["rat"] = true; hm.no_spellcomps["rat"] = true
+  with_corpse({ on = true, active = true, idx = 1, with_items = {}, kills = { rat = true } }, function(sent)
+    corpse_process()
+    expect(sent[1]):eq("harvest spellcomps 1.corpse")    -- teeth skipped; spellcomps is the probe
+    for _, c in ipairs(sent) do expect(c:find("harvest teeth") == nil):eq(true) end
+    expect(corpse.idx):eq(1)                             -- still on this index, awaiting the probe reply
+  end)
+end)
+
+test("a known no-spellcomps kind harvests teeth but SKIPS spellcomps (name known → sac still works)", function()
+  reset_harvest_mem()
+  _AA_TEST.corpse_harvest().no_spellcomps["jaguar cub"] = true   -- stored under the NORMALIZED key
+  with_corpse({ on = true, active = true, idx = 1, step = "teeth", cur_name = "a jaguar cub",
+                with_items = {} }, function(sent)
+    corpse_harvest_done()                                -- teeth finished → normally sends harvest spellcomps
+    for _, c in ipairs(sent) do expect(c:find("harvest spellcomps") == nil):eq(true) end  -- skipped
+    expect(sent[1]):eq("bsac 1.corpse")                  -- straight to the empty-corpse sacrifice (name was known)
+  end)
+end)
+
+test("an ambiguous (mixed) kill batch never skips — teeth is harvested normally", function()
+  reset_harvest_mem()
+  _AA_TEST.corpse_harvest().no_teeth["jaguar"] = true
+  with_corpse({ on = true, active = true, idx = 1, kills = { jaguar = true, kobold = true } }, function(sent)
+    corpse_process()
+    expect(sent[1]):eq("harvest teeth 1.corpse")         -- batch_kind nil → no skip
+  end)
+end)
+
+test("learn_no_teeth / learn_no_spellcomps record the kind (deduped)", function()
+  reset_harvest_mem()
+  _AA_TEST.learn_no_teeth("jaguar")
+  _AA_TEST.learn_no_teeth("jaguar")                      -- dedupe (no error / no double)
+  _AA_TEST.learn_no_spellcomps("kobold")
+  expect(_AA_TEST.corpse_harvest().no_teeth["jaguar"]):eq(true)
+  expect(_AA_TEST.corpse_harvest().no_spellcomps["kobold"]):eq(true)
+  reset_harvest_mem()
+end)
+
 -- ---- the harvest pass surfaces as a tracked promise (the HUD promise widget) --------------------
 
 local function widget_has(desc)
