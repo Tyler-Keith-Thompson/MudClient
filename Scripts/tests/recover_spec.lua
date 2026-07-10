@@ -304,17 +304,20 @@ test("a self-cast refuse (over-strong heal / wrong target) blocks that stat; ok 
   _AA_TEST.reset_minion_heal()
 end)
 
-test("posture: sleep to earn sharp first, then rest so we can cast", function()
-  -- want a self-cast (mana ≥ half, stamina low) but not sharp yet → sleep to earn sharp
+-- Slow regen so a cast beats waiting (stam ~10 ticks off; mana easily spares 15).
+local CAST_REGEN = { hp = 10, mana = 20, move = 6, position = "resting" }
+
+test("posture: sleep to earn sharp first (no cast worth it yet), then rest to cast once sharp+worth it", function()
+  -- physical deficit + mana, not sharp, no regen data → can't confirm a cast helps → sleep to earn sharp
   with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = false },
     function(sent) _AA_TEST.choose_recovery_position(); expect(sent[1]):eq("sleep") end)
-  -- now sharp → drop to rest so we can actually cast
-  with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = true },
+  -- sharp now AND regen shows a refresh beats waiting → rest so we can cast it
+  with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = true, regen = CAST_REGEN },
     function(sent) _AA_TEST.choose_recovery_position(); expect(sent[1]):eq("rest") end)
 end)
 
-test("once sharp, actively drops from sleep to rest so it can cast (not blocked by the deepen-only guard)", function()
-  with_self_recovery({ position = "sleeping", mana = 90, stam = 30, sharp = true },
+test("once sharp with a worthwhile cast, actively drops from sleep to rest (not blocked by the deepen-only guard)", function()
+  with_self_recovery({ position = "sleeping", mana = 90, stam = 30, sharp = true, regen = CAST_REGEN },
     function(sent) _AA_TEST.choose_recovery_position(); expect(sent[1]):eq("rest") end)
 end)
 
@@ -352,8 +355,59 @@ test("narrates the sleep-for-sharp then rest-to-cast posture strategy", function
     function() _AA_TEST.choose_recovery_position() end)
   expect(last_match("get sharp first")):truthy()
   _AA_TEST.reset_narration()
-  with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = true },
+  with_self_recovery({ position = "standing", mana = 90, stam = 30, sharp = true, regen = CAST_REGEN },
     function() _AA_TEST.choose_recovery_position() end)
   _G.echo = saved_echo
   expect(last_match("resting so I can cast")):truthy()
+end)
+
+-- ---- regen cache (show regen results, keyed by posture+sharp; busted by level or 2-day age) ------
+
+test("total_level sums the per-class levels from state.classes", function()
+  local saved = state
+  state = { classes = { mage = { level = 14 }, cleric = { level = 9 }, necromancer = { level = 19 } } }
+  expect(_AA_TEST.total_level()):eq(42)
+  state = { classes = {} }
+  expect(_AA_TEST.total_level()):eq(0)
+  state = saved
+end)
+
+test("regen_key buckets posture (sitting≡resting) and is nil when sharp is unknown", function()
+  local k = _AA_TEST.regen_key
+  expect(k("standing", false)):eq("0:0")
+  expect(k("resting", true)):eq("1:1")
+  expect(k("sitting", true)):eq("1:1")      -- sitting collapses to the resting regen tier
+  expect(k("sleeping", false)):eq("2:0")
+  expect(k("resting", nil)):eq(nil)         -- sharp unknown → force a fresh query
+end)
+
+test("regen_fresh: valid within TTL at the same level; stale when too old or the level changed", function()
+  local saved = state
+  state = { classes = { mage = { level = 10 } } }             -- total level 10
+  local now = os.time()
+  expect(_AA_TEST.regen_fresh({ at = now, lvl = 10 })):truthy()
+  expect(_AA_TEST.regen_fresh({ at = now - (_AA_TEST.REGEN_TTL + 100), lvl = 10 })):falsy()  -- aged out
+  expect(_AA_TEST.regen_fresh({ at = now, lvl = 9 })):falsy()                                 -- leveled since
+  expect(_AA_TEST.regen_fresh(nil)):falsy()
+  state = saved
+end)
+
+test("ensure_regen uses a fresh cached entry (no query); re-queries when the level bumps", function()
+  local saved_state, saved_send = state, send
+  local RC = _AA_TEST.regen_cache
+  local sent = {}
+  state = { recover = true, position = "resting", sharp = true, classes = { mage = { level = 5 } } }
+  _G.send = function(c) sent[#sent + 1] = c end
+  _AA_TEST.reset_regen_query()
+  for key in pairs(RC) do RC[key] = nil end
+  RC["1:1"] = { hp = 40, mana = 55, move = 25, at = os.time(), lvl = 5 }   -- fresh: resting + sharp, level 5
+  _AA_TEST.ensure_regen()
+  expect(#sent):eq(0)                         -- cache hit → no `show regen` round-trip
+  expect(state.regen and state.regen.mana):eq(55)
+  state.classes.mage.level = 6                -- level up → entry (lvl 5) no longer valid
+  _AA_TEST.reset_regen_query()
+  _AA_TEST.ensure_regen()
+  expect(sent[1]):eq("show regen")            -- stale by level → re-query
+  for key in pairs(RC) do RC[key] = nil end
+  state, _G.send = saved_state, saved_send
 end)

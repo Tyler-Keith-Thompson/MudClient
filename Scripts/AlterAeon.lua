@@ -68,6 +68,7 @@ local heal_minions_kick            -- () -> nil: (re)start the minion-heal drive
 local reset_minion_heal            -- () -> nil: clear the minion-heal driver (on recovery end/cancel)
 local recovery                     -- { pct, settle, stat } — the active recovery's target + promise callbacks
 local self_cast_wanted             -- () -> bool: fwd decl (choose_recovery_position, above its definition)
+local pick_self_cast               -- () -> decision|nil: fwd decl (choose consults it; defined below)
 
 -- Single-stat recovery (`recover hp|mana|stamina`): rest/sleep until just ONE vital hits the threshold,
 -- ignoring the others (and ignoring minions). recovery.stat is the canonical key ("hp"/"mana"/"stam");
@@ -155,24 +156,29 @@ local function choose_recovery_position()
   -- heals you a bit slower than sleep, but the minions can't heal themselves at all.
   local hp, mp, sp = pct(state.hp, state.maxhp), pct(state.mana, state.maxmana), pct(state.stam, state.maxstam)
   local want = (hp > 0.85 and mp < 1 and sp > 0.75) and "rest" or "sleep"
-  -- "Sleep until sharp, then cast": when spending mana on your own hp/stam is on the table, first SLEEP
-  -- to earn the sharp buff (fast regen — which alone may finish the job); once sharp, drop to REST so we
-  -- can actually cast the deficits the boosted regen still can't close quickly.
+  -- Self-cast recovery, in priority order:
+  --   * a cast would fire RIGHT NOW (regen says it beats waiting) → REST so we can cast it;
+  --   * else a physical stat lags but no cast is worth it YET and we're not sharp → SLEEP to earn sharp
+  --     (faster regen; may finish the job, or make a later cast unnecessary);
+  --   * else fall through to the plain vitals heuristic (rest if only mana's low, else sleep).
   local self_want = self_cast_wanted()
-  if self_want then want = state.sharp and "rest" or "sleep" end
+  local cast_now  = self_want and (pick_self_cast() ~= nil)
+  if cast_now then want = "rest"
+  elseif self_want and not state.sharp then want = "sleep" end
   if want == "sleep" and cast_pending then want = "rest" end   -- minions need casting → must be awake
-  -- We must be AWAKE (resting, not asleep) to cast: for the minions, or once sharp for our own vitals.
+  -- We must be AWAKE (resting, not asleep) to cast: for the minions, or for our own vitals right now.
   -- The deepen-only guard below would otherwise leave us asleep, so force the sleep→rest downgrade here.
-  local need_awake = cast_pending or (self_want and state.sharp)
-  -- Narrate the posture decision (deduped) so you can see WHY we're resting vs sleeping.
-  if self_want and not state.sharp then
-    narrate("posture", "sleep-sharp", "sleeping to get sharp first — faster regen before I spend any mana on you")
-  elseif self_want and state.sharp then
-    narrate("posture", "rest-cast", "sharp now — resting so I can cast refresh/heals to top you off")
+  local need_awake = cast_pending or cast_now
+  -- Narrate the posture decision (deduped) so you can see WHY we're resting vs sleeping — ONE coherent
+  -- line per decision, matching what we're about to do.
+  if cast_now then
+    narrate("posture", "rest-cast", "resting so I can cast to top off your " .. pick_self_cast().label)
+  elseif self_want and not state.sharp then
+    narrate("posture", "sleep-sharp", "sleeping to get sharp first — faster regen; I'll cast after if it's still worth it")
   elseif cast_pending then
     narrate("posture", "rest-minions", "resting so I can cast heals on your minions")
   elseif want == "rest" then
-    narrate("posture", "rest-mana", "resting — only mana's low, keeping your guard up while it comes back")
+    narrate("posture", "rest-mana", "hp and stamina are set — just resting out mana now")
   else
     narrate("posture", "sleep-deep", "sleeping — deepest heal for your hp/stamina")
   end
@@ -328,6 +334,79 @@ local function query_regen()
   send("show regen")
   after(2, function() regen_query_pending = false end)
 end
+local function reset_regen_query() regen_query_pending = false end   -- test seam (the after() backstop is a no-op in tests)
+
+-- ---- regen cache -------------------------------------------------------------------------------
+-- `show regen` only reports the CURRENT posture (and reflects sharp), and the numbers only drift with
+-- level / equipment / age — so cache each result keyed by (posture bucket, sharp) and reuse it instead
+-- of re-querying every posture change. Busted two ways, both checked at LOOKUP (no event trigger needed):
+--   * LEVEL: each entry records the total level it was measured at (summed from state.classes, which we
+--     already scrape from `level`/`score` and persist) — a level change invalidates it automatically.
+--   * AGE: entries older than REGEN_TTL (2 real days) are re-queried. Persisted across sessions so the
+--     TTL is meaningful. Sharp itself is tracked in memory (the sharp up/down lines + show regen's prefix).
+local REGEN_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/regen_cache.lua"
+local REGEN_TTL  = 2 * 24 * 3600            -- 2 days, real seconds
+local regen_cache = {}                       -- key "bucket:sharp" -> { hp, mana, move, at, lvl }
+
+-- Total character level = sum of the per-class levels we scraped (0 until `level`/`score` is seen).
+local function total_level()
+  local n = 0
+  for _, c in pairs(state.classes or {}) do n = n + (c.level or 0) end
+  return n
+end
+-- Cache key. Posture collapses to its regen tier (standing/resting/sleeping via recovery_depth), so
+-- sitting≡resting. nil when sharp is UNKNOWN (never seen a regen/sharp line) → forces a fresh query.
+local function regen_key(posn, sharp)
+  if sharp == nil then return nil end
+  return recovery_depth(posn) .. ":" .. (sharp and "1" or "0")
+end
+local function regen_fresh(entry)
+  return entry and entry.at and (os.time() - entry.at) < REGEN_TTL and (entry.lvl or 0) == total_level()
+end
+
+local function save_regen_cache()
+  local f = io.open(REGEN_FILE, "w"); if not f then return end
+  local parts = {}
+  for k, v in pairs(regen_cache) do
+    parts[#parts + 1] = string.format("[%q]={hp=%d,mana=%d,move=%d,at=%d,lvl=%d}",
+      k, v.hp or 0, v.mana or 0, v.move or 0, v.at or 0, v.lvl or 0)
+  end
+  f:write("return {" .. table.concat(parts, ",") .. "}")
+  f:close()
+end
+local function load_regen_cache()
+  regen_cache = {}
+  local chunk = loadfile and loadfile(REGEN_FILE)
+  if not chunk then return end
+  local ok, t = pcall(chunk)
+  if ok and type(t) == "table" then
+    for k, v in pairs(t) do
+      if type(v) == "table" then regen_cache[k] = { hp = v.hp, mana = v.mana, move = v.move, at = v.at, lvl = v.lvl } end
+    end
+  end
+end
+
+-- Store a freshly-parsed regen line in the cache (keyed by the line's own posture + the sharp it reported).
+local function cache_regen(posn, sharp, hp, mana, move)
+  local key = regen_key(posn, sharp)
+  if not key then return end
+  regen_cache[key] = { hp = hp, mana = mana, move = move, at = os.time(), lvl = total_level() }
+  save_regen_cache()
+end
+
+-- Make state.regen reflect the current posture+sharp: use a fresh cached `show regen` if we have one (no
+-- round-trip — the cast decision gets data immediately), else query the game (the parse caches it).
+local function ensure_regen()
+  local key = regen_key(state.position, state.sharp)
+  local entry = key and regen_cache[key]
+  if regen_fresh(entry) then
+    state.regen = { hp = entry.hp, mana = entry.mana, move = entry.move, position = state.position }
+  else
+    query_regen()
+  end
+end
+
+load_regen_cache()   -- warm the cache from disk (stale/level-mismatched entries are filtered at lookup)
 
 -- Skeletal/undead constructs the player raises: no natural regen, must be spell-healed. Matched by name
 -- ("skeletal spider", "skeletal mage", "bone ..."). Everything else is assumed to self-regen.
@@ -443,47 +522,53 @@ end
 -- before stamina (survivability first). Each stat is gated by cast_beats_waiting (regen vs mana cost),
 -- and a stat we've given up on this recovery (self_*_blocked, set on a refuse) is skipped. Self-heals
 -- need your name; refresh is self by default and can't be cast in combat (recovery isn't, but guard).
-try_self_cast = function()
-  if not self_cast_wanted() then return end
+-- Decide the single self-cast to make right now, or nil. PURE (no send/narrate) so choose_recovery_position
+-- can ask "would we actually cast?" to pick rest-to-cast vs sleep-for-sharp. hp before stamina.
+pick_self_cast = function()
+  if not self_cast_wanted() then return nil end
   local frac = (recovery and recovery.pct) or READY_PCT
   local st   = recovery and recovery.stat
   local r    = state.regen
-  -- self HP via bolster/soothe (needs your name)
   if (st == nil or st == "hp") and not minion_heal.self_hp_blocked and state.name then
     local hpf = pct(state.hp, state.maxhp)
     if hpf < frac and cast_beats_waiting(state.hp, state.maxhp, r and r.hp, HEAL_COST) then
-      local spell = (hpf < BOLSTER_BELOW) and "bolster" or "soothe"
-      local ticks = ticks_to_target(state.hp, state.maxhp, r and r.hp, frac) or 0
-      narrate("cast", "hp", string.format("casting %s on yourself — hp %d%% is ~%d ticks of regen away; mana to spare",
-        spell, math.floor(hpf * 100 + 0.5), math.ceil(ticks)))
-      minion_heal.last = { kind = "self_hp" }
-      minion_heal.casting = true
-      send("c " .. spell .. " " .. state.name)
-      arm_cast_backstop()
-      return
+      return { stat = "hp", label = "hp", spell = (hpf < BOLSTER_BELOW) and "bolster" or "soothe",
+               target = state.name, pctv = hpf, ticks = ticks_to_target(state.hp, state.maxhp, r and r.hp, frac) or 0,
+               kind = "self_hp" }
     end
   end
-  -- self stamina via refresh (self-target; never in/at combat)
   if (st == nil or st == "stam") and not minion_heal.self_stam_blocked and not engaged() then
     local spf = pct(state.stam, state.maxstam)
     if spf < frac and cast_beats_waiting(state.stam, state.maxstam, r and r.move, REFRESH_COST) then
-      local ticks = ticks_to_target(state.stam, state.maxstam, r and r.move, frac) or 0
-      narrate("cast", "stam", string.format("casting refresh — stamina %d%% is ~%d ticks of regen away; mana to spare",
-        math.floor(spf * 100 + 0.5), math.ceil(ticks)))
-      minion_heal.last = { kind = "self_stam" }
-      minion_heal.casting = true
-      send("c refresh")
-      arm_cast_backstop()
-      return
+      return { stat = "stam", label = "stamina", spell = "refresh", target = nil, pctv = spf,
+               ticks = ticks_to_target(state.stam, state.maxstam, r and r.move, frac) or 0, kind = "self_stam" }
     end
   end
-  -- Wanted to help a stat but chose NOT to cast (regen is fast enough, or mana can't spare it) — say so
-  -- once, so a quiet rest doesn't look like the feature isn't working. No regen data yet reads separately.
-  if not r then
-    narrate("cast", "nodata", "no regen numbers yet — I'll check `show regen` and decide once I have them")
-  else
-    narrate("cast", "wait", "letting natural regen handle it — not worth spending mana right now")
+  return nil
+end
+
+try_self_cast = function()
+  local pick = pick_self_cast()
+  if not pick then
+    -- Wanted a stat but not casting. Stay QUIET while we're still gathering sharp (the posture channel
+    -- already says "sleeping to get sharp") — only explain the wait once we're sharp and still declined,
+    -- so the two channels never contradict each other.
+    if self_cast_wanted() and state.sharp then
+      if not state.regen then
+        narrate("cast", "nodata", "no regen numbers yet — I'll check `show regen` and decide once I have them")
+      else
+        narrate("cast", "wait", "sharp now and natural regen is fast enough — not worth spending mana")
+      end
+    end
+    return
   end
+  narrate("cast", pick.stat, string.format("casting %s%s — %s %d%% is ~%d ticks of regen away; mana to spare",
+    pick.spell, (pick.stat == "hp") and " on yourself" or "", pick.label,
+    math.floor(pick.pctv * 100 + 0.5), math.ceil(pick.ticks)))
+  minion_heal.last = { kind = pick.kind }
+  minion_heal.casting = true
+  send("c " .. pick.spell .. (pick.target and (" " .. pick.target) or ""))
+  arm_cast_backstop()
 end
 
 -- Settle the outstanding cast on one of the game's reply lines, then decide the next move.
@@ -549,7 +634,10 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              reset_posture = reset_posture,
              ticks_to_target = ticks_to_target, cast_beats_waiting = cast_beats_waiting,
              self_cast_wanted = self_cast_wanted, try_self_cast = try_self_cast,
-             reset_narration = reset_narration }
+             pick_self_cast = pick_self_cast, reset_narration = reset_narration,
+             regen_cache = regen_cache, regen_key = regen_key, regen_fresh = regen_fresh,
+             total_level = total_level, ensure_regen = ensure_regen, cache_regen = cache_regen,
+             reset_regen_query = reset_regen_query, REGEN_TTL = REGEN_TTL }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -670,8 +758,9 @@ trigger([[^kxwt_position (.+)$]], function(_, p)
   state.position = p
   -- If we're recovering but got knocked back to a non-recovery posture (stood up, kicked awake), re-issue.
   if state.recover and recovery_depth(p) == 0 then choose_recovery_position() end
-  -- Regen rates are per-posture — refresh them (gagged) so the cast-vs-wait decision uses the right numbers.
-  if state.recover and changed and (not state.regen or state.regen.position ~= p) then query_regen() end
+  -- Regen rates are per-posture — refresh them (from cache, else a gagged query) so the cast-vs-wait
+  -- decision uses the right numbers for this posture.
+  if state.recover and changed and (not state.regen or state.regen.position ~= p) then ensure_regen() end
 end)
 
 -- Combat. -1 = not fighting; otherwise "<pct> <gender> <name>".
@@ -772,16 +861,19 @@ trigger([[^If you really want to cast that on yourself, you must use your name\.
 -- the player typed still prints.
 trigger([[^You (feel sharp, and )?currently gain (\d+) hitpoints, (\d+) mana, and (\d+) movement while (\w+)\.$]],
   function(_, sharp, hp, mana, move, posn)
-    state.regen = { hp = tonumber(hp), mana = tonumber(mana), move = tonumber(move), position = posn }
-    state.sharp = (sharp ~= nil and sharp ~= "")
+    local is_sharp = (sharp ~= nil and sharp ~= "")
+    local H, M, V = tonumber(hp), tonumber(mana), tonumber(move)
+    state.sharp = is_sharp
+    state.regen = { hp = H, mana = M, move = V, position = posn }
+    cache_regen(posn, is_sharp, H, M, V)   -- remember it (keyed by this line's posture + sharp)
     if regen_query_pending then regen_query_pending = false; return false end   -- gag our auto-query
   end)
--- Sharp up/down. Sharp changes every regen rate, so re-query while recovering to keep state.regen fresh.
+-- Sharp up/down. Sharp changes every regen rate, so refresh state.regen (from cache or a query) while recovering.
 trigger([[^You find yourself feeling sharp and ready to take on anything!$]], function()
-  state.sharp = true; if state.recover then query_regen() end
+  state.sharp = true; if state.recover then ensure_regen() end
 end)
 trigger([[^You no longer feel sharp and at your best\.$]], function()
-  state.sharp = false; if state.recover then query_regen() end
+  state.sharp = false; if state.recover then ensure_regen() end
 end)
 
 -- Environment: sky/time/weather. kxwt_time is "<mud-minutes> <daypart> <clock> <am/pm>";
@@ -1764,8 +1856,9 @@ local function begin_recovery(frac)
   -- on your own vitals). It internally respects the mode: minion-only skips self, single-stat skips
   -- minions, `recover mana` casts nothing (no spell makes mana).
   heal_minions_kick()
-  -- Fetch current-posture regen numbers (gagged) so cast-vs-wait has data — unless this is minion-only.
-  if not recovery.minions_only then query_regen() end
+  -- Get current-posture regen numbers (from cache, else a gagged query) so cast-vs-wait has data —
+  -- unless this is minion-only.
+  if not recovery.minions_only then ensure_regen() end
 end
 
 -- recover([pct]) — start a recovery and return a PROMISE (Scripts/Promise.lua) that resolves when
