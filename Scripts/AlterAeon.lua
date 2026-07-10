@@ -168,9 +168,6 @@ local function choose_recovery_position()
   if cast_now then want = "rest"
   elseif self_want and not state.sharp then want = "sleep" end
   if want == "sleep" and cast_pending then want = "rest" end   -- minions need casting → must be awake
-  -- We must be AWAKE (resting, not asleep) to cast: for the minions, or for our own vitals right now.
-  -- The deepen-only guard below would otherwise leave us asleep, so force the sleep→rest downgrade here.
-  local need_awake = cast_pending or cast_now
   -- Narrate the posture decision (deduped) so you can see WHY we're resting vs sleeping — ONE coherent
   -- line per decision, matching what we're about to do.
   if cast_now then
@@ -184,10 +181,16 @@ local function choose_recovery_position()
   else
     narrate("posture", "sleep-deep", "sleeping — deepest heal for your hp/stamina")
   end
-  if want == "rest" and need_awake and recovery_depth(state.position) >= 2 then send_posture("rest"); return end
-  local target = (want == "sleep") and 2 or 1
-  if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
-  send_posture(want)
+  -- Resting keeps your guard up — you can be attacked in your sleep — so a "rest" decision moves us TO
+  -- rest from EITHER direction, INCLUDING down from sleep. A "sleep" decision only ever DEEPENS (never
+  -- wakes us). This fixes "narrated 'just resting out mana' but stayed asleep": the old deepen-only guard
+  -- treated already-asleep as deep enough and never downgraded to rest.
+  if want == "rest" then
+    if recovery_depth(state.position) ~= 1 then send_posture("rest") end
+    return
+  end
+  if recovery_depth(state.position) >= 2 then return end   -- already asleep → nothing to do
+  send_posture("sleep")
 end
 
 -- Recovery-as-a-promise. `recovery.pct` is the current target threshold; `recovery.settle` holds the

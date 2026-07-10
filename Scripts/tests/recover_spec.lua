@@ -78,9 +78,11 @@ test("does NOT re-send a posture command while it's still in flight (no 'already
   end)
 end)
 
-test("already sleeping never re-sends (deeper than any target)", function()
-  with_posture(40, 40, 40, "sleeping", function(sent) choose(); expect(#sent):eq(0) end)  -- want sleep
-  with_posture(90, 50, 90, "sleeping", function(sent) choose(); expect(#sent):eq(0) end)  -- want rest, don't downgrade
+test("already sleeping: a deeper 'sleep' target never re-sends, but a 'rest' decision DOWNGRADES us", function()
+  with_posture(40, 40, 40, "sleeping", function(sent) choose(); expect(#sent):eq(0) end)  -- want sleep → stay asleep
+  -- want rest (hp/stam high, only mana low): downgrade sleep→rest so we keep our guard and aren't attacked
+  -- while asleep — even though we're already "deep enough" for the regen.
+  with_posture(90, 50, 90, "sleeping", function(sent) choose(); expect(sent[1]):eq("rest") end)
 end)
 
 -- ---- rvnum: a `look` (same room) must NOT abort recovery; a real move must ----------------------
