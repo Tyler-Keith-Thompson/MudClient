@@ -123,3 +123,81 @@ test("rvnum with the same id but different COORDS also counts as a move", functi
     expect(rej()):eq("moved")
   end)
 end)
+
+-- ---- single-stat recovery (`recover hp|mana|stamina`) -------------------------------------------
+-- recovery.stat scopes the "done" check to ONE vital (ignoring the others and any minions).
+
+local one_stat_ready = _AA_TEST.one_stat_ready
+local stat_ready     = _AA_TEST.stat_ready
+local rec            = _AA_TEST.recovery
+local maybe_complete = _AA_TEST.maybe_complete_recovery
+
+test("STAT_ALIASES maps the typed words onto canonical keys", function()
+  local a = _AA_TEST.STAT_ALIASES
+  expect(a.hp):eq("hp"); expect(a.health):eq("hp"); expect(a.hitpoints):eq("hp")
+  expect(a.mana):eq("mana"); expect(a.mp):eq("mana")
+  expect(a.stamina):eq("stam"); expect(a.sp):eq("stam"); expect(a.sta):eq("stam")
+end)
+
+test("one_stat_ready checks only the named stat", function()
+  local saved = state
+  state = { hp = 40, maxhp = 100, mana = 95, maxmana = 100, stam = 40, maxstam = 100 }
+  expect(one_stat_ready("mana")):truthy()    -- mana 95% ≥ 90
+  expect(one_stat_ready("hp")):falsy()       -- hp 40% < 90
+  expect(one_stat_ready("stam")):falsy()
+  state = saved
+end)
+
+test("stat_ready follows recovery.stat (one stat), else falls back to every-vital ready()", function()
+  local saved, saved_stat = state, rec.stat
+  state = { hp = 40, maxhp = 100, mana = 95, maxmana = 100, stam = 40, maxstam = 100 }
+  rec.stat = "mana"; expect(stat_ready()):truthy()   -- only mana matters, and it's up
+  rec.stat = "hp";   expect(stat_ready()):falsy()    -- hp is the target and it's low
+  rec.stat = nil;    expect(stat_ready()):falsy()    -- every vital: hp/stam low → not ready
+  state, rec.stat = saved, saved_stat
+end)
+
+-- Drive maybe_complete_recovery under a single-stat recovery; capture resolve + sent commands.
+local function with_stat_recovery(statkey, hp, mp, sp, fn)
+  local saved_state, saved_send, saved_settle, saved_stat, saved_pct =
+        state, send, rec.settle, rec.stat, rec.pct
+  local sent, resolved = {}, false
+  state = { hp = hp, maxhp = 100, mana = mp, maxmana = 100, stam = sp, maxstam = 100,
+            recover = true, position = "resting" }
+  _G.send = function(c) sent[#sent + 1] = c end
+  rec.settle = { resolve = function() resolved = true end, reject = function() end }
+  rec.stat, rec.pct = statkey, _AA_TEST.READY_PCT
+  _AA_TEST.reset_posture()
+  local ok, err = pcall(function() fn(sent, function() return resolved end) end)
+  state, _G.send = saved_state, saved_send
+  rec.settle, rec.stat, rec.pct = saved_settle, saved_stat, saved_pct
+  if not ok then error(err, 2) end
+end
+
+test("single-stat recovery completes when JUST the target stat hits 90% (others still low)", function()
+  with_stat_recovery("mana", 40, 95, 40, function(sent, res)   -- mana up, hp/stam low
+    expect(maybe_complete()):truthy()
+    expect(res()):truthy()                                     -- promise resolved
+    expect(sent[#sent]):eq("stand")                            -- stood up
+    expect(state.recover):falsy()
+  end)
+end)
+
+test("single-stat recovery is NOT done while its target stat is still low (even if others are full)", function()
+  with_stat_recovery("hp", 40, 100, 100, function(sent, res)   -- hp is the target and it's low
+    expect(maybe_complete()):falsy()
+    expect(res()):falsy()
+    expect(state.recover):truthy()                             -- keeps recovering
+  end)
+end)
+
+test("single-stat recovery ignores minions (no all_minions_ready gate)", function()
+  -- A hurt skeletal minion would block a normal recovery, but a single-stat one completes anyway.
+  local saved_group = state and state.group
+  with_stat_recovery("stam", 40, 40, 95, function(sent, res)
+    state.group = { { name = "skeletal spider", hp = 1, maxhp = 50, is_minion = true } }
+    expect(maybe_complete()):truthy()                          -- stam is up → done, minion notwithstanding
+    expect(res()):truthy()
+  end)
+  if state then state.group = saved_group end
+end)

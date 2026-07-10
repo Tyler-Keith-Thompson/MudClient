@@ -66,7 +66,29 @@ local minions_pending_spell_heal   -- () -> bool: any skeletal (no-regen) minion
 local all_minions_ready            -- (frac) -> bool: every minion at its target (skeletal=full, else frac)
 local heal_minions_kick            -- () -> nil: (re)start the minion-heal driver
 local reset_minion_heal            -- () -> nil: clear the minion-heal driver (on recovery end/cancel)
-local recovery                     -- { pct, settle } — the active recovery's target + promise callbacks
+local recovery                     -- { pct, settle, stat } — the active recovery's target + promise callbacks
+
+-- Single-stat recovery (`recover hp|mana|stamina`): rest/sleep until just ONE vital hits the threshold,
+-- ignoring the others (and ignoring minions). recovery.stat is the canonical key ("hp"/"mana"/"stam");
+-- nil = the normal every-vital recovery. STAT_ALIASES maps the words a user might type onto that key.
+local STAT_FIELDS  = { hp = { "hp", "maxhp" }, mana = { "mana", "maxmana" }, stam = { "stam", "maxstam" } }
+local STAT_LABEL   = { hp = "HP", mana = "mana", stam = "stamina" }
+local STAT_ALIASES = {
+  hp = "hp", health = "hp", hitpoints = "hp",
+  mana = "mana", mp = "mana",
+  stamina = "stam", stam = "stam", sta = "stam", sp = "stam",
+}
+-- one_stat_ready(key, p) — just that stat at >= p. stat_ready(p) — the ACTIVE recovery's readiness:
+-- the one stat if recovery.stat is set, else every vital (falls back to ready()).
+local function one_stat_ready(key, p)
+  local f = STAT_FIELDS[key]; if not f then return true end
+  return pct(state[f[1]], state[f[2]]) >= (p or READY_PCT)
+end
+local function stat_ready(p)
+  local st = recovery and recovery.stat
+  if st then return one_stat_ready(st, p) end
+  return ready(p)
+end
 
 -- A posture command (rest/sleep/stand) takes a moment to reflect in state.position (the kxwt_position
 -- update lags the command by a round-trip). choose_recovery_position runs on EVERY prompt, so without a
@@ -90,8 +112,11 @@ local function reset_posture() last_posture_cmd, last_posture_at = nil, 0 end
 -- never spams a duplicate while the last one is still in flight (send_posture).
 local function choose_recovery_position()
   if recovery and recovery.minions_only then return end   -- minion-only recovery never touches YOUR posture
-  local player_done = ready(recovery and recovery.pct or nil)
-  local cast_pending = minions_pending_spell_heal and minions_pending_spell_heal()
+  local player_done = stat_ready(recovery and recovery.pct or nil)
+  -- Single-stat recovery is player-only: it never casts on minions, so don't let a hurt skeletal minion
+  -- hold the posture at `rest` (cast_pending caps sleep at rest so you can cast).
+  local cast_pending = (not (recovery and recovery.stat))
+    and minions_pending_spell_heal and minions_pending_spell_heal()
   if player_done then
     -- You're fully recovered; you're only still "recovering" because the minions aren't all topped off.
     -- There's no point staying asleep (or even resting) when you're full: either cast on the skeletal
@@ -125,7 +150,7 @@ local function end_recovery(completed, reason)
   state.recover = false
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
-  recovery.settle, recovery.pct, recovery.minions_only = nil, READY_PCT, nil
+  recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
   if s then if completed then s.resolve() else s.reject(reason or "recovery interrupted") end end
 end
 
@@ -149,9 +174,10 @@ local function maybe_complete_recovery()
   -- posture so we escalate rest -> sleep).
   -- No posture gate: once you're standing-and-waiting on natural-regen minions (choose stands you up
   -- when you're full but they aren't), completion must still fire when they finally top off.
-  if state.recover and ready(recovery.pct)
-     and all_minions_ready and all_minions_ready(recovery.pct) then
-    echo("You have recovered and are ready to adventure!")
+  if state.recover and stat_ready(recovery.pct)
+     and (recovery.stat or (all_minions_ready and all_minions_ready(recovery.pct))) then
+    if recovery.stat then echo(string.format("Your %s is recovered — standing up.", STAT_LABEL[recovery.stat]))
+    else echo("You have recovered and are ready to adventure!") end
     send("stand")
     end_recovery(true)
     return true
@@ -335,6 +361,7 @@ heal_minions_kick = function() try_cast_heal() end
 
 -- Exposed for the test harness (Scripts/tests/recover_spec.lua, promise_spec.lua, minion_heal_spec.lua).
 _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
+             stat_ready = stat_ready, one_stat_ready = one_stat_ready, STAT_ALIASES = STAT_ALIASES,
              choose_recovery_position = choose_recovery_position, recovery_depth = recovery_depth,
              recovery = recovery, end_recovery = end_recovery,
              maybe_complete_recovery = maybe_complete_recovery,
@@ -1516,11 +1543,17 @@ end
 local function begin_recovery(frac)
   recovery.pct = frac
   state.recover = true
-  echo(string.format("Recovering — resting/sleeping; I'll stand you up once every vital hits %d%%.",
-       math.floor(frac * 100 + 0.5)))
+  local pctlabel = math.floor(frac * 100 + 0.5)
+  if recovery.stat then
+    echo(string.format("Recovering %s — resting/sleeping; I'll stand you up once %s hits %d%%.",
+         STAT_LABEL[recovery.stat], STAT_LABEL[recovery.stat], pctlabel))
+  else
+    echo(string.format("Recovering — resting/sleeping; I'll stand you up once every vital hits %d%%.", pctlabel))
+  end
   reset_posture()       -- fresh recovery → don't let a just-interrupted one's debounce eat the first rest
   choose_recovery_position()
-  heal_minions_kick()   -- start topping off no-regen minions right away (roster refreshes drive the rest)
+  -- Single-stat recovery is player-only — don't spend mana topping off minions.
+  if not recovery.stat then heal_minions_kick() end
 end
 
 -- recover([pct]) — start a recovery and return a PROMISE (Scripts/Promise.lua) that resolves when
@@ -1546,6 +1579,7 @@ function recover(target)
     -- superseded so it settles (and leaves the promise widget) instead of dangling forever, orphaned.
     if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
     recovery.settle = { resolve = resolve, reject = reject }
+    recovery.stat, recovery.minions_only = nil, nil   -- normal recovery: every vital, heal minions too
     begin_recovery(frac)
     onCancel(function()
       -- Chain aborted: stand up and clear the recovery flag WITHOUT firing resolve/reject (the promise
@@ -1574,7 +1608,7 @@ function recover_minions()
     end
     if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
     recovery.settle = { resolve = resolve, reject = reject }
-    recovery.minions_only, state.recover = true, true
+    recovery.minions_only, recovery.stat, state.recover = true, nil, true
     echo("Healing your minions — casting until they're topped off (leaving your own vitals alone).")
     heal_minions_kick()
     onCancel(function()
@@ -1587,6 +1621,39 @@ doc("recover_minions", { sig = "recover_minions() -> promise", group = "combat",
   text = "Heal ONLY your skeletal minions (bolster/soothe) until topped off, leaving your own vitals and "
       .. "posture alone — no rest/sleep. Returns a promise; resolves when no minion needs a cast. Typed "
       .. "form: `recover minions` (and `recover minions off` to stop)." })
+
+-- recover_stat(stat[, pct]) — recover ONE vital only. `stat` is hp/health, mana/mp, or stamina/sp (any
+-- of the STAT_ALIASES). Runs the normal rest/sleep flow but the DONE condition watches just that stat
+-- (the others are ignored), and it never spends mana healing minions. Returns the usual recovery promise.
+function recover_stat(stat, target)
+  local key = STAT_ALIASES[tostring(stat):lower()]
+  return __promise(function(resolve, reject, onCancel)
+    if not key then echo("Unknown stat '" .. tostring(stat) .. "' — use hp, mana, or stamina."); resolve(); return end
+    local frac = READY_PCT
+    if target ~= nil then
+      local n = tonumber(target)
+      if n and n > 0 then frac = (n > 1) and (n / 100) or n end   -- accept 95 or 0.95
+    end
+    if frac > 1 then frac = 1 end
+    if one_stat_ready(key, frac) then
+      echo(string.format("Already recovered — %s at target.", STAT_LABEL[key])); resolve(); return
+    end
+    if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
+    recovery.settle = { resolve = resolve, reject = reject }
+    recovery.minions_only, recovery.stat = nil, key
+    begin_recovery(frac)
+    onCancel(function()
+      if state.recover then send("stand") end
+      recovery.settle, recovery.pct, recovery.stat, state.recover = nil, READY_PCT, nil, false
+      reset_minion_heal()
+    end)
+  end, "recover " .. STAT_LABEL[key or "hp"])
+end
+doc("recover_stat", { sig = "recover_stat(stat[, pct]) -> promise", group = "combat",
+  text = "Recover ONE vital only — `stat` is hp/health, mana/mp, or stamina/sp. Same rest/sleep flow as "
+      .. "recover(), but done as soon as that single stat hits `pct` (default 90%); ignores the other "
+      .. "vitals and never heals minions. Typed form: `recover hp` / `recover mana` / `recover stamina`.",
+  example = "#recover_stat('mana', 95)" })
 
 -- Aliases: `state` dumps the snapshot; `recover` rests/sleeps until ready, then auto-stands.
 alias([[^state$]], function() echo(describe_state()) end)
@@ -1629,6 +1696,19 @@ end)
 alias([[^recover minions off$]], function()
   if state.recover then echo("Ending minion healing."); end_recovery(false, "cancelled")
   else echo("Not recovering.") end
+end)
+
+-- `recover hp|health|mana|mp|stamina|sp|...` — recover just ONE vital (ignores the others, no minion
+-- casts). More specific than `^recover$`, so it wins the alias match. `recover off` still stops it.
+alias([[^recover (hp|health|hitpoints|mana|mp|stamina|stam|sta|sp)$]], function(_, word)
+  local key = STAT_ALIASES[word:lower()]
+  if state.recover then
+    echo("Already recovering — 'recover off' to stop.")
+  elseif one_stat_ready(key) then
+    echo(string.format("Already recovered — %s at 90%%+.", STAT_LABEL[key]))
+  else
+    recover_stat(word)   -- promise-backed, so it shows in the widget as "recover HP/mana/stamina"
+  end
 end)
 
 -- `recover off` — the only way to end an in-progress recovery (bare `recover` no longer toggles).
