@@ -57,12 +57,40 @@ test("an un-named corpse is left intact when SOME corpse in the batch DID hold l
   end)
 end)
 
-test("the bsac result advances to sac (removes the corpse), then re-processes the same index", function()
-  with_corpse({ on = true, active = true, idx = 1, step = "bsac", cur_name = nil, with_items = {} }, function(sent)
+test("sac is STREAM-driven: corpse_sac sends `sac` and WAITS for the god's reply (no early re-harvest)", function()
+  with_corpse({ on = true, active = true, idx = 1, step = "bsac", remaining = 2, cur_name = nil,
+                with_items = {} }, function(sent)
     corpse_sac()
     expect(sent[1]):eq("sac 1.corpse")
-    expect(sent[2]):eq("harvest teeth 1.corpse")   -- corpse_process re-runs at the SAME index (no `get all`)
-    expect(corpse.cur_name):eq(nil)                 -- name re-learned per corpse
+    expect(#sent):eq(1)                              -- nothing else until the sac is confirmed
+  end)
+end)
+
+test("a CONFIRMED sac drops `remaining` and re-processes the SAME index (the next corpse shifted in)", function()
+  with_corpse({ on = true, active = true, idx = 1, step = "sac", remaining = 2, cur_name = "old",
+                with_items = {} }, function(sent)
+    corpse_sac_done("ok")                            -- "Draak appreciates your sacrifice of the corpse of X."
+    expect(corpse.remaining):eq(1)                   -- one fewer corpse in the room
+    expect(sent[1]):eq("harvest teeth 1.corpse")     -- re-harvest the index the next corpse shifted into
+    expect(corpse.cur_name):eq(nil)                  -- name re-learned per corpse
+  end)
+end)
+
+test("a sac that FAILS (corpse too big) leaves it intact and steps PAST it — no decrement", function()
+  with_corpse({ on = true, active = true, idx = 1, step = "sac", remaining = 3, with_items = {} }, function(sent)
+    corpse_sac_done("fail")                          -- "…is too big for you to sacrifice."
+    expect(corpse.remaining):eq(3)                   -- still there → not removed
+    expect(corpse.idx):eq(2)                         -- stepped past it, next corpse
+    expect(sent[1]):eq("harvest teeth 2.corpse")
+  end)
+end)
+
+test("a duplicate sac reply (god line + gold line) is ignored — step already advanced", function()
+  with_corpse({ on = true, active = true, idx = 1, step = "sac", remaining = 2, with_items = {} }, function(sent)
+    corpse_sac_done("ok")                            -- first reply advances (step -> teeth)
+    local n = #sent
+    corpse_sac_done("ok")                            -- second reply for the same sac: gated out (step ~= "sac")
+    expect(#sent):eq(n)
   end)
 end)
 
@@ -88,29 +116,41 @@ test("note_kill counts every corpse we made (not just distinct kinds)", function
   corpse.kills = snap; corpse.kill_count = 0
 end)
 
-test("the walk STOPS once we've stepped past our kill count — no probe of a corpse we never made", function()
-  -- One kill, its single corpse was left intact (loot/unknown name) so idx advanced to 2. With only one
-  -- kill there is no 2.corpse, so the pass must end WITHOUT sending `harvest ... 2.corpse`.
-  with_corpse({ on = true, active = true, idx = 2, kill_count = 1, killed = true, settle = nil }, function(sent)
+test("the walk STOPS once idx passes the corpses that REMAIN — no probe of a corpse we never made", function()
+  -- One corpse remains but it was left intact (loot/unknown name) so idx advanced to 2. There is no
+  -- 2.corpse, so the pass must end WITHOUT sending `harvest ... 2.corpse`.
+  with_corpse({ on = true, active = true, idx = 2, remaining = 1, killed = true, settle = nil }, function(sent)
     corpse_process()
     for _, c in ipairs(sent) do expect(c:find("harvest") == nil):eq(true) end   -- nothing probed
     expect(corpse.active):eq(false)                                             -- pass wrapped up
   end)
 end)
 
-test("the walk still harvests every index UP TO the kill count", function()
-  with_corpse({ on = true, active = true, idx = 2, kill_count = 2, killed = true, with_items = {} }, function(sent)
+test("the walk still harvests every index UP TO the remaining count", function()
+  with_corpse({ on = true, active = true, idx = 2, remaining = 2, killed = true, with_items = {} }, function(sent)
     corpse_process()
-    expect(sent[1]):eq("harvest teeth 2.corpse")   -- idx 2 <= 2 kills → still processed
+    expect(sent[1]):eq("harvest teeth 2.corpse")   -- idx 2 <= 2 remaining → still processed
     expect(corpse.active):eq(true)
   end)
 end)
 
-test("an unknown kill count (0) falls back to walking until the game says no such corpse", function()
-  with_corpse({ on = true, active = true, idx = 2, kill_count = 0, killed = true, with_items = {} }, function(sent)
+test("an unknown remaining count (nil) falls back to walking until the game says no such corpse", function()
+  with_corpse({ on = true, active = true, idx = 2, remaining = nil, killed = true, with_items = {} }, function(sent)
     corpse_process()
     expect(sent[1]):eq("harvest teeth 2.corpse")   -- no cap → old behaviour (miss line terminates)
     expect(corpse.active):eq(true)
+  end)
+end)
+
+test("after sacrificing corpse 1, a leftover LOOT corpse doesn't cause a phantom 2.corpse probe", function()
+  -- The reported bug: two kills, corpse 1 empty (sac'd → remaining 2->1, and corpse 2 shifted into idx 1),
+  -- corpse 2 holds loot so it's left intact and idx advances to 2. Only one corpse remains (now at idx 1),
+  -- so there is NO 2.corpse — the walk must end instead of probing it.
+  with_corpse({ on = true, active = true, idx = 1, step = "spellcomps", remaining = 1,
+                cur_name = "a jaguar", with_items = { ["a jaguar"] = true } }, function(sent)
+    corpse_finish()                                  -- loot corpse → leave intact, idx->2 > remaining 1 → done
+    expect(corpse.active):eq(false)                  -- walk ended (corpse_done also resets idx)
+    for _, c in ipairs(sent) do expect(c:find("2%.corpse") == nil):eq(true) end   -- never probed 2.corpse
   end)
 end)
 

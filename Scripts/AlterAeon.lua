@@ -1984,7 +1984,7 @@ end
 -- the promise widget, whether the pass finished naturally or was stopped (off / room change).
 function corpse_done()
   corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
-  corpse.promise = nil; corpse.kills = {}; corpse.kill_count = 0   -- fresh kind tally + kill count for the next batch
+  corpse.promise = nil; corpse.kills = {}; corpse.kill_count = 0; corpse.remaining = nil   -- fresh tallies for the next batch
   if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   local s = corpse.settle; corpse.settle = nil
   if s then s.resolve() end
@@ -1993,6 +1993,9 @@ end
 function corpse_start()
   if not corpse.on or corpse.active or in_combat() then return end
   corpse.active = true; corpse.idx = 1
+  -- How many of OUR corpses to expect in the room this pass. Decremented on each confirmed sac (see
+  -- corpse_sac_done). nil when we didn't count any kills → walk to the miss line (old behaviour).
+  corpse.remaining = (corpse.kill_count and corpse.kill_count > 0) and corpse.kill_count or nil
   -- Surface the harvest pass as a tracked promise so it shows in the HUD promise widget ("harvesting
   -- corpses") and disappears when corpse_done() resolves it. Guarded so the driver runs without Promise.lua.
   -- CRITICAL: start the promise SYNCHRONOUSLY (p.__start()) so corpse.settle is wired *before* we harvest.
@@ -2013,14 +2016,12 @@ end
 -- Loot + harvest the corpse at corpse.idx. Loot triggers set `dirty`; harvest terminals advance us.
 function corpse_process()
   if not corpse.active then return end
-  -- Don't walk past what we actually killed: we know how many corpses we made this batch (kill_count), so
-  -- once we've stepped past the last one, stop — rather than probing a `<n>.corpse` that was never there
-  -- (the "harvesting 2.corpse when there's no 2.corpse" the user saw). The gagged 'no such corpse' miss
-  -- line is still a backstop for the rarer case where a sac shifts indices under us. Falls back to
-  -- CORPSE_MAX when the count is unknown (0). (Aside: caps to OUR kills, so a stranger's corpse sharing the
-  -- room won't extend the walk.)
-  local cap = (corpse.kill_count and corpse.kill_count > 0) and math.min(corpse.kill_count, CORPSE_MAX) or CORPSE_MAX
-  if corpse.idx > cap then corpse_done(); return end
+  if corpse.idx > CORPSE_MAX then corpse_done(); return end   -- absolute safety net
+  -- Bound the walk by how many of OUR corpses are still in the room. `remaining` starts at the kill count
+  -- and DROPS on each confirmed sac — a sac removes the corpse and shifts every higher index down one — so
+  -- once idx passes it we're done, instead of probing a `<n>.corpse` a sac already collapsed (the "look at
+  -- 2.corpse after sacrificing the first" bug). nil = kill count unknown → walk to the gagged miss line.
+  if corpse.remaining and corpse.idx > corpse.remaining then corpse_done(); return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
   corpse.step, corpse.cur_name = "teeth", nil   -- cur_name is re-learned from this corpse's harvest reply
   -- Learned skip: if we've killed a single, unambiguous kind and know it has no teeth, don't waste the
@@ -2082,8 +2083,24 @@ function corpse_sac()
   if not corpse.active or corpse.step == "sac" then return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
   corpse.step = "sac"
-  send("sac " .. corpse.idx .. ".corpse")   -- removes it; the next corpse shifts into corpse.idx...
-  corpse_process()                          -- ...so re-process the SAME index
+  send("sac " .. corpse.idx .. ".corpse")   -- removes it — but WAIT for the god's reply before re-processing
+end
+
+-- The `sac` resolved (STREAM-driven, like every other step). "ok" = the god accepted it (an "appreciates
+-- your sacrifice"/"gold coins for your sacrifice" line): the corpse is GONE, so one fewer remains and the
+-- next corpse has shifted into THIS index — drop `remaining` and re-process the same idx. "fail" (e.g. the
+-- corpse is too big to sacrifice) = it's still here: leave it intact and step PAST it, exactly like a
+-- loot corpse. Doing this off the real reply (not optimistically) is what keeps the index/`remaining`
+-- bookkeeping honest — sacrificing shifts the indices, so we must not re-index until it's confirmed gone.
+function corpse_sac_done(result)
+  if not corpse.active or corpse.step ~= "sac" then return end
+  corpse_touch()
+  if result == "fail" then
+    corpse.idx = corpse.idx + 1                              -- couldn't sac it → leave it, next index
+  elseif corpse.remaining then
+    corpse.remaining = corpse.remaining - 1                  -- confirmed gone → one fewer corpse in the room
+  end
+  corpse_process()                                           -- re-process (same idx on success — the next shifted in)
 end
 
 -- A mob DIED -> remember it and try to start (usually a no-op: you're still fighting, so corpse_start
@@ -2152,6 +2169,17 @@ trigger([[^You .+ tie off the ends]],
 -- Blood-sacrifice result (success OR the undead/"not intact" refusal) -> the final sacrifice.
 trigger([[^You sacrifice blood from]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
 trigger([[^You can only blood sacrifice]], function() if corpse.active and corpse.step == "bsac" then corpse_sac() end end)
+
+-- The `sac` result. The god's acceptance comes in a few shapes — either a god/pantheon "appreciates your
+-- sacrifice of <the corpse/gutted carcass/skinned corpse/… of X>" or a "You receive N gold coins for your
+-- sacrifice of <…>" — all meaning the corpse is GONE (indices shift). We gate on step=="sac", so we don't
+-- need to match the exact corpse wording: any acceptance during our sac IS our sac. A too-big corpse can't
+-- be sacrificed and stays, so that's the failure path. corpse_sac_done ignores a duplicate reply (the god
+-- line + a gold line can both fire) because it changes the step on the first.
+local function on_sac_ok() if corpse.active and corpse.step == "sac" then corpse_sac_done("ok") end end
+trigger([[appreciates your sacrifice of]], on_sac_ok)
+trigger([[^You receive \d+ gold coins? for your sacrifice of]], on_sac_ok)
+trigger([[is too big for you to sacrifice]], function() if corpse.active and corpse.step == "sac" then corpse_sac_done("fail") end end)
 
 -- kxwt.corpse('on'|'off'|'status') (dispatched from the kxwt table). Returns true if it handled the verb.
 function corpse_command(verb, rest)
