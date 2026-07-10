@@ -67,6 +67,7 @@ local all_minions_ready            -- (frac) -> bool: every minion at its target
 local heal_minions_kick            -- () -> nil: (re)start the minion-heal driver
 local reset_minion_heal            -- () -> nil: clear the minion-heal driver (on recovery end/cancel)
 local recovery                     -- { pct, settle, stat } — the active recovery's target + promise callbacks
+local self_cast_wanted             -- () -> bool: fwd decl (choose_recovery_position, above its definition)
 
 -- Single-stat recovery (`recover hp|mana|stamina`): rest/sleep until just ONE vital hits the threshold,
 -- ignoring the others (and ignoring minions). recovery.stat is the canonical key ("hp"/"mana"/"stam");
@@ -135,7 +136,16 @@ local function choose_recovery_position()
   -- heals you a bit slower than sleep, but the minions can't heal themselves at all.
   local hp, mp, sp = pct(state.hp, state.maxhp), pct(state.mana, state.maxmana), pct(state.stam, state.maxstam)
   local want = (hp > 0.85 and mp < 1 and sp > 0.75) and "rest" or "sleep"
-  if want == "sleep" and cast_pending then want = "rest" end
+  -- "Sleep until sharp, then cast": when spending mana on your own hp/stam is on the table, first SLEEP
+  -- to earn the sharp buff (fast regen — which alone may finish the job); once sharp, drop to REST so we
+  -- can actually cast the deficits the boosted regen still can't close quickly.
+  local self_want = self_cast_wanted()
+  if self_want then want = state.sharp and "rest" or "sleep" end
+  if want == "sleep" and cast_pending then want = "rest" end   -- minions need casting → must be awake
+  -- We must be AWAKE (resting, not asleep) to cast: for the minions, or once sharp for our own vitals.
+  -- The deepen-only guard below would otherwise leave us asleep, so force the sleep→rest downgrade here.
+  local need_awake = cast_pending or (self_want and state.sharp)
+  if want == "rest" and need_awake and recovery_depth(state.position) >= 2 then send_posture("rest"); return end
   local target = (want == "sleep") and 2 or 1
   if recovery_depth(state.position) >= target then return end   -- already at least this deep → nothing to do
   send_posture(want)
@@ -224,6 +234,69 @@ end
 -- (the weak heal) so the game doesn't refuse it as "doesn't need that much healing" near full.
 local BOLSTER_BELOW = 0.70
 
+-- ---- Self spell-recovery: spend surplus mana to top your OWN vitals faster than natural regen -------
+--
+-- A cleric can convert mana into hp (`bolster`/`soothe` on yourself — needs your name) or into stamina
+-- (`refresh`, self by default). Mana can only come back by RESTING (no spell makes mana), so we convert
+-- only when it genuinely "beats waiting": the target stat is many ticks of natural regen from its target
+-- AND paying the spell's mana won't make mana the slower bottleneck. Natural regen rates come from
+-- parsing `show regen` (state.regen = {hp, mana, move, position}; state.sharp) — auto-queried (gagged)
+-- while recovering. A tick is ~30s; regen is fastest asleep, less resting, least standing, and higher
+-- still while "sharp" (earned by sleeping a couple ticks) — so the plan is: sleep to get sharp first,
+-- then rest and cast only the deficits the (now boosted) regen still can't close quickly.
+local REFRESH_COST       = 15     -- mana; help: "Spell: refresh  Mana: 15"
+local HEAL_COST          = 14     -- mana; bolster's cost (the pricier of the two — conservative guard)
+local CAST_MIN_TICKS     = 3      -- don't bother casting if the stat is within this many ticks of target
+local SELF_CAST_MANA_MIN = 0.50   -- only trade mana for hp/stam when mana is at least this full
+
+-- ticks_to_target(cur,max,rate,frac) — ticks of natural regen to reach frac*max. 0 if already there;
+-- nil when we have no positive rate (→ "unknown", never treated as slow-enough-to-cast).
+local function ticks_to_target(cur, max, rate, frac)
+  local target = (frac or READY_PCT) * (max or 0)
+  local deficit = target - (cur or 0)
+  if deficit <= 0 then return 0 end
+  if not rate or rate <= 0 then return nil end
+  return deficit / rate
+end
+
+-- cast_beats_waiting(cur,max,rate,cost) — is spending `cost` mana to top this stat faster than waiting?
+-- True only with fresh regen data, when the stat is > CAST_MIN_TICKS from target, and paying `cost`
+-- keeps mana's own ticks-to-target BELOW the stat's (so we never make mana the slower bottleneck — this
+-- is the whole "only if it beats waiting" policy, and it protects mana, which no spell restores).
+local function cast_beats_waiting(cur, max, rate, cost)
+  local r = state.regen
+  if not r then return false end
+  local st = ticks_to_target(cur, max, rate, recovery and recovery.pct)
+  if not st or st <= CAST_MIN_TICKS then return false end
+  local mt = ticks_to_target((state.mana or 0) - cost, state.maxmana, r.mana, recovery and recovery.pct)
+  if mt == nil then return false end       -- no mana rate known → don't risk starving mana
+  return mt < st
+end
+
+-- self_cast_wanted() — cheap gate: is a self-cast even in scope? (mana at least half full, a physical
+-- stat below the active target, and this recovery covers that stat — never during minion-only recovery).
+-- Used for BOTH the posture cap (stay at rest so we can cast) and as a precondition to cast_beats_waiting.
+self_cast_wanted = function()
+  if recovery and recovery.minions_only then return false end
+  if not state.maxmana or pct(state.mana, state.maxmana) < SELF_CAST_MANA_MIN then return false end
+  local st = recovery and recovery.stat
+  local frac = (recovery and recovery.pct) or READY_PCT
+  local want_hp   = (st == nil or st == "hp")   and pct(state.hp, state.maxhp)     < frac
+  local want_stam = (st == nil or st == "stam") and pct(state.stam, state.maxstam) < frac
+  return want_hp or want_stam
+end
+
+-- Auto-refresh regen numbers for the CURRENT posture, gagged (see the show-regen trigger). Debounced so
+-- we only have one query outstanding; the parse clears the flag, and a 2s backstop clears it if the
+-- reply never matches (so a later manual `show regen` isn't swallowed).
+local regen_query_pending = false
+local function query_regen()
+  if regen_query_pending then return end
+  regen_query_pending = true
+  send("show regen")
+  after(2, function() regen_query_pending = false end)
+end
+
 -- Skeletal/undead constructs the player raises: no natural regen, must be spell-healed. Matched by name
 -- ("skeletal spider", "skeletal mage", "bone ..."). Everything else is assumed to self-regen.
 local function minion_needs_spell_heal(name)
@@ -269,6 +342,7 @@ local minion_heal = { casting = false, sweep = {}, blocked = {}, refuse_streak =
 reset_minion_heal = function()
   minion_heal.casting, minion_heal.refuse_streak = false, 0
   minion_heal.sweep, minion_heal.blocked, minion_heal.last = {}, {}, nil
+  minion_heal.self_hp_blocked, minion_heal.self_stam_blocked = false, false
   minion_heal.token = minion_heal.token + 1   -- kill any in-flight timeout
 end
 
@@ -295,14 +369,28 @@ local function keyword_count(word)
   return n
 end
 
+-- Fire the 3s reply-backstop shared by every recovery cast: if no reply line arrives (silent failure),
+-- clear the casting flag and try the next cast. Returns the token so a real reply can invalidate it.
+local function arm_cast_backstop()
+  local token = minion_heal.token + 1
+  minion_heal.token = token
+  after(3, function() if minion_heal.token == token then minion_heal.casting = false; try_cast_heal() end end)
+end
+
+local try_self_cast   -- fwd decl: try_cast_heal falls through to it when no minion needs a heal
+
 -- Try to cast one heal at the most-hurt skeletal minion. No-op when not recovering, a cast is already
--- out, casting is blocked (busy action / asleep), or nothing needs healing. Exposed via _AA_TEST.
+-- out, casting is blocked (busy action / asleep), or nothing needs healing. When no minion needs a heal
+-- it falls through to try_self_cast (spend surplus mana on your own vitals). Exposed via _AA_TEST.
 local function try_cast_heal()
   if not state.recover or minion_heal.casting then return end
   if (state.action or 0) >= 50 then return end          -- a busy action prevents spellcasting
   if state.position == "sleeping" then return end        -- can't cast asleep (posture logic avoids this)
-  local m, f = most_hurt_spell_minion()
-  if not m then return end
+  -- Single-stat recovery (recover hp/stamina) is player-only — it never heals minions; skip straight to
+  -- the self-cast. Full recovery (stat==nil) heals minions first, then falls through to self-casts.
+  local m, f
+  if not (recovery and recovery.stat) then m, f = most_hurt_spell_minion() end
+  if not m then try_self_cast(); return end
   local word = minion_target_word(m.name)
   local K = keyword_count(word)
   local target = word
@@ -313,13 +401,44 @@ local function try_cast_heal()
     target = ord .. "." .. word
   end
   local spell = (f < BOLSTER_BELOW) and "bolster" or "soothe"
-  minion_heal.last = { word = word, ord = ord, K = K }
+  minion_heal.last = { word = word, ord = ord, K = K, kind = "minion" }
   minion_heal.casting = true
   send("c " .. spell .. " " .. target)
-  -- Backstop: if no reply line arrives (e.g. a silent failure), clear the flag and try again shortly.
-  local token = minion_heal.token + 1
-  minion_heal.token = token
-  after(3, function() if minion_heal.token == token then minion_heal.casting = false; try_cast_heal() end end)
+  arm_cast_backstop()
+end
+
+-- Spend surplus mana on YOUR own lagging vitals — one cast, paced like the minion driver. hp is tried
+-- before stamina (survivability first). Each stat is gated by cast_beats_waiting (regen vs mana cost),
+-- and a stat we've given up on this recovery (self_*_blocked, set on a refuse) is skipped. Self-heals
+-- need your name; refresh is self by default and can't be cast in combat (recovery isn't, but guard).
+try_self_cast = function()
+  if not self_cast_wanted() then return end
+  local frac = (recovery and recovery.pct) or READY_PCT
+  local st   = recovery and recovery.stat
+  local r    = state.regen
+  -- self HP via bolster/soothe (needs your name)
+  if (st == nil or st == "hp") and not minion_heal.self_hp_blocked and state.name then
+    local hpf = pct(state.hp, state.maxhp)
+    if hpf < frac and cast_beats_waiting(state.hp, state.maxhp, r and r.hp, HEAL_COST) then
+      local spell = (hpf < BOLSTER_BELOW) and "bolster" or "soothe"
+      minion_heal.last = { kind = "self_hp" }
+      minion_heal.casting = true
+      send("c " .. spell .. " " .. state.name)
+      arm_cast_backstop()
+      return
+    end
+  end
+  -- self stamina via refresh (self-target; never in/at combat)
+  if (st == nil or st == "stam") and not minion_heal.self_stam_blocked and not engaged() then
+    local spf = pct(state.stam, state.maxstam)
+    if spf < frac and cast_beats_waiting(state.stam, state.maxstam, r and r.move, REFRESH_COST) then
+      minion_heal.last = { kind = "self_stam" }
+      minion_heal.casting = true
+      send("c refresh")
+      arm_cast_backstop()
+      return
+    end
+  end
 end
 
 -- Settle the outstanding cast on one of the game's reply lines, then decide the next move.
@@ -332,6 +451,19 @@ local function minion_cast_settled(kind)
   minion_heal.casting = false
   minion_heal.token = minion_heal.token + 1     -- a reply beat the timeout; invalidate it
   local last = minion_heal.last
+  -- Self-cast (refresh / bolster / soothe on yourself): no ordinal sweep. ok/fail just re-drive; a refuse
+  -- ("don't need that much healing" / "must use your name") means this vital won't take the spell right
+  -- now, so stop trying it this recovery (the 3s backstop + fresh prompts still re-evaluate next tick).
+  if last and last.kind and last.kind ~= "minion" then
+    if kind == "ok" then minion_heal.refuse_streak = 0
+    elseif kind == "fail" then -- fizzle → try again next evaluation
+    else
+      if last.kind == "self_hp" then minion_heal.self_hp_blocked = true
+      elseif last.kind == "self_stam" then minion_heal.self_stam_blocked = true end
+    end
+    try_cast_heal()
+    return
+  end
   if kind == "ok" then
     minion_heal.refuse_streak = 0
     return   -- next kxwt_group_end drives the following cast (roster reflects the new HP by then)
@@ -369,7 +501,9 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,
              minion_heal = minion_heal, try_cast_heal = try_cast_heal,
              minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal,
-             reset_posture = reset_posture }
+             reset_posture = reset_posture,
+             ticks_to_target = ticks_to_target, cast_beats_waiting = cast_beats_waiting,
+             self_cast_wanted = self_cast_wanted, try_self_cast = try_self_cast }
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
@@ -486,9 +620,12 @@ end)
 
 -- Position. Starting a recovery sits/sleeps as appropriate.
 trigger([[^kxwt_position (.+)$]], function(_, p)
+  local changed = (state.position ~= p)
   state.position = p
   -- If we're recovering but got knocked back to a non-recovery posture (stood up, kicked awake), re-issue.
   if state.recover and recovery_depth(p) == 0 then choose_recovery_position() end
+  -- Regen rates are per-posture — refresh them (gagged) so the cast-vs-wait decision uses the right numbers.
+  if state.recover and changed and (not state.regen or state.regen.position ~= p) then query_regen() end
 end)
 
 -- Combat. -1 = not fighting; otherwise "<pct> <gender> <name>".
@@ -569,13 +706,37 @@ trigger([[^kxwt_group_end$]], function()
   if state.recover then heal_minions_kick(); maybe_complete_recovery() end
 end)
 
--- Minion-heal pacing: settle the outstanding cast on the game's own reply lines (see the minion-healing
--- block above). Anchored so another player's speech can't spoof them.
+-- Recovery-cast pacing: settle the outstanding cast on the game's own reply lines (see the recovery
+-- block above). Anchored so another player's speech can't spoof them. The construct wording ("repair the
+-- damage to X's body") is minion-only; the "feel ..." lines are self-casts; fail/refuse route by
+-- last.kind inside minion_cast_settled (bolster/soothe are shared between self and minions).
 trigger([[^You repair the damage to .+'s body\.$]], function() minion_cast_settled("ok") end)
-trigger([[^You fail to cast the spell '(soothe wounds|bolster)'\.$]], function() minion_cast_settled("fail") end)
+trigger([[^You feel less tired\.$]], function() minion_cast_settled("ok") end)   -- refresh, self
+trigger([[^You feel a little better\.$]], function() minion_cast_settled("ok") end)   -- soothe, self
+trigger([[^You will your injuries to heal and your soul to take courage\.$]],        -- bolster, self
+  function() minion_cast_settled("ok") end)
+trigger([[^You fail to cast the spell '(soothe wounds|bolster|refresh)'\.$]], function() minion_cast_settled("fail") end)
 trigger([[^.+ doesn't need that much healing right now\.$]], function() minion_cast_settled("full") end)
 trigger([[^If you really want to cast that on yourself, you must use your name\.$]],
   function() minion_cast_settled("notgt") end)
+
+-- `show regen` — regen per tick at the CURRENT posture, drives the recovery cast-vs-wait decision.
+-- Two forms: with the "feel sharp" prefix (the sharp buff, from sleeping a while → faster regen) and
+-- without. We gag ONLY our own auto-query (query_regen sets regen_query_pending); a manual `show regen`
+-- the player typed still prints.
+trigger([[^You (feel sharp, and )?currently gain (\d+) hitpoints, (\d+) mana, and (\d+) movement while (\w+)\.$]],
+  function(_, sharp, hp, mana, move, posn)
+    state.regen = { hp = tonumber(hp), mana = tonumber(mana), move = tonumber(move), position = posn }
+    state.sharp = (sharp ~= nil and sharp ~= "")
+    if regen_query_pending then regen_query_pending = false; return false end   -- gag our auto-query
+  end)
+-- Sharp up/down. Sharp changes every regen rate, so re-query while recovering to keep state.regen fresh.
+trigger([[^You find yourself feeling sharp and ready to take on anything!$]], function()
+  state.sharp = true; if state.recover then query_regen() end
+end)
+trigger([[^You no longer feel sharp and at your best\.$]], function()
+  state.sharp = false; if state.recover then query_regen() end
+end)
 
 -- Environment: sky/time/weather. kxwt_time is "<mud-minutes> <daypart> <clock> <am/pm>";
 -- kxwt_precipitation is a 0-100ish intensity; kxwt_sky is "<outdoors> <sky-visible> <overcast>" (1/0).
@@ -1552,8 +1713,12 @@ local function begin_recovery(frac)
   end
   reset_posture()       -- fresh recovery → don't let a just-interrupted one's debounce eat the first rest
   choose_recovery_position()
-  -- Single-stat recovery is player-only — don't spend mana topping off minions.
-  if not recovery.stat then heal_minions_kick() end
+  -- Kick the recovery-cast driver (heals skeletal minions on a full recovery, and/or spends surplus mana
+  -- on your own vitals). It internally respects the mode: minion-only skips self, single-stat skips
+  -- minions, `recover mana` casts nothing (no spell makes mana).
+  heal_minions_kick()
+  -- Fetch current-posture regen numbers (gagged) so cast-vs-wait has data — unless this is minion-only.
+  if not recovery.minions_only then query_regen() end
 end
 
 -- recover([pct]) — start a recovery and return a PROMISE (Scripts/Promise.lua) that resolves when
