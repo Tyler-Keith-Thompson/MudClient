@@ -53,6 +53,12 @@ end
 
 _AA_TEST = _AA_TEST or {}
 
+-- The shared declarative DSL (field/replies/on_all). require() in the live client (hot-reloadable), a
+-- dofile fallback for the pure-Lua test harness (where the require searcher's host primitives are stubbed).
+pcall(require, "_dsl")
+if not __dsl then dofile("Scripts/_dsl.lua") end
+local field, number, flag = __dsl.field, __dsl.number, __dsl.flag
+
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
 gag([[^kxwt_]])
@@ -103,36 +109,30 @@ setmetatable(kxwt, { __call = function(_, args)
   end
 end })
 
--- Walk direction: numeric code -> name (used by the map). A converter for the walkdir scalar field below.
+-- Walk direction: numeric code -> name (used by the map). The converter for the walkdir field below;
+-- an unknown code returns nil, which `field :via` assigns straight through to clear state.walkdir.
 local WALK = { ["0"]="north", ["1"]="east", ["2"]="south", ["3"]="west", ["4"]="northeast",
   ["5"]="southeast", ["6"]="southwest", ["7"]="northwest", ["20"]="up", ["30"]="down" }
+local function walk_name(code) return WALK[code] end
 
 -- ---- Flat scalar kxwt fields --------------------------------------------------------------------
--- Every trivial "one capture -> one state key" kxwt line, declared as data so the whole flat-field
--- surface reads at a glance. `conv` (optional) transforms the captured string; when it returns nil the
--- field is cleared (walkdir on an unknown code), so we assign conv(v) directly rather than `conv(v) or v`.
--- Richer fields (prompt, position, room coords, group, environment, ...) keep their own triggers.
-local N = tonumber
-local SCALAR_FIELDS = {
-  { [[^kxwt_myname (.+)$]],         "name" },
-  { [[^kxwt_gold (-?\d+)]],         "gold",    N },
-  -- exp is your unspent EXPERIENCE POOL; expcap the most you can earn from a SINGLE KILL (a static-ish
-  -- ceiling) — NOT experience-to-level, which isn't a kxwt field (scraped from `level`/`score` below).
-  { [[^kxwt_exp (-?\d+)]],          "exp",     N },
-  { [[^kxwt_expcap (-?\d+)]],       "expcap",  N },
-  { [[^kxwt_rshort (.+)$]],         "room_name" },
-  { [[^kxwt_area \d+ (.+)$]],       "area" },
-  { [[^kxwt_terrain (\d+)]],        "terrain", N },
-  { [[^kxwt_precipitation (\d+)]],  "precip",  N },
-  -- action code (butchering, turning, ...). Per 'help kxwt', >= 50 PREVENTS spellcasting; a room change
-  -- clears it (the separate kxwt_rvnum trigger below), since moving cancels most actions.
-  { [[^kxwt_action (\d+)]],         "action",  N },
-  { [[^kxwt_walkdir (\d+)]],        "walkdir", function(d) return WALK[d] end },
-}
-for _, f in ipairs(SCALAR_FIELDS) do
-  local key, conv = f[2], f[3]
-  trigger(f[1], function(_, v) if conv then state[key] = conv(v) else state[key] = v end end)
-end
+-- Every trivial "one capture -> one state key" kxwt line, declared through the field() DSL so the whole
+-- flat-field surface reads as a spec: which line, which state key, what type. Richer fields (position,
+-- room coords, group, time, ...) keep their own triggers where the extra logic wouldn't read as a spec.
+field [[^kxwt_myname (.+)$]]        : into "name"
+field [[^kxwt_gold (-?\d+)]]        : into "gold"      : as (number)
+-- exp is your unspent EXPERIENCE POOL; expcap the most you can earn from a SINGLE KILL (a static-ish
+-- ceiling) — NOT experience-to-level, which isn't a kxwt field (scraped from `level`/`score` below).
+field [[^kxwt_exp (-?\d+)]]         : into "exp"        : as (number)
+field [[^kxwt_expcap (-?\d+)]]      : into "expcap"     : as (number)
+field [[^kxwt_rshort (.+)$]]        : into "room_name"
+field [[^kxwt_area \d+ (.+)$]]      : into "area"
+field [[^kxwt_terrain (\d+)]]       : into "terrain"    : as (number)
+field [[^kxwt_precipitation (\d+)]] : into "precip"     : as (number)
+-- action code (butchering, turning, ...). Per 'help kxwt', >= 50 PREVENTS spellcasting; a room change
+-- clears it (the separate kxwt_rvnum trigger below), since moving cancels most actions.
+field [[^kxwt_action (\d+)]]        : into "action"     : as (number)
+field [[^kxwt_walkdir (\d+)]]       : into "walkdir"    : via (walk_name)
 
 -- Per-class level costs, scraped from the `level`/`score` table. Rows look like:
 --   "Mage          8                27000   (100%)   <- You can level!"
@@ -184,13 +184,11 @@ trigger([[^(Mage|Cleric|Thief|Warrior|Necromancer|Druid) +(\d+)(?: +(\d+)/ *(\d+
     schedule_classes_save()
   end)
 
--- Prompt: current/max for hp, mana, stamina. May complete a recovery.
-trigger([[^kxwt_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]], function(_, chp, mhp, cm, mm, cs, ms)
-  state.hp, state.maxhp = tonumber(chp), tonumber(mhp)
-  state.mana, state.maxmana = tonumber(cm), tonumber(mm)
-  state.stam, state.maxstam = tonumber(cs), tonumber(ms)
-  if __recovery_on_vitals then __recovery_on_vitals() end   -- drive recovery completion + lifetap (Recovery.lua)
-end)
+-- Prompt: current/max for hp, mana, stamina — six numbers straight into the vitals, then hand off to the
+-- recovery machine (completion + lifetap, Recovery.lua). Reads as the spec it is.
+field [[^kxwt_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]]
+  : into("hp", "maxhp", "mana", "maxmana", "stam", "maxstam") : as (number)
+  : then_(function() if __recovery_on_vitals then __recovery_on_vitals() end end)
 
 -- Position. Starting a recovery sits/sleeps as appropriate.
 trigger([[^kxwt_position (.+)$]], function(_, p)
@@ -268,9 +266,8 @@ end)
 trigger([[^kxwt_time (\d+) (\S+) (\S+) (\S+)$]], function(_, _mins, part, clock, ampm)
   state.daypart = part; state.clock = clock .. " " .. ampm
 end)
-trigger([[^kxwt_sky (\d+) (\d+) (\d+)]], function(_, o, v, c)
-  state.outdoors = tonumber(o) == 1; state.sky_visible = tonumber(v) == 1; state.overcast = tonumber(c) == 1
-end)
+field [[^kxwt_sky (\d+) (\d+) (\d+)]]
+  : into("outdoors", "sky_visible", "overcast") : as (flag)   -- three 1/0 flags -> booleans
 
 -- Moving cancels most actions, so clear the action code on a room change (the live value is parsed as a
 -- flat scalar field above).

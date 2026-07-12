@@ -205,3 +205,165 @@ test("library_pick_entry only yields a number that actually appeared in the cata
   local one = parse_library_list("2110 - the book of the sea     Topic: geography")
   expect(library_pick_entry(one, "What book is this?")):eq(2110)
 end)
+
+-- ==================================================================================================
+-- ASYNC LOOKUP FLOW — behaviour-level characterization (the SEND SEQUENCE, narration, and outcome)
+-- ==================================================================================================
+-- CHARACTERIZATION suite for the async answer flow (run_lookup / resolve_library / feed_lookup / the
+-- area query). These assert OBSERVABLE BEHAVIOUR — the exact `send` sequence the flow emits (`library
+-- list <kw>`, `library read <n>`, `area <kw>`, the `event answer <letter>` lock-in), the `[trivia]`
+-- narration, and the outcome (which letter is locked, labeled `library`/`area`/`guess`) — NOT the
+-- internal async-machine state (capture.active, T.area_rows, the callback nesting). The point: the
+-- reactive reimplementation (a promise chain over reply streams) must turn these green because it
+-- reproduces the same sends/echoes/outcomes. The library-hallucination fix is pinned here: a model's
+-- FABRICATED book number is NEVER `library read`, and an unresolved lookup degrades to a NARRATED guess
+-- (never a fabricated `library`-sourced answer).
+--
+-- The scenario is driven through the SAME seams the live triggers drive (on_question / on_choices kick
+-- the flow; collect_line / on_area_line feed reply lines). `send`/`echo` are captured, `after` is made
+-- fireable (a lookup's collection window is fired on demand), and ai_local_tools_request is stubbed with
+-- a queue of canned model turns. Every ASSERTION is on captured send/echo; reading nothing internal.
+
+local TT = _TRIVIA_TEST
+local LIBRARY_TOOL = '[{"name":"library_entry","arguments":"{\\"entry_number\\":%d}"}]'
+local function has_send(sent, needle)
+  for _, c in ipairs(sent) do if c:find(needle, 1, true) then return true end end
+  return false
+end
+
+-- Drive one trivia question end-to-end. `model` is a FIFO of canned ai_local_tools_request turns, each
+-- { tool = <tool_calls_json> } | { answer = "<letter>" } | { err = "<msg>" }. `drive(api)` feeds reply
+-- lines (api.line / api.area) and fires each lookup's window (api.fire, FIFO — lookups are sequential).
+local function flow(question, choices, model, drive)
+  local s_send, s_echo, s_after, s_cancel = send, echo, after, cancel
+  local s_tools, s_retr, s_rc = ai_local_tools_request, ai_retrieve, ai_rag_count
+  local sent, echoed, timers = {}, {}, {}
+  local mq, mi = model or {}, 0
+  send   = function(c) sent[#sent + 1] = c end
+  echo   = function(x) echoed[#echoed + 1] = (tostring(x):gsub("\27%[[%d;]*m", "")) end
+  -- Record timers with their delay: the promise layer schedules zero-delay auto-starts (and unhandled-
+  -- rejection surfacing) alongside the lookup COLLECTION windows (delay > 0). api.fire() advances to the
+  -- next real window, leaving the zero-delay housekeeping timers inert (the promise already ran synchronously).
+  after  = function(d, cb) timers[#timers + 1] = { delay = d, cb = cb }; return #timers end
+  cancel = function() end
+  ai_retrieve   = nil                       -- skip RAG grounding → decide("") straight away
+  ai_rag_count  = function() return 0 end
+  ai_local_tools_request = function(_sys, _user, _mt, _pf, _tools, cb)
+    mi = mi + 1
+    local r = mq[mi] or { answer = "a" }
+    if r.err then cb(nil, nil, r.err)
+    elseif r.tool then cb("", r.tool, nil)
+    else cb(r.answer or "a", nil, nil) end
+  end
+  local fired = 0
+  local api = {
+    sent = sent, echoed = echoed,
+    line = function(t) TT.collect_line(t) end,       -- a lookup reply line (library list/read output)
+    area = function(t) TT.on_area_line(t) end,        -- an `area` command row
+    fire = function()                                 -- close the next lookup window (skip zero-delay timers)
+      while fired < #timers do
+        fired = fired + 1
+        local t = timers[fired]
+        if t and (t.delay or 0) > 0 then t.cb(); return end
+      end
+    end,
+  }
+  local ok, err = pcall(function()
+    TT.on_question(question)
+    TT.on_choices(choices)
+    if drive then drive(api) end
+  end)
+  send, echo, after, cancel = s_send, s_echo, s_after, s_cancel
+  ai_local_tools_request, ai_retrieve, ai_rag_count = s_tools, s_retr, s_rc
+  if not ok then error(err, 2) end
+  return sent, echoed
+end
+
+test("library flow: search the catalog → read the matched entry → answer (labeled 'library')", function()
+  local q  = 'What is the topic of a book entitled "A Magic Primer: Constructs" in the Great Library?'
+  local ch = 'A: philosophy.  B: history.  C: geography.  D: runes.'
+  -- The model calls library_entry with a MADE-UP number (99999); we must ignore it and search by title.
+  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 99999) }, { answer = "A" } },
+    function(api)
+      expect(has_send(api.sent, "library list Constructs")):eq(true)   -- discovery by the title keyword
+      expect(has_send(api.sent, "library read 99999")):eq(false)       -- the fabricated number is NEVER read
+      api.line("48043 - a magic primer: constructs     Topic: philosophy")
+      api.fire()                                                       -- list window → pick 48043 → read it
+      expect(has_send(api.sent, "library read 48043")):eq(true)        -- a VALIDATED number (it was listed)
+      api.line("48043 - a magic primer: constructs     Topic: philosophy")
+      api.fire()                                                       -- read window → feed model → "A"
+    end)
+  expect(has_send(sent, "event answer a")):eq(true)                    -- locked in choice A
+  expect(table.concat(echoed, "\n")):contains("searching the library")
+  expect(table.concat(echoed, "\n")):contains("looking it up: library read 48043")
+end)
+
+test("library flow: no catalog match → NARRATED guess, never a fabricated read or 'library' answer", function()
+  local q  = 'What is the topic of a book entitled "A Nonexistent Tome" in the Great Library?'
+  local ch = 'A: one.  B: two.  C: three.  D: four.'
+  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 12345) }, { answer = "B" } },
+    function(api)
+      expect(has_send(api.sent, "library read 12345")):eq(false)       -- model's number never read
+      api.line("48043 - some unrelated book     Topic: philosophy")     -- catalog holds no matching title
+      api.fire()                                                       -- list window → no pick → give up
+    end)
+  expect(has_send(sent, "library read")):eq(false)                     -- no book number was EVER read
+  expect(has_send(sent, "event answer")):eq(true)                      -- still answers (it always answers)…
+  local text = table.concat(echoed, "\n")
+  expect(text):contains("no matching entry")                           -- narrated the give-up…
+  expect(text):contains("guessing")                                    -- …and that it's now a guess
+  expect(text:find("— library", 1, true)):eq(nil)                      -- NOT labeled as a library answer
+end)
+
+test("library flow: a question-stated number is trusted and read directly (no search)", function()
+  local q  = 'What is entry 16105 in the Great Library?'
+  local ch = 'A: a letter.  B: a map.  C: a rune.  D: a key.'
+  local sent = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 16105) }, { answer = "A" } },
+    function(api)
+      expect(has_send(api.sent, "library read 16105")):eq(true)        -- the QUESTION's own number, read directly
+      expect(has_send(api.sent, "library list")):eq(false)             -- trusted → no discovery search
+      api.line("16105 - a lightly scorched letter")
+      api.fire()
+    end)
+  expect(has_send(sent, "event answer a")):eq(true)
+end)
+
+test("library flow: a rejected question-number RETRIES by title, then reads the validated entry", function()
+  local q  = 'What is entry 55555 in the book entitled "The Book of the Sea"?'
+  local ch = 'A: geography.  B: history.  C: cooking.  D: war.'
+  local sent = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 55555) }, { answer = "A" } },
+    function(api)
+      expect(has_send(api.sent, "library read 55555")):eq(true)        -- trusted question number, tried first
+      api.line("Sorry, that's not a valid book number. ('library list' for a list)")
+      api.fire()                                                       -- rejected → search by title
+      expect(has_send(api.sent, "library list Book")):eq(true)         -- retry via list (not a fabricated read)
+      api.line("2110 - the book of the sea     Topic: geography")
+      api.fire()                                                       -- pick 2110 → read it
+      expect(has_send(api.sent, "library read 2110")):eq(true)
+      api.line("2110 - the book of the sea     Topic: geography")
+      api.fire()
+    end)
+  expect(has_send(sent, "event answer a")):eq(true)
+end)
+
+test("area flow: `area <kw>` rows are collected and mapped to the choice — no model call", function()
+  local q  = 'What level is the area Darring Road?'
+  local ch = 'A: level 11.  B: level 12.  C: level 9.  D: level 8.'
+  local sent, echoed = flow(q, ch, {}, function(api)
+    expect(has_send(api.sent, "area Darring")):eq(true)                -- asks the game directly
+    api.area("Lvl  11    Darring Road                          someone")
+    api.fire()                                                         -- area window → map level 11 → 'A'
+  end)
+  expect(has_send(sent, "event answer a")):eq(true)
+  expect(table.concat(echoed, "\n")):contains("— area")               -- labeled as an area answer
+end)
+
+test("area flow: an unmatched area falls back to the model", function()
+  local q  = 'What level is the area Nowhere Land?'
+  local ch = 'A: level 3.  B: level 4.  C: level 5.  D: level 6.'
+  local sent = flow(q, ch, { { answer = "C" } }, function(api)
+    expect(has_send(api.sent, "area Nowhere")):eq(true)
+    api.fire()                                                         -- window closes with no matching row → model
+  end)
+  expect(has_send(sent, "event answer c")):eq(true)                    -- the model's letter
+end)

@@ -1,3 +1,4 @@
+import DependencyInjection
 import Foundation
 import Testing
 
@@ -11,6 +12,7 @@ import Testing
 // state active at its start. These exercise the pure core directly (no tty needed).
 
 @Test func activeSGRStateAccumulatesUntilAReset() {
+  try withTestContainer {
     #expect(TerminalService.activeSGRState("\u{1B}[31mfoo") == "\u{1B}[31m")
     // A reset clears everything carried before it.
     #expect(TerminalService.activeSGRState("\u{1B}[31mfoo\u{1B}[0mbar") == "")
@@ -22,9 +24,11 @@ import Testing
     #expect(TerminalService.activeSGRState("\u{1B}[2Kplain") == "")
     // Nothing styled → empty.
     #expect(TerminalService.activeSGRState("just text") == "")
+  }
 }
 
 @Test func echoRestoresTheGameColourSoFollowingOutputSurvives() {
+  try withTestContainer {
     // The reported bug: the game set a colour and never reset it (multi-line coloured chat); a dim script
     // annotation echoed in between ends in its own reset, which strips the colour off everything after it.
     let game = "\u{1B}[36m"                               // game set cyan, no reset
@@ -36,9 +40,11 @@ import Testing
     #expect(TerminalService.activeSGRState(game + restored) == game)
     // When the game is at default there's nothing to restore — the echo is left untouched.
     #expect(TerminalService.echoBodyRestoringSGR(echo, carried: "") == echo)
+  }
 }
 
 @Test func scrolledBackMultiLineBlockCarriesColourPastTheFirstLine() {
+  try withTestContainer {
     // The reported case: colour set on line one, reset only after line two (a coloured echo/server
     // block split into two stored logical lines). Both must render coloured in the scrolled-back view.
     let rows = TerminalService.selfContainedPhysicalRows(
@@ -50,9 +56,11 @@ import Testing
     let rows2 = TerminalService.selfContainedPhysicalRows(
         ["\u{1B}[36ma", "b\u{1B}[0m", "c"], width: 80)
     #expect(rows2[2] == "c")                          // no SGR prefix on the post-reset line
+  }
 }
 
 @Test func scrolledBackLongWrappedLineKeepsColourOnContinuationRows() {
+  try withTestContainer {
     // A single coloured logical line longer than the width wraps into several physical rows; the
     // low-level wrapper copies the colour escape only onto the first row, so continuations used to be
     // uncoloured. Each wrapped row must now carry the colour.
@@ -60,6 +68,7 @@ import Testing
     let rows = TerminalService.selfContainedPhysicalRows([long], width: 4)
     #expect(rows.count == 3)                          // 10 visible chars / width 4
     for r in rows { #expect(r.hasPrefix("\u{1B}[31m")) }
+  }
 }
 
 // MARK: - Input decoding (the "error: unexpected input --> input:1:3" display-corruption bug)
@@ -72,13 +81,16 @@ import Testing
 private typealias E = TerminalService.InputEvent
 
 @Test func tokenizePlainTextAndUTF8InsertsAsText() {
+  try withTestContainer {
     #expect(TerminalService.tokenize("hello").events == [E.text("hello")])
     // Multi-byte UTF-8 characters are single Swift Characters → one printable run, inserted verbatim.
     #expect(TerminalService.tokenize("café ☃ 日本").events == [E.text("café ☃ 日本")])
     #expect(TerminalService.tokenize("hello").remaining == "")
+  }
 }
 
 @Test func tokenizeEditorKeysStillDecode() {
+  try withTestContainer {
     #expect(TerminalService.tokenize("\u{1B}[A").events == [E.key("up")])
     #expect(TerminalService.tokenize("\u{1B}[B").events == [E.key("down")])
     #expect(TerminalService.tokenize("\u{1B}[C").events == [E.key("right")])
@@ -89,9 +101,11 @@ private typealias E = TerminalService.InputEvent
     #expect(TerminalService.tokenize("\n").events == [E.enter])
     // Typed text then Enter in one chunk: text is inserted before the submit, so the buffer is right.
     #expect(TerminalService.tokenize("north\n").events == [E.text("north"), E.enter])
+  }
 }
 
 @Test func tokenizeUnknownEscapeSequencesAreDroppedWhole() {
+  try withTestContainer {
     // A focus event (ESC[I) — none of the line-editor keys, and the OLD code printed a parse error for
     // it. It must vanish entirely: no events, no leftover, no text.
     let focusIn = TerminalService.tokenize("\u{1B}[I")
@@ -102,9 +116,11 @@ private typealias E = TerminalService.InputEvent
     #expect(TerminalService.tokenize("a\u{1B}[Ib").events == [E.text("a"), E.text("b")])
     // A truly foreign CSI (device-attribute-style) is consumed silently, leaving no residue.
     #expect(TerminalService.tokenize("\u{1B}[>1;2c").events.isEmpty)
+  }
 }
 
 @Test func tokenizeReproducesTheReportedBugFragmentWithoutError() {
+  try withTestContainer {
     // The exact reported buffer: a CSI sequence split by a stdin read boundary right after "ESC[".
     // The old grammar's `enter` alt skipped both bytes then failed at column 3 expecting "\n" (the
     // "input:1:3" in the dump). Now it's simply held for the next read — no events, no error text.
@@ -117,9 +133,11 @@ private typealias E = TerminalService.InputEvent
     #expect(second.remaining == "")
     // A lone ESC is also just buffered.
     #expect(TerminalService.tokenize("\u{1B}").remaining == "\u{1B}")
+  }
 }
 
 @Test func tokenizeBuffersPartialEscapeShapesAndCompletesWholeOnes() {
+  try withTestContainer {
     // Ported from the old `scanEscape` unit: the declarative grammar must BUFFER any escape shape that
     // runs off the end of the read (holding it in `remaining`, emitting no event), and CONSUME a whole
     // one. Covers CSI, SS3 and the two-byte (alt) shape.
@@ -134,9 +152,11 @@ private typealias E = TerminalService.InputEvent
     #expect(TerminalService.tokenize("\u{1B}OP").events == [E.key("f1")])       // SS3 F1
     #expect(TerminalService.tokenize("\u{1B}a").events == [E.key("alt-a")])     // two-byte alt-a
     #expect(TerminalService.tokenize("\u{1B}a").remaining == "")
+  }
 }
 
 @Test func bracketedPasteInsertsAsLiteralText() {
+  try withTestContainer {
     // Single-line paste: markers stripped, content extracted, nothing passed to key decoding.
     let single = TerminalService.extractPaste("\u{1B}[200~get all\u{1B}[201~", inPaste: false, partial: "")
     #expect(single.pasted == "get all")
@@ -150,9 +170,11 @@ private typealias E = TerminalService.InputEvent
     let around = TerminalService.extractPaste("x\u{1B}[200~y\u{1B}[201~z", inPaste: false, partial: "")
     #expect(around.pasted == "y")
     #expect(around.passthrough == "xz")
+  }
 }
 
 @Test func bracketedPasteMarkersSplitAcrossReadsReassemble() {
+  try withTestContainer {
     // Start marker split mid-way across a read boundary → held, then completed on the next read.
     let r1 = TerminalService.extractPaste("\u{1B}[20", inPaste: false, partial: "")
     #expect(r1.pasted == "")
@@ -172,9 +194,11 @@ private typealias E = TerminalService.InputEvent
     let insert = TerminalService.extractPaste("\u{1B}[2~", inPaste: false, partial: "")
     #expect(insert.passthrough == "\u{1B}[2~")        // not swallowed as paste
     #expect(insert.pasted == "")
+  }
 }
 
 @Test func handleBuffersReportedFragmentWithoutInsertingOrErroring() {
+  try withTestContainer {
     // Drive the real handle() path with the reproducing fragment and assert the line stays clean —
     // the old code printed the parser error here; the new code silently holds the partial sequence.
     let ts = TerminalService()
@@ -182,4 +206,5 @@ private typealias E = TerminalService.InputEvent
     ts.partialInput = ""
     ts.handle(input: "\u{1B}[")                        // chunk-boundary CSI fragment
     #expect(ts.lineBuffer == "")                       // nothing inserted, nothing printed, no crash
+  }
 }

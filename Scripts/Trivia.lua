@@ -23,6 +23,22 @@
 --
 -- Controls: trivia.status() · trivia.on() / trivia.off() · trivia.stats() · trivia.forget() (clear learned cache); help(trivia).
 -- Hot-reloadable: edit + pilot.reload().
+--
+-- ARCHITECTURE (promise + reactive, mirrors Corpse/AutoFight): the async LOOKUP flow — searching the
+-- Great Library (list → pick → read), the `area` query, and the model tool round-trip — is a PROMISE
+-- CHAIN over game-reply STREAMS, not a nest of send/after callbacks. Every game line fans into a hot
+-- Subject (lineS / areaRowS); run_lookup() awaits a command's windowed output as a promise; the
+-- discovery→pick→read sequence is `.andThen` with the VALIDATED entry NUMBER flowing as the resolve
+-- value; the game's invalid-book rejection is a `:catch` that retries by title and then GRACEFULLY
+-- DEGRADES to a narrated, labeled guess (never a fabricated `library`-sourced answer). The pure
+-- parse/pick/classify helpers stay plain functions the flow calls.
+
+-- Reactive core (__rx): the lookup flow reacts to game-reply STREAMS (see lineS/areaRowS below); the
+-- promise layer (__promise, loaded by the directory loader before this file — P < T alphabetically)
+-- chains the steps. `_`-prefixed files aren't auto-loaded, so pull _rx the documented way (dofile
+-- fallback for the bare Lua test harness).
+pcall(require, "_rx")
+if not __rx then dofile("Scripts/_rx.lua") end
 
 local cfg = {
   enabled = true,          -- auto-answer by default (that's the whole point); `#trivia off` to disable
@@ -328,12 +344,20 @@ local function library_pick_entry(entries, question)
   return nil
 end
 
--- ---- in-game command output capture (noise-tolerant) ---------------------------------------------
--- Run a lookup command and gather its output over a short window. A broad line collector (below) appends
--- lines while `capture.active`; we drop the obvious non-answer noise (blanks, kxwt machinery, the [event]
--- channel, our own echoed command) and cap the total — the model reads through whatever combat text is left.
-local capture = { active = false, lines = {}, cmd = nil }
+-- ---- in-game command output capture (noise-tolerant), STREAM + PROMISE driven --------------------
+-- A lookup command's output has no single terminal line — the answer is spread across several lines amid
+-- combat noise — so we COLLECT over a short window. The window is inherent to the behaviour (it's not a
+-- stall watchdog), so it stays an `after`; but the machinery is now reactive. Every game line is pushed
+-- onto `lineS` (a hot Subject) by the broad `.+` collector trigger; run_lookup() returns a PROMISE that
+-- subscribes for the window, keeps the lines capture_keep() lets through (capped), and RESOLVES with the
+-- concatenated text. The single in-flight subscription IS the gate: a line arriving with no lookup
+-- awaiting has no subscriber and is dropped — no `capture.active` flag to juggle. capture_keep + the
+-- collectors stay pure/thin; the async progress lives in the promise chain, not module state.
 local CAPTURE_MAX = 40
+local rx = __rx
+local lineS    = rx and rx.subject() or nil   -- every game line (fed by the broad `.+` collector trigger)
+local areaRowS = rx and rx.subject() or nil   -- parsed `area` rows (fed by the Lvl|Grp trigger)
+local GIVEUP   = {}                            -- rejection sentinel: "couldn't resolve honestly → degrade"
 
 -- Should this line be kept in a lookup capture? (Pure — unit-tested.)
 local function capture_keep(line, cmd)
@@ -345,19 +369,38 @@ local function capture_keep(line, cmd)
   return true
 end
 
-local function collect_line(line)
-  if not capture.active then return end
-  if #capture.lines >= CAPTURE_MAX then return end
-  if capture_keep(line, capture.cmd) then capture.lines[#capture.lines + 1] = trim(line) end
-end
+-- The broad line collector fans every line into lineS; the active lookup (if any) filters + keeps it.
+local function collect_line(line) if lineS then lineS:onNext(line) end end
 
-local function run_lookup(cmd, cb)
-  capture.active, capture.lines, capture.cmd = true, {}, cmd
-  send(cmd)
-  after(cfg.lookup_wait, function()
-    local out = table.concat(capture.lines, "\n")
-    capture.active, capture.lines, capture.cmd = false, {}, nil
-    cb(out)
+-- A flow promise: __promise STARTED synchronously at construction (a lookup's send must go out the moment
+-- run_lookup is reached inside a chain, not a tick later) and kept OUT of the HUD promise widget (this is
+-- background plumbing, not a user action). Guarded so the file still loads without the promise layer.
+local function P(executor)
+  local p = __promise and __promise(executor, "trivia-lookup") or nil
+  if p and __untrack_promise then __untrack_promise(p) end
+  if p and p.__start then p.__start() end
+  return p
+end
+local function rejected(reason) return P(function(_, reject) reject(reason) end) end
+local function dead_p()         return P(function() end) end   -- never settles: a stale flow halts silently
+-- A model reply / lookup that lands after a reload (epoch bump) or after we've already answered must not
+-- fire a stale `event answer`; the chain checks this at each async boundary and halts (dead_p) if so.
+local function stale() return EPOCH ~= _TRIVIA.epoch or T.answered end
+
+-- Run a lookup command; RESOLVES with its captured output after the collection window. Pure-Lua promise
+-- over the line stream, replacing the old capture.active/callback machine.
+local function run_lookup(cmd)
+  return P(function(resolve)
+    local lines = {}
+    local sub = lineS and lineS:subscribe(function(line)
+      if #lines >= CAPTURE_MAX then return end
+      if capture_keep(line, cmd) then lines[#lines + 1] = trim(line) end
+    end) or nil
+    send(cmd)
+    after(cfg.lookup_wait, function()
+      if sub then sub:unsubscribe() end
+      resolve(table.concat(lines, "\n"))
+    end)
   end)
 end
 
@@ -389,76 +432,83 @@ local function ask_model()
     -- missing (binary not relaunched yet), and to a guess if there's no model at all.
     -- Feed a successful lookup's output back to the model and answer, labeling the source.
     local function feed_lookup(name, out)
-      if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+      if stale() then return end
       local user2 = user .. "\n\nLOOKUP RESULT (" .. name .. "):\n" .. out .. "\n\nNow answer with one letter:"
       ai_local_tools_request(sys, user2, cfg.max_tokens, cfg.think_prefill, "", function(r2, _, e2)
         if e2 then guess("model error: " .. e2) else answer_from(r2, TOOL_SOURCE[name] or "tool") end
       end)
     end
 
-    -- Resolve a Great Library lookup WITHOUT ever reading a fabricated number. `deliver(out)` gets the
-    -- successful `library read` text; `deliver(nil)` means we couldn't resolve it (caller gives up →
-    -- guesses, narrated — we never lock in a letter as though the library confirmed it). Narrates each step.
-    local function resolve_library(args, deliver)
+    -- Resolve a Great Library lookup WITHOUT ever reading a fabricated number, as a PROMISE CHAIN over the
+    -- reply streams. RESOLVES with the successful `library read` text, or REJECTS with GIVEUP when it can't
+    -- resolve one honestly — the caller then degrades to a NARRATED labeled guess (never a letter sourced
+    -- as though the library confirmed it). The only numbers ever read are (a) one the QUESTION itself states
+    -- (question_book_number, trusted) or (b) one that came back from a real `library list` (library_pick_
+    -- entry — flowed on as the resolve value). A model's fabricated number never reaches `library read`.
+    local function resolve_library()
       local qnum = question_book_number(q)                 -- a number the QUESTION itself states (trusted)
-      local function stop(msg) echo("\27[33m[trivia] " .. msg .. "\27[0m"); deliver(nil) end
-      -- Search the catalog by the question's book title, then read the matching entry (a real number).
+      local function give_up(msg) echo("\27[33m[trivia] " .. msg .. "\27[0m"); return rejected(GIVEUP) end
+      -- Search the catalog by the question's book title; the matching entry NUMBER flows on as the resolve
+      -- value into the `library read` step (validated — it definitely appeared in the list).
       local function discover()
-        if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+        if stale() then return dead_p() end
         local kw = library_keyword(q)
-        if not kw then stop("library: no book title to search — skipping lookup"); return end
+        if not kw then return give_up("library: no book title to search — skipping lookup") end
         local list_cmd = "library list " .. kw
         echo("\27[36m[trivia] searching the library: " .. list_cmd .. "\27[0m")
-        run_lookup(list_cmd, function(list_out)
-          if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+        return run_lookup(list_cmd):andThen(function(list_out)
+          if stale() then return dead_p() end
           local pick = library_pick_entry(parse_library_list(list_out), q)
-          if not pick then stop("library: no matching entry in the catalog — giving up on this lookup"); return end
+          if not pick then return give_up("library: no matching entry in the catalog — giving up on this lookup") end
+          return pick                                      -- ← the validated entry number flows on
+        end):andThen(function(pick)
           local read_cmd = "library read " .. pick
           echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
-          run_lookup(read_cmd, function(read_out)
-            if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-            if library_read_failed(read_out) then stop("library read " .. pick .. " still rejected — giving up on this lookup")
-            else deliver(read_out) end
+          return run_lookup(read_cmd):andThen(function(read_out)
+            if stale() then return dead_p() end
+            if library_read_failed(read_out) then
+              return give_up("library read " .. pick .. " still rejected — giving up on this lookup")
+            end
+            return read_out
           end)
         end)
       end
       if qnum then
         local read_cmd = "library read " .. qnum
         echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
-        run_lookup(read_cmd, function(read_out)
-          if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-          if library_read_failed(read_out) then
+        return run_lookup(read_cmd):andThen(function(read_out)
+          if stale() then return dead_p() end
+          if library_read_failed(read_out) then           -- the game rejected the question-stated number →
             echo("\27[33m[trivia] library read " .. qnum .. " not a valid book number — searching by title\27[0m")
-            discover()
-          else deliver(read_out) end
+            return discover()                              -- retry by title (still never a fabricated number)
+          end
+          return read_out
         end)
-      else
-        discover()                                         -- no trusted number → never read the model's guess
       end
+      return discover()                                    -- no trusted number → never read the model's guess
     end
 
     if ai_local_tools_request then
       ai_local_tools_request(sys, user .. "\n\nAnswer with one letter, or call a tool.", cfg.tool_max_tokens,
         cfg.think_prefill, TOOLS_JSON, function(reply, tool_calls, err)
-          if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+          if stale() then return end
           if err then guess("model error: " .. err); return end
           if not tool_calls then answer_from(reply, "model"); return end   -- answered directly
           local name, args = parse_tool_call(tool_calls)
           if name == "library_entry" then                                  -- validated, discovery-first path
-            resolve_library(args, function(out)
-              if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-              if out then feed_lookup("library", out)
-              else guess("library lookup unresolved") end                  -- degrade to a labeled guess, not a fake "library" answer
-            end)
+            resolve_library()
+              :andThen(function(out) if not stale() then feed_lookup("library", out) end end)
+              :catch(function(reason)                                      -- the invalid-book rejection lands here
+                if not stale() and reason == GIVEUP then
+                  guess("library lookup unresolved")                       -- labeled guess, NOT a fake "library" answer
+                end
+              end)
             return
           end
           local cmd = tool_command(name, args)
           if not cmd then answer_from(reply, "model"); return end          -- unusable tool call → try the text
           echo("\27[36m[trivia] looking it up: " .. cmd .. "\27[0m")
-          run_lookup(cmd, function(out)
-            if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-            feed_lookup(name, out)
-          end)
+          run_lookup(cmd):andThen(function(out) if not stale() then feed_lookup(name, out) end end)
         end)
     elseif ai_local_request then
       ai_local_request(sys, user .. "\n\nAnswer with one letter:", cfg.max_tokens, cfg.think_prefill,
@@ -486,13 +536,17 @@ end
 -- Answer "What level is the area <NAME>?" by asking the game. Send `area <keyword>`, let the area-row
 -- trigger collect the results, then (after a beat) find the row matching <NAME> and map its level to a
 -- choice. Falls back to the model if the area isn't found (e.g. undiscovered, or the list was paged).
+-- Collect the `area` rows off areaRowS for the window, then match + map. The single window subscription
+-- IS the gate (a stray `area` row outside a lookup has no subscriber and is dropped), so the T.area_rows
+-- flag has dissolved into this closure — same as run_lookup's line capture.
 local function try_area(area_name)
-  T.area_rows = {}
-  send("area " .. pick_keyword(area_name))
   local target = norm_area(area_name)
+  local rows = {}
+  local sub = areaRowS and areaRowS:subscribe(function(r) rows[#rows + 1] = r end) or nil
+  send("area " .. pick_keyword(area_name))
   after(cfg.area_wait, function()
-    if EPOCH ~= _TRIVIA.epoch or T.answered then T.area_rows = nil; return end
-    local rows = T.area_rows or {}; T.area_rows = nil
+    if sub then sub:unsubscribe() end
+    if stale() then return end
     local match
     for _, r in ipairs(rows) do
       if r.desc == target or r.desc:find(target, 1, true) or target:find(r.desc, 1, true) then
@@ -527,28 +581,31 @@ local function attempt_answer()
 end
 
 -- ---- channel triggers ----------------------------------------------------------------------------
--- Lines reach triggers ANSI-stripped. `[event]` is AlterAeon's literal channel tag.
-trigger("\\[event\\] trivia question:\\s*(.+)", function(_, q)
+-- Lines reach triggers ANSI-stripped. `[event]` is AlterAeon's literal channel tag. The trigger bodies
+-- are thin wrappers over named SEAMS (on_trivia_question / on_trivia_choices / on_area_line /
+-- collect_line) that BOTH the live triggers AND the specs call — one path, no second matcher to drift
+-- (mirrors AutoFight's hit_* / Corpse's reply seams). The specs drive a whole lookup flow through these.
+local function on_trivia_question(q)
   T = { q = norm(q), q_raw = trim(q), choices = nil, answered = false, our_letter = nil, source = nil }
-end)
-
--- Collect `area` command rows, but only while a trivia area-lookup is in flight (T.area_rows set by
--- try_area). The prefilter matches "Lvl <n>" / "Grp <n>" rows; parse_area_row rejects anything else.
-trigger("^\\s*(?:Lvl|Grp)\\s+\\d", function(line)
-  if not T.area_rows then return end
-  local r = parse_area_row(line)
-  if r then T.area_rows[#T.area_rows + 1] = r end
-end)
-
--- Broad line collector for a tool lookup's command output. Matches every line but no-ops unless a lookup
--- capture is active (run_lookup), so it's cheap the rest of the time; collect_line does the filtering.
-trigger(".+", function(line) collect_line(line) end)
-
-trigger("\\[event\\] trivia choices:\\s*(.+)", function(_, c)
+end
+local function on_trivia_choices(c)
   if not T.q then return end   -- choices without a question we captured; ignore
   T.choices = parse_choices(c)
   attempt_answer()
-end)
+end
+-- Fan `area` command rows into areaRowS; only try_area's in-flight window subscribes, so a stray row is
+-- dropped. The prefilter matches "Lvl <n>" / "Grp <n>" rows; parse_area_row rejects anything else.
+local function on_area_line(line)
+  local r = parse_area_row(line)
+  if r and areaRowS then areaRowS:onNext(r) end
+end
+
+trigger("\\[event\\] trivia question:\\s*(.+)", function(_, q) on_trivia_question(q) end)
+trigger("^\\s*(?:Lvl|Grp)\\s+\\d", function(line) on_area_line(line) end)
+-- Broad line collector for a tool lookup's command output. Matches every line but no-ops unless a lookup
+-- capture is active (run_lookup), so it's cheap the rest of the time; collect_line does the filtering.
+trigger(".+", function(line) collect_line(line) end)
+trigger("\\[event\\] trivia choices:\\s*(.+)", function(_, c) on_trivia_choices(c) end)
 
 -- Reveal: "...the answer is 'c', 7 players answered." — learn it (order-agnostic, by text) and score.
 trigger("\\[event\\] trivia answer:.*answer is '?(\\w)'?", function(_, rletter)
@@ -637,6 +694,13 @@ _TRIVIA_TEST = {
   library_keyword = library_keyword,
   question_book_number = question_book_number,
   library_pick_entry = library_pick_entry,
+  -- Flow seams: drive the async lookup machine the way the live triggers do (question → choices kicks
+  -- attempt_answer; collect_line / on_area_line feed a lookup's reply lines). Behaviour-level flow specs
+  -- use these + stubbed send/echo/after/ai_local_tools_request to assert the SEND SEQUENCE and narration.
+  on_question  = on_trivia_question,
+  on_choices   = on_trivia_choices,
+  on_area_line = on_area_line,
+  collect_line = collect_line,
 }
 
 -- Pin the local client to a real chat model (see cfg.model) so ai_local_request doesn't fall through to

@@ -25,3 +25,6 @@ mud_raw.log
 
 # mud-dispatch-channel deps
 tools/dispatch/node_modules/
+
+# Throwaway agent worktrees (linked git worktrees, not content to track)
+.claude/worktrees/

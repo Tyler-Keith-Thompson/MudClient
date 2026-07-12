@@ -21,11 +21,12 @@
 --                        intervene; it resumes after cfg.resume_after seconds of no manual input, or when
 --                        the fight ends.
 --
--- PACING (the important bit — NEVER spam, and NEVER timed): after we send a cast we set `busy` and send
--- NOTHING until we SEE that spell's own success line (it LANDED) — then we cast the next. If the cast
--- FAILS ("You fail to cast…", or it resisted), we retry the SAME spell (up to cfg.max_tries). The enemy
--- health bar (kxwt_fighting) updates several times a second and must NEVER trigger a cast — casting on
--- every tick was the command-spam bug. Out-of-mana marks the spell and we WAIT (no retry, no spam).
+-- PACING (the important bit — NEVER spam, and NEVER timed): a cast goes out inside a stage, which then
+-- awaits that spell's own success line (it LANDED) before the NEXT stage is built — so only one cast is
+-- ever outstanding. The await IS the gate: it's the only live subscription, so nothing else can advance.
+-- A FAIL ("You fail to cast…", or a resist) re-sends the SAME spell (up to cfg.max_tries). The enemy
+-- health bar (kxwt_fighting) feeds a SEPARATE stream (drop accounting only) and never casts — casting on
+-- every tick was the command-spam bug. Out-of-mana halts the stage and we WAIT (no retry, no spam).
 --
 -- NOTE: the opener is `c bloodmist` when HP is above cfg.bloodmist_hp_min (a blood demon — landed line
 -- "You tap your life, and a blood red winged demon flaps quickly toward <target>!"; it costs hp, hence the
@@ -35,9 +36,31 @@
 -- Wire strings below are VERBATIM from the player's raw logs (mud_raw_copy.log / mud_raw_nomelee.log),
 -- not invented. See Scripts/tests/autofight_spec.lua, which replays a real Gnomian-guard fight.
 --
+-- ARCHITECTURE (promise + reactive): the STREAMS the fight reacts to — the spell-landed/failed lines,
+-- soulsteal outcomes, out-of-mana, combat start/end, user input — are Observables (see the flow block
+-- and the fromTrigger block below). The SEQUENCE is a PROMISE flow, not a phase machine:
+--
+--     combatStart$ :switchMap(target -> opener(target)          -- resolves when the opener LANDS
+--                                         :andThen(afterOpener)) -- probe (resolves WITH the winner) → nuke/finish
+--                  :takeUntil(enemyDead$)                        -- DEAD/kxwt-1/rollover end the inner flow
+--
+-- Each stage resolves off its event stream; the probe verdict FLOWS as the resolve value into fightLoop.
+-- Pacing/retry/suspend fall out of the structure: a cast only goes out inside a stage, the next stage
+-- isn't built until the current one resolves on its landed line, and "the in-flight cast's await is the
+-- only live subscription" IS the busy gate — the health bar never touches the flow. The fight as a whole
+-- is ALSO surfaced as a chainable PROMISE via attack()/autofight.current() (recover(95).andThen(attack('orc'))).
+--
 -- Controls:  autofight.on() · autofight.off() · autofight.status();  help(autofight). Hot-reloadable.
 
 state = state or {}   -- defensive: this file may load before AlterAeon.lua under the directory loader.
+
+-- Reactive core (__rx): the fight REACTS to streams — the enemy health bar, the spell landed/failed
+-- lines, combat start/end, user input — modelled as Observables built on rx.fromTrigger (see the stream
+-- block near the bottom). The promise layer (__promise, loaded by the directory loader) surfaces a whole
+-- fight as a chainable promise (attack()/autofight.current()). `_`-prefixed files aren't auto-loaded, so
+-- pull _rx here the documented way (dofile fallback for the bare Lua test harness).
+pcall(require, "_rx")
+if not __rx then dofile("Scripts/_rx.lua") end
 
 local cfg = {
   -- PACING IS PURELY EVENT-DRIVEN, NEVER TIMED. After we send a cast we go `busy` and send NOTHING
@@ -81,8 +104,7 @@ _AUTOFIGHT = _AUTOFIGHT or { on = true }
 local F = _AUTOFIGHT
 -- Default the runtime fields (idempotent across reloads).
 F.fighting          = F.fighting or false
-F.phase             = F.phase or "idle"
-F.busy              = F.busy or false
+F.phase             = F.phase or "idle"   -- coarse label for status() only; the flow no longer switches on it
 F.suspended         = F.suspended or false
 F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (echo/suspend disambiguation)
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
@@ -228,8 +250,35 @@ local function remember_winner(name, spell)
   end
 end
 
--- Forward declarations (mutually recursive).
-local fire, cast, succeed, fail_again
+-- Per-fight state, as DECLARED DEFAULTS instead of a wall of inline assignments in start_fight. Each key
+-- is reset to its value at the start of every fight; a factory function value yields a FRESH table (never
+-- a shared one), and the NIL sentinel means "clear to nil" (pairs() skips real nil values, so a plain
+-- `= nil` here would just be an absent key). The winner pair is conditional (a known winner is kept), so
+-- it stays out of this table and is handled in reset_fight_state below.
+local NIL = {}
+local FIGHT_RESET = {
+  busy          = false,
+  busy_spell    = NIL,
+  icebolt_drop  = 0,
+  scorch_drop   = 0,
+  prism_drop    = 0,
+  prism_tried   = false,
+  last_damage_spell = NIL,
+  soul_latched  = false,
+  renuke_pending = false,   -- a soulsteal resist forces exactly ONE winner-nuke before retrying it
+  probe_ptr     = NIL,      -- the fight flow's probe pointer (icebolt → scorch → decide); flow owns it
+  suspended     = false,
+  no_mana       = function() return {} end,   -- fresh per fight
+  self_sent     = function() return {} end,   -- fresh per fight
+}
+local function reset_fight_state()
+  for k, v in pairs(FIGHT_RESET) do
+    if v == NIL then F[k] = nil
+    elseif type(v) == "function" then F[k] = v()
+    else F[k] = v end
+  end
+  if not F.known_winner then F.winner, F.winner_spell = nil, nil end   -- keep a known winner if set
+end
 
 -- Send a command the SCRIPT chose. Flag it in self_sent so the echoed-back on_user_input (send loops
 -- through the input observer, exactly like the pilot) doesn't mistake our own command for the user's.
@@ -277,14 +326,6 @@ local function engage_target_missing()
   if F.engaging and not F.fighting then engage_giveup("target not here") end
 end
 
--- Send the cast for `spell` and go `busy`. NO timer — we stay busy until we SEE that spell's own
--- success line (succeed) or a failure line (fail_again). `busy` is the only thing gating sends, so we
--- can never have two casts outstanding and can never spam.
-cast = function(cmd, spell)
-  F.busy, F.busy_spell, F.busy_pct = true, spell, F.pct
-  af_send(cmd)
-end
-
 -- Should we AOE (frostflower the whole room) rather than single-target this fight? "on"/"off" force it;
 -- "auto" (default) AOEs once we believe we're in a pack (F.pack — set when a kill rolls straight onto
 -- another enemy; see on_fight). A single-target fight uses the normal tarrants→probe→nuke→soulsteal.
@@ -294,77 +335,275 @@ local function aoe_active()
   return F.pack                                       -- "auto"
 end
 
--- Advance the phase to the next spell in the routine. (nuke stays nuke — keep nuking the winner;
--- soulsteal stays soulsteal — its success is handled by the soulsteal line, not a generic "landed";
--- aoe stays aoe — keep frostflowering the pack until combat ends or the target rolls over.)
-local function next_phase()
-  local p = F.phase
-  if     p == "opener"    then F.phase = aoe_active() and "aoe" or (F.known_winner and "nuke" or "icebolt")
-  elseif p == "icebolt"   then F.phase = "scorch"
-  elseif p == "scorch"    then F.phase = "decide"
-  elseif p == "prism"     then F.phase = "decide"      -- prism probe landed → back to the (final) decision
-  elseif p == "aoe"       then F.phase = "aoe"
-  elseif p == "renuke"    then F.phase = "soulsteal"   -- the one post-resist nuke landed → back to soulsteal
+-- ==================================================================================================
+-- THE FIGHT AS A PROMISE + STREAM FLOW
+-- ==================================================================================================
+-- The whole routine is one reactive pipeline instead of a flag-mutating phase machine:
+--
+--   combatStart$ :switchMap(target ->  opener(target)               -- resolves when the opener LANDS
+--                                        :andThen(afterOpener) )     -- probe -> nuke/finish
+--                :takeUntil(enemyDead$)                              -- DEAD/kxwt-1 ends the inner flow
+--
+-- Each STAGE is a promise that resolves off the relevant event STREAM (opener landed / probe verdict /
+-- soulsteal outcome). The winner flows as a resolve value: probe() resolves WITH the winning spell,
+-- which afterOpener hands to fightLoop(winner).
+--
+-- Where the pacing rules fall out of the structure (NOT a hand-walked `busy` flag):
+--   * PACING — a cast only ever goes out inside a stage; the next stage isn't built until the current
+--     one RESOLVES on its spell's landed line. The health bar (on_fight) never touches the flow, so a
+--     flood of kxwt_fighting ticks sends nothing. The "busy" gate is simply "only the in-flight cast's
+--     await is currently SUBSCRIBED" — a straggler/other-spell line has no subscriber and is dropped.
+--   * RETRY — castStep re-sends the SAME command on a fizzle/resist, up to cfg.max_tries, then resolves
+--     "gaveup" so the flow moves on.
+--   * OUT-OF-MANA — resolves "mana"; the stage returns a never-resolving promise, so the flow simply
+--     WAITS (no retry, no spam) until the fight ends (which cancels it).
+--   * SUSPEND — a user command sets F.suspended; castStep holds its (re)send until resume$ fires. The
+--     in-flight await isn't interrupted, only the NEXT send is gated — exactly the intervene-then-resume
+--     behaviour.
+--   * ROLLOVER / AOE — a new target pushes combatStart$ again; switchMap CANCELS the previous inner flow
+--     and starts a fresh one. AOE is a cast-time override (frostflower) that leaves the probe pointer
+--     untouched, so single-target play resumes where it left off once the pack thins.
+local rx = __rx
+
+-- A RE-ENTRANCY-SAFE Subject. The fight flow reacts to a stream SYNCHRONOUSLY: a "landed" event resolves
+-- the current stage which immediately SUBSCRIBES the next stage to the SAME subject — adding an observer
+-- mid-dispatch, which raw pairs()-iteration in _rx's Subject:onNext forbids ("invalid key to 'next'").
+-- We snapshot the observer set before dispatching (and skip any that unsubscribed meanwhile); observers
+-- that subscribe DURING the dispatch correctly don't receive the in-flight event. (_rx is shared and
+-- off-limits, so we patch the instance here.)
+local function safe_subject()
+  if not rx then return nil end
+  local s = rx.subject()
+  s.onNext = function(self, ...)
+    if self.closed then return end
+    local snap = {}
+    for o in pairs(self.observers) do snap[#snap + 1] = o end
+    for _, o in ipairs(snap) do if self.observers[o] then o.onNext(...) end end
   end
+  return s
 end
 
--- Send exactly ONE cast for the current phase. Retry-safe: it does NOT advance the phase — SUCCESS does
--- that. Handles the two send-free transitions (decide → pick winner; nuke → soulsteal when nearly dead)
--- inline. This is the ONLY function that sends, and it only runs from start_fight, succeed, fail_again,
--- and resume — never from a health-% update.
-fire = function()
-  if not F.on or not F.fighting or F.suspended or F.busy then return end
-  if F.phase == "decide" then
-    -- Threshold gate: prism is rarely the best, so only bother probing it when NEITHER icebolt nor scorch
-    -- hit hard enough (best single drop < probe_enough). If one of them already cleared the bar, skip prism
-    -- and pick between the two.
-    if not F.prism_tried and math.max(F.icebolt_drop, F.scorch_drop) < cfg.probe_enough then
-      F.prism_tried, F.phase = true, "prism"
-    else
-      -- Coarse winner pick: the biggest health-% drop. Prefer icebolt, then scorch, then prism — so a tie
-      -- never goes to prism (it has to WIN outright to be chosen).
-      local id, sd, pd = F.icebolt_drop, F.scorch_drop, F.prism_drop or 0
-      if     id >= sd and id >= pd then F.winner, F.winner_spell = cfg.icebolt_cmd, "icebolt"
-      elseif sd >= pd              then F.winner, F.winner_spell = cfg.scorch_cmd, "scorch"
-      else                              F.winner, F.winner_spell = cfg.prism_cmd, "prism" end
-      remember_winner(F.name, F.winner_spell)   -- learn it so the next fight vs this name skips the probe
-      F.phase = "nuke"
+-- Internal hot streams the flow subscribes to. They're fed by the hit_* adapters below, which BOTH the
+-- live Swift triggers AND the _AF_TEST seam call — one path, no second line-matcher to drift.
+local landedS   = safe_subject()   -- a damage/AOE spell landed; emits the spell name
+local openerS   = safe_subject()   -- the opener (tarrants/bloodmist) landed; emits the name
+local failedS   = safe_subject()   -- a cast fizzled ("You fail to cast"); emits ()
+local resistS   = safe_subject()   -- a resist; the ACTIVE await interprets it (damage vs soulsteal)
+local manaS     = safe_subject()   -- out of mana; emits ()
+local soulPullS = safe_subject()   -- soulsteal PULLED the soul (about to die); emits ()
+local soulLatchS= safe_subject()   -- soulsteal LATCHED (dormant; keep nuking); emits ()
+local deadS     = safe_subject()   -- the enemy is DEAD / combat ended; ends the fight flow
+local resumeS   = safe_subject()   -- the manual-input suspend window elapsed; emits ()
+local combatStartS = safe_subject() -- a fresh fight / rollover begins; emits the target start
+
+-- A flow promise: __promise but STARTED synchronously at construction (in this flow, a stage is built
+-- exactly at the moment it should run — inside the previous stage's andThen — so construct == execute)
+-- and kept OUT of the HUD promise widget (only the per-fight fight_promise is a widget row).
+local function P(executor)
+  local p = __promise(executor, "autofight-flow")
+  if __untrack_promise then __untrack_promise(p) end
+  p.__start()
+  return p
+end
+local function resolved(v) return P(function(res) res(v) end) end       -- already-settled promise
+local function never_p()   return P(function() end) end                 -- never settles: the "wait" state
+
+-- castStep(cmd, wantSpell[, landStream]) — send `cmd` (gated by suspend) and await ITS resolution:
+--   "landed"  the awaited spell's own success line arrived
+--   "gaveup"  it fizzled/resisted cfg.max_tries times → move on
+--   "mana"    out of mana → the caller HALTS (waits)
+-- Retries the SAME command on a fizzle/resist. `wantSpell` filters landStream (default landedS) so only
+-- OUR spell's landed line resolves us — a straggler or an unrelated landed line is ignored (the pacing
+-- guarantee). The single active subscription IS the "busy" gate: nothing else can advance the flow.
+local function castStep(cmd, wantSpell, landStream)
+  landStream = landStream or landedS
+  return P(function(resolve, _, onCancel)
+    local tries, sub, rsub, cancelled = 0, nil, nil, false
+    local function cleanup()
+      if sub  then sub:unsubscribe();  sub  = nil end
+      if rsub then rsub:unsubscribe(); rsub = nil end
     end
-  end
-  -- Switch to soulsteal when nearly dead — UNLESS a dormant soulsteal is already latched (then we just
-  -- keep nuking to weaken the target so the latch fires; re-casting soulsteal would be wasted).
-  if F.phase == "nuke" and not F.soul_latched and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct then
-    F.phase = "soulsteal"
-  end
-  local p = F.phase
-  if     p == "opener"                 then local c, s = opener_cmd(); cast(c, s)
-  elseif p == "icebolt"                then F.last_damage_spell = "icebolt"; cast(cfg.icebolt_cmd, "icebolt")
-  elseif p == "scorch"                 then F.last_damage_spell = "scorch"; cast(cfg.scorch_cmd, "scorch")
-  elseif p == "prism"                  then F.last_damage_spell = "prism"; cast(cfg.prism_cmd, "prism")
-  elseif p == "aoe"                    then F.last_damage_spell = "aoe"; cast(cfg.aoe_cmd, "frostflower")
-  elseif p == "nuke" or p == "renuke"  then F.last_damage_spell = F.winner_spell; cast(F.winner, F.winner_spell)
-  elseif p == "soulsteal"              then cast(cfg.soulsteal_cmd, "soulsteal")
-  end   -- "done"/"idle": nothing to send
+    local function fin(v) cleanup(); resolve(v) end
+    local function begin()
+      -- :takeUntil(deadS) tears this await down the instant the fight ends (DEAD / kxwt-1 / rollover /
+      -- reload) WITHOUT resolving the promise — so the chain simply STOPS and no stream observer leaks.
+      -- (Promise cancel can't reach here: a handler returning a chained promise reassigns _parent.)
+      sub = rx.merge(
+        landStream:filter(function(s) return wantSpell == nil or s == wantSpell end):map(function() return "landed" end),
+        failedS:map(function() return "fail" end),
+        resistS:map(function() return "fail" end),
+        manaS:map(function() return "mana" end)
+      ):takeUntil(deadS):subscribe(function(ev)
+        if ev == "landed" then fin("landed")
+        elseif ev == "mana" then fin("mana")
+        else
+          tries = tries + 1
+          if tries >= cfg.max_tries then fin("gaveup") else af_send(cmd) end
+        end
+      end)
+      af_send(cmd)
+    end
+    onCancel(function() cancelled = true; cleanup() end)
+    if F.suspended then
+      rsub = resumeS:takeUntil(deadS):subscribe(function()
+        if cancelled then return end
+        if rsub then rsub:unsubscribe(); rsub = nil end
+        begin()
+      end)
+    else
+      begin()
+    end
+  end)
 end
 
--- The spell we were casting LANDED (its own success line). `spell` must match what we're casting, so a
--- straggler line for a previous cast is ignored. Advance the phase and fire the next spell.
-succeed = function(spell)
-  if not F.busy or (spell and F.busy_spell ~= spell) then return end
-  F.busy, F.busy_spell, F.tries = false, nil, 0
-  next_phase()
-  fire()
+-- soulstealStep() — cast soulsteal (suspend-gated) and await its distinct outcomes: "pulled" (soul taken,
+-- enemy about to die), "latched" (dormant — keep nuking), "resisted" (re-nuke once then retry), "mana".
+local function soulstealStep()
+  return P(function(resolve, _, onCancel)
+    local sub, rsub, cancelled = nil, nil, false
+    local function cleanup()
+      if sub  then sub:unsubscribe();  sub  = nil end
+      if rsub then rsub:unsubscribe(); rsub = nil end
+    end
+    local function fin(v) cleanup(); resolve(v) end
+    local function begin()
+      sub = rx.merge(
+        soulPullS:map(function() return "pulled" end),
+        soulLatchS:map(function() return "latched" end),
+        resistS:map(function() return "resisted" end),
+        manaS:map(function() return "mana" end)
+      ):takeUntil(deadS):subscribe(function(ev) fin(ev) end)
+      af_send(cfg.soulsteal_cmd)
+    end
+    onCancel(function() cancelled = true; cleanup() end)
+    if F.suspended then
+      rsub = resumeS:takeUntil(deadS):subscribe(function()
+        if cancelled then return end
+        if rsub then rsub:unsubscribe(); rsub = nil end
+        begin()
+      end)
+    else
+      begin()
+    end
+  end)
 end
 
--- The current cast FAILED ("You fail to cast", or a damage spell resisted). Try the SAME spell again,
--- up to cfg.max_tries; after that give up on it and move on so a spell the character can't cast (e.g. an
--- unknown opener) doesn't stall the whole routine forever. Out-of-mana is handled separately (we wait).
-fail_again = function()
-  if not F.busy then return end
-  F.busy, F.busy_spell = false, nil
-  F.tries = (F.tries or 0) + 1
-  if F.tries >= cfg.max_tries then F.tries = 0; next_phase() end
-  fire()
+-- STAGE 1 — the OPENER. Resolves when it LANDS (or is given up after max_tries). Skipped (resolves at
+-- once) when an engage already threw it (opener_primed) or we're AOEing a pack from the off.
+local function opener()
+  F.phase = "opener"
+  if F.opener_primed or aoe_active() then return resolved() end
+  local cmd = (opener_cmd())                          -- bloodmist above HP gate, else tarrants
+  return castStep(cmd, nil, openerS)                  -- any opener landed = success
+end
+
+-- STAGE 2 — the PROBE. Resolves WITH the winning spell name. Walks a pointer icebolt → scorch → decide
+-- (+ a conditional prism), crediting each spell's %-drop (via on_fight/last_damage_spell) and picking
+-- the biggest. AOE, while active, overrides the actual cast with frostflower WITHOUT advancing the
+-- pointer — so when the pack thins the probe resumes exactly where it paused.
+local function probe()
+  F.phase = "probe"
+  F.probe_ptr = "icebolt"
+  local step
+  step = function()
+    if aoe_active() then                              -- override cast; pointer untouched
+      F.last_damage_spell = "aoe"; F.phase = "aoe"
+      return castStep(cfg.aoe_cmd, "frostflower"):andThen(function(o)
+        if o == "mana" then return never_p() end
+        F.phase = "probe"
+        return step()
+      end)
+    end
+    local ptr = F.probe_ptr
+    if ptr == "decide" then
+      -- prism gate: only bother with the 3rd probe when NEITHER icebolt nor scorch hit hard enough.
+      if not F.prism_tried and math.max(F.icebolt_drop, F.scorch_drop) < cfg.probe_enough then
+        F.prism_tried, F.probe_ptr = true, "prism"
+        return step()
+      end
+      -- coarse winner pick: biggest drop; ties prefer icebolt, then scorch (prism must win outright).
+      local id, sd, pd = F.icebolt_drop, F.scorch_drop, F.prism_drop or 0
+      local winner = (id >= sd and id >= pd) and "icebolt" or (sd >= pd) and "scorch" or "prism"
+      remember_winner(F.name, winner)                 -- learn it so the next fight skips the probe
+      return resolved(winner)                          -- ← the probe verdict flows on as the resolve value
+    end
+    F.last_damage_spell = ptr
+    return castStep(cfg[ptr .. "_cmd"], ptr):andThen(function(o)
+      if o == "mana" then return never_p() end
+      F.probe_ptr = (ptr == "icebolt") and "scorch" or "decide"   -- landed OR gaveup advances the pointer
+      return step()
+    end)
+  end
+  return step()
+end
+
+-- STAGE 3 — fightLoop(winner). Reactive: on each landed spell, cast the winner (or soulsteal once the
+-- enemy is in finish range), until enemyDead ends it. AOE overrides the cast with frostflower. Soulsteal
+-- resist re-nukes exactly once then retries; a latch keeps nuking the winner and never re-casts soulsteal.
+local function fightLoop(winner)
+  if winner then F.winner_spell, F.winner = winner, cfg[winner .. "_cmd"] end
+  local step
+  step = function()
+    if aoe_active() then
+      F.last_damage_spell = "aoe"; F.phase = "aoe"
+      return castStep(cfg.aoe_cmd, "frostflower"):andThen(function(o)
+        if o == "mana" then return never_p() end
+        return step()
+      end)
+    end
+    -- finish range → soulsteal, UNLESS a dormant steal is latched or a post-resist re-nuke is owed.
+    if winner and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct
+       and not F.soul_latched and not F.renuke_pending then
+      F.phase = "soulsteal"
+      return soulstealStep():andThen(function(r)
+        if r == "pulled"  then return resolved() end            -- soul taken → stop; DEAD ends the fight
+        if r == "latched" then F.soul_latched = true; return step() end   -- keep nuking the winner
+        if r == "resisted" then F.renuke_pending = true; return step() end -- one nuke, then retry steal
+        if r == "mana"    then return never_p() end
+        return step()
+      end)
+    end
+    F.renuke_pending = false
+    local w = winner or "icebolt"                     -- edge: AOE cleared before any winner was learned
+    F.last_damage_spell = w; F.phase = "nuke"
+    return castStep(cfg[w .. "_cmd"], w):andThen(function(o)
+      if o == "mana" then return never_p() end
+      return step()
+    end)
+  end
+  return step()
+end
+
+-- After the opener lands: a known winner or an AOE pack skips the probe; otherwise probe, then nuke the
+-- winner it resolves with.
+local function afterOpener()
+  if aoe_active()     then return fightLoop(nil) end
+  if F.known_winner   then return fightLoop(F.known_winner) end
+  return probe():andThen(function(winner) return fightLoop(winner) end)
+end
+
+-- Build + START the whole per-fight promise chain; return its TAIL (cancelling the tail cascades upstream
+-- to abort whatever stage is currently in flight — that's how switchMap/DEAD tear a fight down).
+local function runCombat()
+  return opener()
+    :andThen(afterOpener)
+    :catch(function(why) if why ~= nil then say("fight aborted: " .. tostring(why)) end end)
+end
+
+-- The switchMap inner: an Observable that starts the chain on subscribe and cancels it on unsubscribe.
+local function runCombatObs()
+  return rx.Observable.create(function()
+    local tail = runCombat()
+    return function() if tail and tail.cancel then tail.cancel() end end
+  end)
+end
+
+-- THE master pipeline (wired once per load). A fresh fight / rollover pushes combatStart$; switchMap
+-- cancels any previous inner flow and starts the new one; takeUntil(enemyDead$) ends it on DEAD/kxwt-1.
+if rx then
+  combatStartS
+    :switchMap(function() return runCombatObs():takeUntil(deadS) end)
+    :subscribe(function() end)
 end
 
 -- ---- fight lifecycle -----------------------------------------------------------------------------
@@ -396,7 +635,7 @@ local function start_fight(pct, name)
   F.fighting, F.pct, F.name = true, pct, name
   F.fought = true             -- real combat began; survives the DEAD line so on_fight_end can still resolve on_dead
   begin_fight_promise(name)   -- track this engagement as a promise (once; retitles on target rollover)
-  -- Do we already know the winning spell for this target name? If so, skip the probe entirely.
+  -- Do we already know the winning spell for this target name? If so, the flow skips the probe entirely.
   local key = winner_key(name)
   local known = key and _AUTOFIGHT.winners[key]
   F.known_winner = is_probe_spell(known) and known or nil
@@ -404,34 +643,22 @@ local function start_fight(pct, name)
     F.winner, F.winner_spell = cfg[F.known_winner .. "_cmd"], F.known_winner
     say(string.format("%s known → %s (skipping probe)", key, F.known_winner))
   end
-  -- Phase: AOE (a pack) skips the single-target opener AND probe — we're already in combat, so go
-  -- straight to frostflower. Otherwise engage() may have already thrown the opener (opener_primed); the
-  -- post-opener phase is the nuke when we know the winner, else the icebolt/scorch probe; a fresh
-  -- single-target fight opens with tarrants.
-  local post_opener = F.known_winner and "nuke" or "icebolt"
-  if aoe_active() then F.phase = "aoe"
-  else F.phase = F.opener_primed and post_opener or "opener" end
-  F.engaging, F.engage_busy, F.opener_primed = false, false, false
-  F.busy, F.busy_spell = false, nil
-  F.icebolt_drop, F.scorch_drop, F.prism_drop = 0, 0, 0
-  F.prism_tried = false
-  if not F.known_winner then F.winner, F.winner_spell = nil, nil end   -- keep the known winner if set above
-  F.last_damage_spell = nil
-  F.soul_latched = false
-  F.no_mana = {}
-  F.suspended = false
-  F.self_sent = {}
-  if F.busy_timer and cancel then cancel(F.busy_timer); F.busy_timer = nil end
+  reset_fight_state()                                                  -- declared defaults (see FIGHT_RESET)
+  F.engaging, F.engage_busy = false, false
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
   clear_sent()
-  fire()
+  -- Kick the reactive fight flow. First fire deadS to tear down any PREVIOUS in-flight cast (a rollover
+  -- has no DEAD to do it, and promise-cancel can't reach a deep chained stage), THEN start the new flow.
+  -- switchMap swaps the inner; the new stages subscribe to deadS fresh (the abort above is already past).
+  if deadS then deadS:onNext() end
+  if combatStartS then combatStartS:onNext(true) end
+  F.opener_primed = false                                             -- consumed by the flow just built
 end
 
 local function end_fight()
+  if deadS then deadS:onNext() end    -- complete/cancel any live fight flow (unsubscribes its in-flight cast)
   F.fighting, F.phase = false, "idle"
-  F.busy, F.busy_spell = false, nil
   F.suspended = false
-  if F.busy_timer and cancel then cancel(F.busy_timer); F.busy_timer = nil end
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
 end
 
@@ -442,27 +669,12 @@ end
 -- — no second look needed. The estimate only needs to tell "pack (>= aoe_min)" from "not"; undercounting
 -- the last one to 0 still yields single target, which is what we want.
 
--- Enter AOE: remember it and, if we're mid single-target fight, switch to frostflower NOW (cast if free,
--- else the in-flight cast lands first and next_phase keeps AOEing). No-op once already AOEing.
-local function enter_pack_mode()
-  if F.pack then return end
-  F.pack = true
-  if F.on and F.fighting and aoe_active() then
-    F.phase = "aoe"
-    if not F.busy then fire() end
-  end
-end
-
--- Leave AOE: the crowd thinned below pack size, so resume single target on the CURRENT enemy (its known
--- winner, else re-probe from icebolt). No-op if we weren't AOEing (or AOE is force-"on", which pins it).
-local function exit_pack_mode()
-  if not F.pack then return end
-  F.pack = false
-  if F.on and F.fighting and not aoe_active() and F.phase == "aoe" then
-    F.phase = F.known_winner and "nuke" or "icebolt"
-    if not F.busy then fire() end
-  end
-end
+-- Enter/leave AOE just flip the belief flag. The fight flow re-reads aoe_active() at EVERY cast, so the
+-- next spell it sends switches to/from frostflower on its own — no imperative re-firing needed. AOE is a
+-- cast-time override that leaves the probe/nuke pointer untouched, so single-target play resumes cleanly
+-- once the pack thins (see probe()/fightLoop()).
+local function enter_pack_mode() F.pack = true  end
+local function exit_pack_mode()  F.pack = false end
 
 -- Apply the current estimate: pack-sized ⇒ AOE, else single target.
 local function reeval_pack()
@@ -536,6 +748,7 @@ local function on_fight_end()
   -- never reached start_fight) leaves F.fought false and correctly does NOT resolve.
   local was_engaged_fight = F.fought and F.on_dead
   F.pack, F.enemy_est = false, 0                         -- combat truly over → next fight re-evaluates
+  if deadS then deadS:onNext() end                       -- stop any still-live fight flow (e.g. the mob fled)
   if F.fighting then end_fight() end
   F.fought = false                                       -- engagement fully over; re-armed by the next start_fight
   settle_fight_promise()                                 -- resolve the engagement's promise (combat is over)
@@ -547,66 +760,59 @@ local function on_fight_end()
 end
 
 -- ---- combat line resolutions ---------------------------------------------------------------------
--- Each hit_* is what a trigger fires; on_line() (the test seam) classifies a verbatim line and calls the
--- same hit_*, so triggers and tests share one implementation.
-local function hit_icebolt()    succeed("icebolt")   end   -- icebolt LANDED line (trigger verified live)
-local function hit_scorch()     succeed("scorch")    end   -- "You throw an intense burst of <color> flames at <target>!"
-local function hit_prism()      succeed("prism")     end   -- "You use a small crystal to focus your powers and throw a confusing wash of color and force at <target>!"
-local function hit_frostflower() succeed("frostflower") end -- "Spiked flowers of ice quickly form on everything in a ring around you!"
--- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so busy_spell is never "shower" and this
--- succeed() always hits its guard and no-ops. Wired only to keep the "A shower of … sparks" string live.
-local function hit_shower()     succeed("shower")    end   -- "A shower of <color> sparks suddenly engulfs <target>."
--- Opener landed (tarrants OR bloodmist — either can be the opener now). Engage opener landed: combat is
--- about to start (kxwt_fighting → start_fight); just clear the init-busy flag and let start_fight take over.
--- Otherwise it's the normal in-combat opener → advance the phase off the spell we actually cast.
+-- Each hit_* is what a trigger fires; the _AF_TEST seam calls the SAME hit_*, so triggers and tests
+-- share one implementation. Each pushes onto the internal stream the fight FLOW subscribes to — there is
+-- no phase machine to poke; the in-flight stage's subscription (if any) reacts, and when no stage is
+-- awaiting a given event the push is simply dropped (that's the pacing guarantee).
+local function hit_icebolt()     if landedS then landedS:onNext("icebolt")     end end
+local function hit_scorch()      if landedS then landedS:onNext("scorch")      end end
+local function hit_prism()       if landedS then landedS:onNext("prism")       end end
+local function hit_frostflower() if landedS then landedS:onNext("frostflower") end end
+-- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so no stage ever awaits "shower" — the push
+-- has no matching subscriber and is dropped. Wired only to keep the "A shower of … sparks" string live.
+local function hit_shower()      if landedS then landedS:onNext("shower")      end end
+-- Opener landed (tarrants OR bloodmist). During an engage it just clears the init-busy latch (combat is
+-- about to start via kxwt_fighting → start_fight); in-combat it feeds the opener stage's await.
 local function opener_landed(spell)
   if F.engaging and not F.fighting then F.engage_busy = false; return end
-  succeed(spell)
+  if openerS then openerS:onNext(spell) end
 end
 local function hit_tarrants()  opener_landed("tarrants")  end
 local function hit_bloodmist() opener_landed("bloodmist") end
 local function hit_resist()
-  -- Engage opener resisted before combat started: retry the opener.
+  -- Engage opener resisted before combat started: retry the opener (imperative — engage is out-of-combat
+  -- init, separate from the in-combat flow).
   if F.engaging and not F.fighting then return engage_retry("resisted") end
-  -- soulsteal resisting → re-nuke once, then retry soulsteal. A DAMAGE spell resisting is just a miss → retry.
-  if F.busy and F.busy_spell == "soulsteal" then
-    F.busy, F.busy_spell, F.tries = false, nil, 0
-    F.phase = "renuke"; fire()
-  else
-    fail_again()
-  end
+  -- In combat, the ACTIVE await interprets the resist: a damage/probe cast treats it as a fizzle (retry);
+  -- a soulsteal cast treats it as "resisted" (re-nuke once, then retry). Both live in castStep/soulstealStep.
+  if resistS then resistS:onNext() end
 end
 local function hit_mana()
   -- Can't afford the engage opener → combat will never start; give up initiating.
   if F.engaging and not F.fighting then return engage_giveup("out of mana") end
-  -- Out of mana: DON'T retry and DON'T spam. Mark it and stop; we resume next time we're free to cast.
-  if not F.busy then return end
-  F.no_mana[F.busy_spell] = true
-  F.busy, F.busy_spell = false, nil
+  if manaS then manaS:onNext() end                          -- the in-flight stage HALTS (waits, no spam)
 end
 local function hit_fail()
   if F.engaging and not F.fighting then return engage_retry("cast failed") end   -- engage opener fizzled → retry
-  fail_again()
+  if failedS then failedS:onNext() end                                            -- in-combat fizzle → retry same spell
 end                                                    -- "You fail to cast the spell '…'." — fizzled, retry
 
 local function hit_soulsteal_ok()
   -- The soul was pulled ("…and pull <x>'s essence into a <color> soulstone!") — the enemy is about to
-  -- die. Stop casting; the DEAD line ends the fight. (Also fires when a latched steal finally activates.)
-  F.busy, F.busy_spell, F.phase = false, nil, "done"
+  -- die. The soulsteal stage resolves "pulled" and the flow stops; the DEAD line ends the fight. (Also
+  -- fires when a latched steal finally activates.)
+  if soulPullS then soulPullS:onNext() end
 end
 
 local function hit_soul_latched()
   -- DORMANT soulsteal: "You magically latch onto <x>'s soul and wait for <x> to weaken…". The soul is
-  -- NOT captured yet — the spell lies in wait until the target is weak enough. If we stopped here we'd
-  -- stall (nothing weakens it). So mark it latched (which stops fire() re-casting soulsteal) and go back
-  -- to nuking the winner; the latch fires — the "separate soul from body" success line, then DEAD — as
-  -- the target drops. Verified against the human traces (player keeps nuking after this line).
-  F.soul_latched = true
-  F.busy, F.busy_spell, F.phase = false, nil, "nuke"
-  fire()
+  -- NOT captured yet. The soulsteal stage resolves "latched"; fightLoop sets F.soul_latched (so it never
+  -- re-casts soulsteal) and keeps nuking the winner until the latch fires as the target drops.
+  if soulLatchS then soulLatchS:onNext() end
 end
 
 local function hit_dead()
+  if deadS then deadS:onNext() end    -- end the fight flow (takeUntil) — no more casts
   end_fight()
 end
 
@@ -621,7 +827,8 @@ local function observe_input(cmd)
   F.suspended = true
   if F.suspend_timer and cancel then cancel(F.suspend_timer) end
   F.suspend_timer = after and after(cfg.resume_after, function()
-    F.suspend_timer = nil; F.suspended = false; fire()
+    F.suspend_timer = nil; F.suspended = false
+    if resumeS then resumeS:onNext() end                 -- release the held cast (castStep's resume gate)
   end) or nil
 end
 
@@ -715,66 +922,108 @@ end
 -- Public toggle for the tank-rescue block is autofight.tank(...) — defined with the other autofight.*
 -- members below (the `autofight` table doesn't exist yet at this point in the file).
 
--- ---- triggers ------------------------------------------------------------------------------------
--- Lines reach triggers ANSI-stripped. Register health-bar + resolution triggers that call the same
--- handlers on_line() does. (Trigger regexes run in Swift and aren't unit-testable — the pure handlers
--- they call are; see the spec.)
-if trigger then
-  trigger([[^kxwt_fighting (\d+) \S+ (.+)$]], function(_, pct, name) on_fight(tonumber(pct), name) end)
-  trigger([[^kxwt_fighting -1$]], function() on_fight_end() end)
-  -- ALL anchored to ^ (and $ where the message is a whole line) so another player's say/tell/channel
-  -- text — e.g. someone chatting "the guard resists the spell." — can NEVER trip a resolution. Those
-  -- lines start with the speaker ("Bob says, '…'"), so ^ excludes them. The messages that begin with a
-  -- variable mob name (resist / DEAD) also anchor the tail with $ so a quoted say ("…DEAD!'") is excluded.
-  trigger([[^You cast the spell to separate soul from body]], function() hit_soulsteal_ok() end)
-  trigger([[^You magically latch onto .+ soul and wait for .+ to weaken]], function() hit_soul_latched() end)
-  -- icebolt LANDED line — VERIFIED live: "You create and magically throw bolts of ice at <target>!"
-  -- (^ anchors out say-spoofs; the tail after "at " is the variable mob name).
-  trigger([[^You create and magically throw bolts of ice at ]], function() hit_icebolt() end)
-  -- scorch (replaced shower as the 2nd probe). Line from live play: "You throw an intense burst of
-  -- yellow flames at <target>!" — the flame COLOUR varies, so wildcard it; ^ anchors out say-spoofs.
-  trigger([[^You throw an intense burst of .* flames at ]], function() hit_scorch() end)
-  -- frostflower (room AOE) landed line — the whole-line message, ^…$ anchored against say-spoofs.
-  trigger([[^Spiked flowers of ice quickly form on everything in a ring around you!$]], function() hit_frostflower() end)
-  -- DORMANT shower trigger (see cfg.shower_cmd / hit_shower): fires but no-ops, kept only so the string stays live.
-  trigger([[^A shower of .* sparks suddenly engulfs]], function() hit_shower() end)
-  trigger([[^An ethereal hand appears and attacks .+ from behind!$]], function() hit_tarrants() end)
-  -- bloodmist opener landed. TWO forms depending on skill / bottled blood: a single "blood red winged
-  -- demon flaps quickly toward <target>!" or a "swarm of blood red demons fly quickly toward <target>!".
-  -- Match both (the "You tap your life, and … toward" shape is bloodmist-only — lifetap says "begin tapping
-  -- your life"). Missing the swarm form stalled the whole routine on the opener (never reached the probe).
-  trigger([[^You tap your life, and .* toward ]], function() hit_bloodmist() end)
-  -- prism probe landed: "You use a small crystal to focus your powers and throw a confusing wash of color and force at <target>!"
-  trigger([[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]], function() hit_prism() end)
-  trigger([[^.+ resists the spell\.$]], function() hit_resist() end)
-  trigger([[^Target who\?]], function() engage_target_missing() end)
-  trigger([[^You don't have enough mana\.$]], function() hit_mana() end)
-  trigger([[^You fail to cast the spell]], function() hit_fail() end)
-  trigger([[^.+ is DEAD!$]], function() hit_dead() end)
-  -- Crowd detection: a room listing prints one "<X> is here, fighting <Y>." per engaged creature. Count
-  -- the hostile subjects (note_room_fighter filters out our minions/self) — a look mid-fight now flips us
-  -- to AOE without waiting for a kill. ^-anchored; the subject is captured, the opponent wildcarded.
-  trigger([[^(.+) is here, fighting .+$]], function(_, subject) note_room_fighter(subject) end)
-  -- Each enemy death counts down the crowd estimate — this is what drops us out of AOE onto the last one.
-  trigger([[^kxwt_mdeath (.+)$]], function(_, name) note_mdeath(name) end)
-  -- Tank rescue: kxwt_ydeath latches "one of my minions died"; the following group_end says whether it was
-  -- the tank (our remembered tank is now gone) and, if so, triggers the rescue; a clay man rejoining stops
-  -- the re-summon loop. The group_end handler here runs AFTER AlterAeon's (which sets state.group) — same
-  -- pattern, and AlterAeon loads first — so state.group is fresh when we read it.
-  trigger([[^kxwt_ydeath ]], function() tank_ydeath() end)
-  trigger([[^kxwt_group_end$]], function() refresh_tank() end)
-  trigger([[^You add .*clay man to your group\.$]], function() tank_resummoned() end)
-  trigger([[^You already have .*clay man at your side\.$]], function() tank_resummoned() end)
+-- ---- live wire → internal streams ----------------------------------------------------------------
+-- rx.fromTrigger(pattern) is a hot stream of a Swift trigger's matches (registered on first subscribe;
+-- the line still displays). These subscribers do ONE job: feed the hit_* adapters above, which push onto
+-- the INTERNAL streams (landedS/failedS/…) that the promise flow subscribes to. That's the single path —
+-- the _AF_TEST seam calls the very same hit_* adapters, so specs drive the flow with no second
+-- line-matching path to drift. Read this block top-to-bottom as "every game line that can move a fight."
+--
+-- Trigger REGEXES run in Swift (not unit-tested); the patterns/anchors below are byte-identical to the
+-- old trigger() block, so live matching is unchanged. ALL anchored to ^ (and $ where the message is a
+-- whole line) so another player's say/tell — e.g. someone chatting "the guard resists the spell." — can
+-- never trip a resolution. None of these patterns overlap on a single line, so registration order among
+-- them is immaterial. Guarded on __rx (the dofile fallback at the top guarantees it here and in the
+-- harness); fromTrigger no-ops cleanly when the host `trigger` builtin is absent.
+local rx = __rx
+if rx then
+  local T = rx.fromTrigger
+  local function tag(pattern, spell) return T(pattern):map(function() return spell end) end
+
+  -- LANDED ─ each spell the routine casts announces its own success line. Merge them into one "a spell
+  -- landed" stream tagged with the spell name and push it onto landedS; the in-flight castStep await
+  -- resolves on ITS spell. VERIFIED live: icebolt "You create and magically throw bolts of ice at <x>!",
+  -- scorch "You throw an intense burst of <colour> flames at <x>!" (colour varies → wildcard), prism the
+  -- crystal line, frostflower the whole-line AOE message. DORMANT: shower isn't in the routine, so no
+  -- stage ever awaits "shower" — the push has no subscriber and is dropped; kept only so its wire string
+  -- stays live for a future mana-aware feature.
+  local spellLanded = rx.merge(
+    tag([[^You create and magically throw bolts of ice at ]], "icebolt"),
+    tag([[^You throw an intense burst of .* flames at ]], "scorch"),
+    tag([[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]], "prism"),
+    tag([[^Spiked flowers of ice quickly form on everything in a ring around you!$]], "frostflower"),
+    tag([[^A shower of .* sparks suddenly engulfs]], "shower"))
+  spellLanded:subscribe(function(spell) if landedS then landedS:onNext(spell) end end)
+
+  -- SEQUENCE ─ the OPENER (tarrants OR bloodmist) landing. While engaging it just clears the init-busy
+  -- flag (combat is about to start); in-combat it advances the phase like any landed spell. bloodmist has
+  -- two forms (a single demon / a swarm) — "You tap your life, and … toward" is bloodmist-only (lifetap
+  -- says "begin tapping your life"), so the wildcard covers both without matching lifetap.
+  local openerLanded = rx.merge(
+    tag([[^An ethereal hand appears and attacks .+ from behind!$]], "tarrants"),
+    tag([[^You tap your life, and .* toward ]], "bloodmist"))
+  openerLanded:subscribe(function(spell) opener_landed(spell) end)
+
+  -- FINISH ─ soulsteal PULLED the soul ("…separate soul from body" — enemy about to die, stop casting)
+  -- vs LATCHED (dormant — soul not captured yet; keep nuking the winner until the latch fires).
+  local soulPulled  = T([[^You cast the spell to separate soul from body]])
+  local soulLatched = T([[^You magically latch onto .+ soul and wait for .+ to weaken]])
+  soulPulled:subscribe(function()  hit_soulsteal_ok() end)
+  soulLatched:subscribe(function() hit_soul_latched() end)
+
+  -- PACING failures ─ a fizzle ("You fail to cast…") or a resist retries the SAME spell (soulsteal resist
+  -- re-nukes once, then retries); out-of-mana marks the spell and WAITS (no retry, no spam).
+  local castFailed   = T([[^You fail to cast the spell]])
+  local castResisted = T([[^.+ resists the spell\.$]])
+  local outOfMana    = T([[^You don't have enough mana\.$]])
+  castFailed:subscribe(function()   hit_fail() end)
+  castResisted:subscribe(function() hit_resist() end)
+  outOfMana:subscribe(function()    hit_mana() end)
+
+  -- The enemy health bar (kxwt_fighting — many ticks/second; the winner-probe signal, and it NEVER casts)
+  -- and the two combat boundaries. enemyDead ends the fight from any phase; combatEnd (kxwt -1) resolves
+  -- the fight promise + zeroes the crowd estimate.
+  local combatBar = T([[^kxwt_fighting (\d+) \S+ (.+)$]])
+  local combatEnd = T([[^kxwt_fighting -1$]])
+  local enemyDead = T([[^.+ is DEAD!$]])
+  combatBar:subscribe(function(c) on_fight(tonumber(c[1]), c[2]) end)
+  combatEnd:subscribe(function()  on_fight_end() end)
+  enemyDead:subscribe(function()  hit_dead() end)
+
+  -- ENGAGE guard ─ the target simply isn't here ("Target who?") → give up initiating (retrying the opener
+  -- is pointless with nothing to aggro).
+  T([[^Target who\?]]):subscribe(function() engage_target_missing() end)
+
+  -- CROWD (AOE) ─ a room listing prints one "<X> is here, fighting <Y>." per engaged creature; count the
+  -- hostile subjects (note_room_fighter filters out our minions/self) so a look mid-fight flips us to AOE
+  -- without waiting for a kill. Each enemy death (kxwt_mdeath) counts the estimate down — that's what
+  -- drops us back to single target on the last one.
+  local roomFighter = T([[^(.+) is here, fighting .+$]])
+  local enemyDeath  = T([[^kxwt_mdeath (.+)$]])
+  roomFighter:subscribe(function(c) note_room_fighter(c[1]) end)
+  enemyDeath:subscribe(function(c)  note_mdeath(c[1]) end)
+
+  -- TANK rescue ─ kxwt_ydeath latches "one of my minions died"; the following kxwt_group_end says whether
+  -- it was the tank (our remembered tank is now gone) and, if so, triggers the rescue; a clay man
+  -- rejoining stops the re-summon loop. The group_end subscriber runs AFTER AlterAeon's (which fills
+  -- state.group; AlterAeon loads first), so the roster is fresh when refresh_tank reads it.
+  T([[^kxwt_ydeath ]]):subscribe(function() tank_ydeath() end)
+  T([[^kxwt_group_end$]]):subscribe(function() refresh_tank() end)
+  T([[^You add .*clay man to your group\.$]]):subscribe(function() tank_resummoned() end)
+  T([[^You already have .*clay man at your side\.$]]):subscribe(function() tank_resummoned() end)
   -- (No rvnum reset: the server re-sends rvnum on a plain `look`, so resetting here would flicker us out
   -- of AOE on every look. Leaving a room ends combat (kxwt_fighting -1), and on_fight_end already zeroes
   -- the crowd estimate — so the authoritative combat-end signal covers the "walked away" case.)
 end
 
--- Observe typed input non-destructively by CHAINING the existing on_user_input (AIPilot defines one; we
--- must not clobber it). Our observer runs first, then the previous hook.
+-- SUSPEND ─ user input is its own hot stream (a Subject, not fromTrigger: typed input isn't a game line).
+-- We push each typed command in, then CHAIN the previous on_user_input (AIPilot defines one; we must not
+-- clobber it). observe_input suspends the routine on a command WE didn't send, so the user can intervene.
+local userInput = rx and rx.subject() or nil
+if userInput then userInput:subscribe(function(cmd) observe_input(cmd) end) end
 local _prev_on_user_input = on_user_input
 function on_user_input(cmd)
-  observe_input(cmd)
+  if userInput then userInput:onNext(cmd) end
   if _prev_on_user_input then return _prev_on_user_input(cmd) end
 end
 
@@ -810,7 +1059,8 @@ doc(autofight.tank, { name = "autofight.tank", sig = "autofight.tank(['on'|'off'
 function autofight.on()
   F.on = true
   say("armed — tarrants → icebolt/scorch probe → nuke winner → soulsteal")
-  if F.fighting and not F.busy then fire() end
+  -- Armed mid-fight (e.g. after a manual off): (re)start the reactive flow on the current enemy.
+  if F.fighting and combatStartS then combatStartS:onNext(true) end
 end
 
 function autofight.off()
@@ -910,8 +1160,9 @@ function autofight.winner(name, spell)
   -- Fighting this exact target right now? Switch immediately — don't keep casting the wrong (maybe
   -- healing!) spell until the fight ends.
   if F.fighting and F.name and winner_key(F.name) == key then
+    -- Mark it known: the fight flow reads F.known_winner right after the opener lands (afterOpener), so it
+    -- skips the probe and nukes `s` instead of continuing to cast the wrong (maybe HEALING) element.
     F.known_winner, F.winner, F.winner_spell = s, cfg[s .. "_cmd"], s
-    if F.phase == "icebolt" or F.phase == "scorch" or F.phase == "decide" then F.phase = "nuke" end
     say("overriding the CURRENT fight → " .. s)
   end
   say("'" .. key .. "' → " .. s .. " (set, persisted)")
@@ -1029,7 +1280,8 @@ _AF_TEST = {
   remember      = remember_winner,
   expire_resume = function()
     if F.suspend_timer and cancel then cancel(F.suspend_timer) end
-    F.suspend_timer, F.suspended = nil, false; fire()
+    F.suspend_timer, F.suspended = nil, false
+    if resumeS then resumeS:onNext() end                 -- release the held cast (castStep's resume gate)
   end,
   begin_promise = begin_fight_promise,
   settle_promise = settle_fight_promise,

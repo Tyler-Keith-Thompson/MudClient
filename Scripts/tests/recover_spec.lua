@@ -103,8 +103,7 @@ test("a timed-out await_spell is cleared and normal (deep-sleep) recovery resume
   rec.await_spell, rec.await_until = "bless", os.time() - 100   -- the recast never came → expired
   with_posture(40, 40, 40, "sitting", function(sent)
     choose()
-    expect(rec.await_spell):eq(nil)   -- cleared on the timeout
-    expect(sent[1]):eq("sleep")       -- back to the deepest heal
+    expect(sent[1]):eq("sleep")       -- cleared on the timeout → back to the deepest heal
   end)
   rec.await_spell, rec.await_until = nil, nil
 end)
@@ -302,8 +301,10 @@ end)
 test("a blocked stat (prior refuse) is skipped for the rest of the recovery", function()
   with_self_recovery({ stam = 30, regen = { hp = 10, mana = 20, move = 6, position = "resting" } },
     function(sent)
-      _AA_TEST.minion_heal.self_stam_blocked = true
-      _AA_TEST.try_cast_heal(); expect(#sent):eq(0)
+      _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c refresh")     -- casts once
+      _AA_TEST.minion_cast_settled("full")                          -- game refuses it → block this stat
+      local n = #sent
+      _AA_TEST.try_cast_heal(); expect(#sent):eq(n)                 -- blocked now → no re-cast
     end)
 end)
 
@@ -312,22 +313,31 @@ test("minion-only recovery never self-casts", function()
     function(sent) _AA_TEST.try_cast_heal(); expect(#sent):eq(0) end)
 end)
 
-test("a self-cast refuse (over-strong heal / wrong target) blocks that stat; ok clears the streak", function()
-  local mh = _AA_TEST.minion_heal
-  _AA_TEST.reset_minion_heal()
-  mh.casting, mh.last = true, { kind = "self_hp" }
-  _AA_TEST.minion_cast_settled("full")
-  expect(mh.self_hp_blocked):truthy()
-  _AA_TEST.reset_minion_heal()
-  mh.casting, mh.last = true, { kind = "self_stam" }
-  _AA_TEST.minion_cast_settled("notgt")
-  expect(mh.self_stam_blocked):truthy()
-  _AA_TEST.reset_minion_heal()
-  mh.casting, mh.last, mh.refuse_streak = true, { kind = "self_hp" }, 2
-  _AA_TEST.minion_cast_settled("ok")
-  expect(mh.self_hp_blocked):falsy()
-  expect(mh.refuse_streak):eq(0)
-  _AA_TEST.reset_minion_heal()
+test("a self-cast refuse (over-strong heal / wrong target) blocks that stat; ok does not", function()
+  -- A refused self-heal stops being retried this recovery (observable: no re-cast); a landed one leaves
+  -- the stat castable again (the wound is still there, so the next evaluation re-casts).
+  local HPREGEN = { hp = 6, mana = 20, move = 10, position = "resting" }
+  -- refuse (over-strong "doesn't need that much healing") → hp self-cast blocked
+  with_self_recovery({ hp = 30, regen = HPREGEN }, function(sent)
+    _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me")
+    _AA_TEST.minion_cast_settled("full")                     -- refused → block hp
+    local n = #sent
+    _AA_TEST.try_cast_heal(); expect(#sent):eq(n)            -- blocked → no re-cast
+  end)
+  -- refuse ("must use your name") → stamina self-cast blocked
+  with_self_recovery({ stam = 30, regen = { hp = 10, mana = 20, move = 6, position = "resting" } },
+    function(sent)
+      _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c refresh")
+      _AA_TEST.minion_cast_settled("notgt")                  -- refused → block stam
+      local n = #sent
+      _AA_TEST.try_cast_heal(); expect(#sent):eq(n)
+    end)
+  -- ok (landed) → NOT blocked: the still-present wound is cast again on the next evaluation
+  with_self_recovery({ hp = 30, regen = HPREGEN }, function(sent)
+    _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me")
+    _AA_TEST.minion_cast_settled("ok")                       -- landed
+    _AA_TEST.try_cast_heal(); expect(sent[2]):eq("c bolster Me")   -- castable again
+  end)
 end)
 
 -- Slow regen so a cast beats waiting (stam ~10 ticks off; mana easily spares 15).
@@ -360,8 +370,7 @@ test("narrates each recovery decision, deduped (same decision announces once)", 
   with_self_recovery({ hp = 30, regen = { hp = 6, mana = 20, move = 10, position = "resting" } },
     function()
       _AA_TEST.try_cast_heal()                       -- casts bolster → narrates cast:hp
-      _AA_TEST.minion_heal.casting = false
-      _AA_TEST.try_cast_heal()                       -- SAME decision → no new narration
+      _AA_TEST.minion_cast_settled("ok")             -- cast lands; SAME decision re-evaluated → no new narration
     end)
   _G.echo = saved_echo
   local casts = 0

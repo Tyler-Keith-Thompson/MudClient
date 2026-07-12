@@ -1,5 +1,7 @@
+import Afluent
 import DependencyInjection
 import Foundation
+import Mockable
 import Parsing
 import Testing
 
@@ -11,6 +13,9 @@ private actor RecordedWrites {
 }
 
 @Test func iacNegotiationSplitAcrossChunks() async throws {
+  try await withTestContainer {
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
     // A telnet "IAC WILL MSP" (255, 251, 90) negotiation, deliberately split so the option byte
     // lands in the *next* Data chunk — exactly the case the old per-chunk parser mishandled.
     let chunks: [Data] = [
@@ -33,9 +38,11 @@ private actor RecordedWrites {
     // And we answered it correctly with IAC DO MSP (255, 253, 90).
     let written = await writes.all
     #expect(written == [Data([255, 253, 90])])
+  }
 }
 
 @Test func iacStreamTokenParserClassifiesText() throws {
+  try withTestContainer {
     // A plain character is a passthrough token; the parser is the single-token unit the streaming
     // driver repeats.
     var input = Substring("x")
@@ -45,9 +52,11 @@ private actor RecordedWrites {
         return
     }
     #expect(text == "x")
+  }
 }
 
 @Test func mspDirectiveSplitAcrossChunks() throws {
+  try withTestContainer {
     // An `!!SOUND(...)` directive split across two reads must still be recognized as one directive
     // and stripped from the visible output.
     let buffer = MSPLineBuffer()
@@ -60,9 +69,11 @@ private actor RecordedWrites {
     // Completed by the newline: recognized as a directive, still nothing shown.
     #expect(second.output.isEmpty)
     #expect(second.directives.count == 1)
+  }
 }
 
 @Test func mspPassesThroughOrdinaryTextAndPrompts() throws {
+  try withTestContainer {
     let buffer = MSPLineBuffer()
     // A complete line flows straight through.
     #expect(buffer.process("You see a cow.\n").output == "You see a cow.\n")
@@ -73,9 +84,11 @@ private actor RecordedWrites {
     let b = buffer.process(" cow\n")
     #expect(a.output == " attack")
     #expect(b.output == " cow\n")
+  }
 }
 
 @Test func mspMalformedDirectiveIsNotHeldForever() throws {
+  try withTestContainer {
     // A line that looks like a directive but never closes must be released (shown) once its line
     // ends, rather than swallowing all subsequent output.
     let buffer = MSPLineBuffer()
@@ -83,9 +96,11 @@ private actor RecordedWrites {
     let released = buffer.process(" no close\n")
     #expect(released.output == "!!SOUND(broken no close\n")
     #expect(released.directives.isEmpty)
+  }
 }
 
 @Test func mspDirectiveWithoutTrailingNewlineIsStrippedNotLeaked() throws {
+  try withTestContainer {
     // Regression: a complete directive that arrives without a trailing newline, followed by a
     // prompt in a *separate* chunk, must be acted on immediately. Otherwise the prompt would be
     // appended to the same buffered line, the combined line would fail to parse as a directive, and
@@ -98,18 +113,22 @@ private actor RecordedWrites {
     let second = buffer.process("> ")
     #expect(second.directives.isEmpty)
     #expect(second.output == "> ")  // the prompt still flows to the display
+  }
 }
 
 @Test func mspRealDirectiveNewlineTerminated() throws {
+  try withTestContainer {
     let buffer = MSPLineBuffer()
     let result = buffer.process(
         "!!SOUND(Off U=http://www.alteraeon.com/soundpack/wav_v1/ X=2.0)\n"
     )
     #expect(result.directives.count == 1)
     #expect(result.output.isEmpty)
+  }
 }
 
 @Test func mspCRLFDirectiveIsStripped() throws {
+  try withTestContainer {
     // Regression for THE real-world bug: AlterAeon ends lines with CRLF, which Swift treats as
     // a single grapheme cluster — line splitting on "\n" silently failed and every directive leaked.
     let buffer = MSPLineBuffer()
@@ -117,9 +136,11 @@ private actor RecordedWrites {
     #expect(r.directives.count == 1)
     #expect(!r.output.contains("!!SOUND"))
     #expect(r.output.contains("An intersection"))
+  }
 }
 
 @Test func mspLoginCaptureSequenceIsStripped() throws {
+  try withTestContainer {
     // The exact shape from a raw capture: a no-newline char prompt, then the base-URL directive
     // arriving "\r\n"-prefixed and terminated by IAC GA (so no trailing newline).
     let buffer = MSPLineBuffer()
@@ -127,17 +148,34 @@ private actor RecordedWrites {
     let r = buffer.process("\r\n!!SOUND(Off U=http://www.alteraeon.com/soundpack/wav_v1/ X=2.0)")
     #expect(r.directives.count == 1)
     #expect(!r.output.contains("!!SOUND"))
+  }
 }
 
 @Test func mspParamlessSoundDirectiveIsStripped() throws {
+  try withTestContainer {
     let buffer = MSPLineBuffer()
     let r = buffer.process("!!SOUND(move/building4.wav)\r\n")
     #expect(r.directives.count == 1)
     #expect(r.output.isEmpty)
+  }
 }
 
 @Test func replayCapturedRawLog() async throws {
-  try await withSilentAudio {
+  try await withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
+    }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     // Debug tool: replay a MUD_RAW_LOG capture through the real IAC + MSP path.
     // Run with: bazel test ... --test_filter=replayCapturedRawLog --test_env=REPLAY_FILE=/path
     guard let path = ProcessInfo.processInfo.environment["REPLAY_FILE"],
@@ -168,7 +206,21 @@ private actor RecordedWrites {
 }
 
 @Test func splitProtocolLineDoesNotLeakTailToDisplay() async throws {
-  try await withSilentAudio {
+  try await withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
+    }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     // Regression: a `kxwt_` protocol line split across a TCP read leaks its orphaned tail. The head
     // fragment still matches the `^kxwt_` gag and is hidden, but the tail (here "ground_01") matches
     // nothing and leaks to the terminal — the reported "last bit of the sound path" after a move.
@@ -208,6 +260,9 @@ private actor RecordedWrites {
 }
 
 @Test func goAheadFlushesPromptOnlyWhileNotSuppressed() async throws {
+  try await withTestContainer {
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
     // GA is a prompt boundary by the telnet NVT default, so `Password: ` + IAC GA flushes the held
     // partial line to the display (the injected marker is consumed by the assembler, not shown).
     func run(_ chunks: [Data]) async throws -> String {
@@ -232,9 +287,11 @@ private actor RecordedWrites {
     ])
     #expect(suppressed.isEmpty)
     #expect(!suppressed.contains(promptGoAheadMarker))
+  }
 }
 
 @Test func iacSubnegotiationParsesOptionAndPayload() throws {
+  try withTestContainer {
     // IAC SB GMCP <payload> IAC SE — the payload is delivered verbatim and the whole sequence is
     // consumed (never leaked to the display).
     let payload = Data("Core.Hello { }".utf8)
@@ -248,9 +305,11 @@ private actor RecordedWrites {
     #expect(option == 201)
     #expect(got == payload)
     #expect(input.isEmpty)
+  }
 }
 
 @Test func iacSubnegotiationUnescapesDoubledIAC() throws {
+  try withTestContainer {
     // A raw 0xFF inside a subnegotiation is escaped on the wire as IAC IAC (255 255); it must be
     // collapsed back to a single 0xFF in the delivered payload. MSDP option (69) here.
     let wire = Data([255, 250, 69, 1, 255, 255, 2, 255, 240])  // payload bytes: 1, 0xFF, 2
@@ -262,9 +321,11 @@ private actor RecordedWrites {
     }
     #expect(option == 69)
     #expect(got == Data([1, 255, 2]))
+  }
 }
 
 @Test func iacSubnegotiationEscapedIACBeforeSEIsNotMistakenForTerminator() throws {
+  try withTestContainer {
     // The edge a naive `PrefixUpTo(IAC SE)` gets wrong: a payload byte 0xFF is escaped on the wire as
     // IAC IAC (255 255); when the very next real payload byte is 0xF0 (240), the bytes read 255 255 240
     // and a two-byte-marker scan stops at the escaped IAC's second byte + that 0xF0, truncating the
@@ -280,9 +341,11 @@ private actor RecordedWrites {
     #expect(option == 69)
     #expect(got == Data([255, 240]))   // both payload bytes recovered, not truncated to [255]
     #expect(input.isEmpty)             // the whole sequence (incl. the real IAC SE) was consumed
+  }
 }
 
 @Test func iacSubnegotiationLoneTrailingIACIsBufferedUntilDisambiguated() throws {
+  try withTestContainer {
     // A chunk boundary can fall right after a payload IAC (255), leaving it ambiguous: the next byte
     // decides whether it was an escaped IAC IAC (payload) or a terminating IAC SE. The parser must
     // report "incomplete" (not terminate, not leak) and wait. This is the disambiguation `PrefixUpTo`
@@ -306,9 +369,13 @@ private actor RecordedWrites {
     }
     #expect(payloads == [Data([255, 1])])   // escaped IAC un-escaped to 0xFF, then byte 1
     #expect(text == "Y")                     // terminator consumed; only trailing text leaks to display
+  }
 }
 
 @Test func iacSubnegotiationSplitAcrossChunksIsBuffered() async throws {
+  try await withTestContainer {
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
     // The closing IAC SE lands in a later chunk. The streaming driver must buffer the partial
     // subnegotiation (not fail, not leak the payload as text), then consume it whole once SE arrives.
     let chunks: [Data] = [
@@ -321,9 +388,13 @@ private actor RecordedWrites {
         output += piece
     }
     #expect(output == "X")  // subnegotiation fully consumed; only the trailing text is visible
+  }
 }
 
 @Test func iacGmcpWillIsAccepted() async throws {
+  try await withTestContainer {
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
     // With no on_telnet_negotiate hook, IAC WILL GMCP (255 251 201) must be accepted with IAC DO
     // GMCP (255 253 201) so the server will actually start sending GMCP.
     let stream = AsyncStream<Data> { c in c.yield(Data([255, 251, 201])); c.finish() }
@@ -334,10 +405,24 @@ private actor RecordedWrites {
     }
     #expect(output.isEmpty)
     #expect(await writes.all == [Data([255, 253, 201])])
+  }
 }
 
 @Test func gaggedKxwtBatchesRenderNothing() async throws {
-  try await withSilentAudio {
+  try await withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
+    }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     // Regression for "a bunch of blank lines before my command". When the player is idle, AlterAeon
     // streams kxwt_ status batches (group HP, prompt, sky/time) as their OWN network packets. Each
     // is fully gagged, so processServerOutputForScripts returns "" for it. The display consumer
@@ -357,6 +442,7 @@ private actor RecordedWrites {
     let chunks = capture.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
     #expect(!chunks.isEmpty)
 
+    Container.scriptInterpreter.register { ScriptInterpreter() }
     let interp = Container.scriptInterpreter()
     interp.engine.clearRules()
     try? interp.engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
@@ -403,7 +489,20 @@ private actor RecordedWrites {
 }
 
 @Test func scriptRegisteredCommandsDispatch() throws {
-  try withSilentAudio {
+  try withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
+    }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     // `#` commands are owned by scripts via the `command` BRIDGE: command("kxwt", h) defines a global
     // `kxwt`, and the REPL's legacy rewrite turns typed `#kxwt dump 5` into `kxwt("dump 5")`.
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
@@ -441,6 +540,8 @@ private actor RecordedWrites {
 }
 
 @Test func luaAfterTimerFiresCallback() async throws {
+  try await withTestContainer {
+    Container.anthropicAPIKeyProvider.register { { nil } }
     let engine = LuaScriptEngine()
     var echoed: [String] = []
     engine.onEcho = { echoed.append($0) }
@@ -449,19 +550,36 @@ private actor RecordedWrites {
     #expect(echoed.isEmpty)              // not yet
     try await Task.sleep(nanoseconds: 200_000_000)
     #expect(echoed == ["fired"])         // timer fired the Lua callback
+  }
 }
 
 @Test func luaOnUserInputHookIsCalled() throws {
+  try withTestContainer {
+    Container.anthropicAPIKeyProvider.register { { nil } }
     let engine = LuaScriptEngine()
     var seen: [String] = []
     engine.onEcho = { seen.append($0) }
     try engine.load(source: #"function on_user_input(cmd) echo("typed:" .. cmd) end"#)
     engine.notifyUserInput("north")
     #expect(seen == ["typed:north"])
+  }
 }
 
 @Test func luaGameScriptsLoadCleanly() throws {
-  try withSilentAudio {
+  try withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
+    }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     // Load the real game scripts through the engine to catch syntax errors and missing builtins —
     // they're otherwise only exercised at runtime. Resolved relative to this source file.
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
@@ -477,6 +595,11 @@ private actor RecordedWrites {
 }
 
 @Test func aiPilotToolDefinitionsAreValidJSON() throws {
+  try withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
     // The AI pilot hands the model a JSON array of OpenAI tool definitions (built by AIPilot.lua's
     // hand-rolled JSON encoder). `#ai tools` echoes that exact array — parse it and assert the
     // shape LM Studio expects, so an encoder regression can't ship silently malformed tools.
@@ -515,9 +638,15 @@ private actor RecordedWrites {
     for expected in ["move", "attack", "cast", "get", "drop", "wear", "recover", "command", "wait", "remember"] {
         #expect(names.contains(expected))
     }
+  }
 }
 
 @Test func humanPlayMapsToToolCallTrainingExamples() throws {
+  try withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
     // "Tune the model on me": a command the human types is captured as an OpenAI tool-call SFT
     // example (system + user prompt, assistant tool_call). `#ai demo <cmd>` builds that record
     // without writing to disk. Assert the JSON shape and that raw commands classify into the right
@@ -577,10 +706,25 @@ private actor RecordedWrites {
     // No structured tool fits 'train' -> verbatim command fallback (a still-valid demonstration).
     let train = try demo("train dagger")
     #expect(train.name == "command"); #expect(train.args["text"] as? String == "train dagger")
+  }
 }
 
 @Test func rawLogPipelineGagsKxwtNoLeak() async throws {
-  try await withSilentAudio {
+  try await withTestContainer {
+    Container.terminalService.register { TerminalService() }
+    Container.lagMonitor.register { LagMonitor() }
+    Container.transcriptStore.register { TranscriptStore() }
+    Container.scriptInterpreter.register { ScriptInterpreter() }
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
+    }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     // Repro from a real raw capture: run actual server bytes through the real text pipeline
     // (IAC strip + CRLF normalize + MSP strip) and the AlterAeon gag, and prove kxwt machinery and
     // IAC Go-Ahead do NOT leak to the display.

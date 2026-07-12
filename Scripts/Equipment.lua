@@ -30,6 +30,13 @@
 -- load-order dependency on AlterAeon (which owns/fills the schema, merging into this if we ran first).
 state = state or {}
 
+-- Reactive core (__rx) for the auto-identify FLOW (Subjects + await_reply); the promise layer (__promise)
+-- is pulled in by bootstrap. require() live, dofile fallback in the bare test harness. `_rx` is
+-- `_`-prefixed so load("Scripts") never auto-runs it — it's consumer-pulled here.
+pcall(require, "_rx")
+if not __rx then dofile("Scripts/_rx.lua") end
+local rx = __rx
+
 local cfg = {
   home = os.getenv("HOME") or "",
   -- Comparisons/shop reviews need room to reason and enumerate; give the model a generous budget.
@@ -68,8 +75,8 @@ local S = _EQUIP
 -- queue is orphaned. Drop it — its pending timers no-op on the EPOCH check — and warn loudly if a
 -- container item was OUT of its container when the reload hit, so the user knows to put it back.
 if S.idq then
-  if S.idq.got and S.idq.cur then
-    echo("[eq] reload interrupted the identify pass — '" .. tostring(S.idq.cur.name)
+  if S.idq.out_item then
+    echo("[eq] reload interrupted the identify pass — '" .. tostring(S.idq.out_item)
       .. "' may still be OUT of its container; check your inventory and put it back.", "red")
   end
   S.idq = nil
@@ -944,30 +951,89 @@ local function build_id_queue(worn, inv, containers)
   return queue, known
 end
 
--- Forward decls for the mutually-recursive phase machine.
-local idq_next_entry, idq_do_get, idq_do_identify, idq_do_put, idq_gap_then_next, idq_finish, idq_put_result_fail
+-- ===== the auto-identify FLOW (reactive rewrite of the old phase machine) ==========================
+-- The scan→identify→(wear/keep) pass used to be a hand-walked machine: S.idq.i / .phase / .cur / .got
+-- plus a single armed after/cancel timer, stepped by mutually-recursive callbacks. It's now a PROMISE
+-- FLOW over the game's reply STREAMS (mirrors Corpse.lua's harvest→bsac→sac):
+--
+--     process(i) = [combat-gate] → (in a container? get) → identify → (if we pulled it) put → process(i+1)
+--
+-- Each step SENDS its command then AWAITS its reply off a hot Subject — idResultS / getResultS /
+-- putResultS — fed by the reply SEAMS below (idq_advance / idq_get_result / idq_put_result) that BOTH the
+-- live triggers AND the specs push through (one path, no second matcher to drift). The single in-flight
+-- await IS the pacing gate: a stray reply with no await subscribed is dropped (so a duplicate reply is
+-- harmless). Per phase a stall watchdog is the await's own timeout, which — matching the ORIGINAL
+-- behaviour — RESOLVES to a FAIL sentinel (count it, keep going) rather than aborting the whole pass:
+-- a get-timeout skips the item (no put), an id-timeout counts a failure, a put-timeout leaves it on you
+-- (left_out, reported loudly). The op-level idle watchdog (eq_op / EQ_OP_IDLE) remains the last-resort net
+-- that force-settles the tracked scan promise. `i` / `phase` / `cur` / `got` have DISSOLVED into the flow
+-- (i is a process() parameter; the entry is a closure local); S.idq now carries only the running TALLIES
+-- and the reload-safety `out_item` marker (an item currently pulled OUT of its container).
 
-local function idq_clear_timer()
-  if S.idq and S.idq.timer and cancel then cancel(S.idq.timer) end
-  if S.idq then S.idq.timer = nil end
-end
-local function idq_arm(fn)
-  idq_clear_timer()
-  if after and S.idq then S.idq.timer = after(cfg.id_timeout, fn) end
+-- Internal hot streams the per-item sequence awaits; fed by the SEAMS below.
+local idResultS  = rx and rx.subject() or nil   -- identify result: a parsed block (idq_advance) / fail line
+local getResultS = rx and rx.subject() or nil   -- `get <item> <container>` reply (success / can't)
+local putResultS = rx and rx.subject() or nil   -- `put <item> <container>` reply (success)
+local idqEndS    = rx and rx.subject() or nil   -- the pass ended → tear down any in-flight await
+
+local FAIL  = {}   -- await sentinel: the reply said fail, OR the phase timed out — count it, continue
+local ABORT = {}   -- await sentinel: the pass was torn down (finish / reload) — bail out of the flow
+
+-- ---- reply SEAMS: the triggers AND the specs push game replies through these ----------------------
+-- Each pushes onto the Subject the in-flight await subscribes to; with no await subscribed the push is
+-- dropped. `idq_advance` is the forward-declared upvalue finalize_id (defined earlier) notifies.
+idq_advance = function(ok)        if S.idq and idResultS  then idResultS:onNext(ok and "ok" or FAIL) end end
+local function idq_get_result(ok) if S.idq and getResultS then getResultS:onNext(ok and "ok" or FAIL) end end
+local function idq_put_result(ok) if S.idq and putResultS then putResultS:onNext(ok and "ok" or FAIL) end end
+
+-- A flow promise: __promise but STARTED synchronously at construction (a step is built exactly when it
+-- runs) and kept OUT of the HUD widget (only the enclosing eq.scan op is a widget row). Same helper
+-- Corpse.lua uses.
+local function IDP(executor)
+  local p = __promise(executor, "eq-idflow")
+  if __untrack_promise then __untrack_promise(p) end
+  if p and p.__start then p.__start() end
+  return p
 end
 
-idq_gap_then_next = function()
+-- Await the next value from a reply Subject, guarded by a per-phase watchdog that RESOLVES `FAIL` (a
+-- single slow/absent reply is a counted failure, NOT a pass abort) and torn down by idqEndS (resolves
+-- ABORT). The single active subscription is the pacing gate.
+local function await_reply(subject, secs)
+  return IDP(function(resolve, _, onCancel)
+    local sub, esub, tid, done = nil, nil, nil, false
+    local function cleanup()
+      if sub  then sub:unsubscribe();  sub  = nil end
+      if esub then esub:unsubscribe(); esub = nil end
+      if tid and cancel then cancel(tid); tid = nil end
+    end
+    local function fin(v) if done then return end; done = true; cleanup(); resolve(v) end
+    if subject then sub = subject:subscribe(function(v) fin(v) end) end
+    if idqEndS then esub = idqEndS:subscribe(function() fin(ABORT) end) end
+    if secs and after then tid = after(secs, function() tid = nil; fin(FAIL) end) end
+    onCancel(function() done = true; cleanup() end)
+  end)
+end
+
+-- A politeness beat (be nice to the server), then run fn. A no-op wait when `after` is absent (bare
+-- harness) so the flow still completes. Returns fn's promise so the chain composes.
+local function idq_gap(fn)
+  return IDP(function(resolve, _, onCancel)
+    local id = after and after(cfg.id_gap, function() id = nil; resolve() end)
+    if not id then resolve() end
+    onCancel(function() if id and cancel then cancel(id) end end)
+  end):andThen(fn)
+end
+
+local idq_process   -- fwd (recursive: do_put/do_identify call it, it calls them)
+
+-- Tear the pass down: drop its triggers, abort any in-flight await, echo the summary + any left-out
+-- warning, and settle the scan op. Exact original messages / echo order preserved.
+local function idq_finish()
   local q = S.idq; if not q then return end
-  q.phase = "gap"
-  if after then q.timer = after(cfg.id_gap, function() q.timer = nil; idq_next_entry() end)
-  else idq_next_entry() end
-end
-
-idq_finish = function()
-  local q = S.idq; if not q then return end
-  idq_clear_timer()
-  if class_remove then class_remove("eqid") end
   S.idq = nil
+  if class_remove then class_remove("eqid") end
+  if idqEndS then idqEndS:onNext() end        -- tear down any lingering await
   echo(string.format("[eq] identify pass: %d identified, %d failed, %d already known.",
     q.ident, q.failed, q.known), "cyan")
   if #q.left_out > 0 then
@@ -978,79 +1044,70 @@ idq_finish = function()
   eq_resolve()   -- the scan's identify pass is the scan op's terminal
 end
 
-idq_next_entry = function()
+-- Put a pulled container item back, then step on. There is no put-FAILURE line on the wire: success is
+-- "You put X in …" (idq_put_result(true)); a MISSING reply (timeout → FAIL) OR an explicit
+-- idq_put_result(false) means it never went back — so it's LEFT ON YOU and reported loudly (left_out).
+local function idq_do_put(i, e)
+  send(string.format("put %s %s", e.base_kw, first_kw(e.container)))
+  return await_reply(putResultS, cfg.id_timeout):andThen(function(res)
+    local q = S.idq; if not q then return end
+    if res == ABORT then return end
+    q.out_item = nil                                       -- resolved either way: no longer unexpectedly OUT
+    if res == FAIL then q.left_out[#q.left_out + 1] = e.name end
+    return idq_gap(function() return idq_process(i + 1) end)
+  end)
+end
+
+-- Send `identify` and await the parsed-block result (finalize_id → idq_advance), the failure line, or the
+-- timeout. `pulled` = it came out of a container, so it MUST be put back regardless of the identify
+-- outcome (a failed identify STILL puts it back — never left out). A just-pulled item uses its bare
+-- keyword; finalize_id verifies the parsed display against S.id_expect.
+local function idq_do_identify(i, e, pulled)
+  S.id_expect = e.name
+  send("identify " .. (e.container and e.base_kw or e.kw))
+  return await_reply(idResultS, cfg.id_timeout):andThen(function(res)
+    local q = S.idq; if not q then return end
+    S.id_expect = nil
+    if res == ABORT then return end
+    if res == FAIL then q.failed = q.failed + 1 else q.ident = q.ident + 1 end
+    if pulled then return idq_do_put(i, e) end
+    return idq_gap(function() return idq_process(i + 1) end)
+  end)
+end
+
+-- Process the item at index `i`: combat-gate, then (get if it's in a container) → identify → put → next.
+idq_process = function(i)
   local q = S.idq; if not q then return end
-  if EPOCH ~= _EQUIP.epoch then return end          -- died on reload
-  if in_combat and in_combat() then                 -- pause (don't advance) until combat clears
+  if EPOCH ~= _EQUIP.epoch then return end               -- died on reload
+  if in_combat and in_combat() then                      -- pause (don't advance) until combat clears
     if not q.paused_msg then echo("[eq] identify pass paused (in combat) — resuming when clear.", "yellow"); q.paused_msg = true end
     eq_touch()   -- a combat pause is NOT a stall — keep the op promise alive across the fight
-    if after then q.timer = after(cfg.id_combat_retry, function() q.timer = nil; idq_next_entry() end) end
-    return
+    return IDP(function(resolve, _, onCancel)
+      local id = after and after(cfg.id_combat_retry, function() id = nil; resolve() end)
+      if not id then resolve() end
+      onCancel(function() if id and cancel then cancel(id) end end)
+    end):andThen(function() return idq_process(i) end)
   end
   q.paused_msg = nil
   eq_touch()   -- progress on the identify pass: keep the op promise alive
-  q.i = q.i + 1
-  if q.i > #q.list then idq_finish(); return end
-  q.cur = q.list[q.i]; q.got = false
-  echo(string.format("[eq] identifying %d/%d: %s%s", q.i, #q.list, q.cur.name,
-    q.cur.container and (" (from " .. q.cur.container .. ")") or ""), "cyan")
-  if q.cur.container then idq_do_get() else idq_do_identify() end
-end
-
-idq_do_get = function()
-  local q = S.idq; local e = q.cur
-  q.phase = "get"
-  send(string.format("get %s %s", e.kw, first_kw(e.container)))
-  idq_arm(function() q.timer = nil; if S.idq and S.idq.phase == "get" then S.idq.failed = S.idq.failed + 1; idq_gap_then_next() end end)
-end
-
--- get result signal (from triggers). ok=true => item is now in inventory and MUST be put back.
-local function idq_get_result(ok)
-  local q = S.idq; if not q or q.phase ~= "get" then return end
-  idq_clear_timer()
-  if not ok then q.failed = q.failed + 1; idq_gap_then_next(); return end
-  q.got = true
-  idq_do_identify()
-end
-
-idq_do_identify = function()
-  local q = S.idq; local e = q.cur
-  q.phase = "id"
-  S.id_expect = e.name
-  -- A just-gotten container item is now in inventory; use its bare keyword and let finalize_id verify the
-  -- parsed display against S.id_expect (guards against another same-keyword item already in inventory).
-  send("identify " .. (e.container and e.base_kw or e.kw))
-  idq_arm(function() q.timer = nil; if idq_advance then idq_advance(false) end end)
-end
-
--- identify result (from finalize_id on a parsed block, or the failure trigger / timeout). Assigned to the
--- forward-declared upvalue so finalize_id (defined earlier) can see it.
-idq_advance = function(ok)
-  local q = S.idq; if not q or q.phase ~= "id" then return end
-  idq_clear_timer()
-  S.id_expect = nil
-  if ok then q.ident = q.ident + 1 else q.failed = q.failed + 1 end
-  if q.got then idq_do_put() else idq_gap_then_next() end
-end
-
-idq_do_put = function()
-  local q = S.idq; local e = q.cur
-  q.phase = "put"
-  send(string.format("put %s %s", e.base_kw, first_kw(e.container)))
-  idq_arm(function() q.timer = nil; if S.idq and S.idq.phase == "put" then idq_put_result_fail() end end)
-end
--- put result signals.
-idq_put_result_fail = function()
-  local q = S.idq; if not q or q.phase ~= "put" then return end
-  idq_clear_timer(); q.got = false
-  q.left_out[#q.left_out + 1] = q.cur.name
-  idq_gap_then_next()
-end
-local function idq_put_result(ok)
-  local q = S.idq; if not q or q.phase ~= "put" then return end
-  if not ok then idq_put_result_fail(); return end
-  idq_clear_timer(); q.got = false
-  idq_gap_then_next()
+  if i > #q.list then idq_finish(); return end
+  local e = q.list[i]
+  echo(string.format("[eq] identifying %d/%d: %s%s", i, #q.list, e.name,
+    e.container and (" (from " .. e.container .. ")") or ""), "cyan")
+  if e.container then
+    send(string.format("get %s %s", e.kw, first_kw(e.container)))
+    return await_reply(getResultS, cfg.id_timeout):andThen(function(res)
+      local q2 = S.idq; if not q2 then return end
+      if res == ABORT then return end
+      if res == FAIL then                                 -- never pulled out → NO put, just skip
+        q2.failed = q2.failed + 1
+        return idq_gap(function() return idq_process(i + 1) end)
+      end
+      q2.out_item = e.name                                -- now OUT of its container → must go back
+      return idq_do_identify(i, e, true)
+    end)
+  end
+  return idq_do_identify(i, e, false)
 end
 
 local function idq_install_triggers()
@@ -1059,9 +1116,7 @@ local function idq_install_triggers()
   trigger([[^You can't carry that many items]],        function() idq_get_result(false) end, { class = "eqid" })
   trigger([[^You can't safely carry]],                 function() idq_get_result(false) end, { class = "eqid" })
   trigger([[^You put .+ in ]],                         function() idq_put_result(true) end,  { class = "eqid" })
-  trigger([[^You don't seem to be carrying anything named]], function()
-    if S.idq and S.idq.phase == "id" and idq_advance then idq_advance(false) end
-  end, { class = "eqid" })
+  trigger([[^You don't seem to be carrying anything named]], function() idq_advance(false) end, { class = "eqid" })
 end
 
 local function idq_start(queue, known)
@@ -1071,11 +1126,21 @@ local function idq_start(queue, known)
     eq_resolve()
     return
   end
-  S.idq = { list = queue, i = 0, known = known, ident = 0, failed = 0, left_out = {},
-            phase = nil, cur = nil, got = false, timer = nil }
+  S.idq = { list = queue, known = known, ident = 0, failed = 0, left_out = {}, out_item = nil }
   idq_install_triggers()
   echo(string.format("[eq] auto-identifying %d item(s) (%d already known this session)…", #queue, known), "cyan")
-  idq_next_entry()
+  -- Kick the flow. A watchdog FAIL deep in the chain becomes a normal resolve (fail-and-continue), so the
+  -- only rejections reaching here are genuine faults — turn one into a clean close (ABORT is a deliberate
+  -- teardown, not a fault, so it passes through as a resolve and never trips this).
+  local flow = idq_process(1)
+  if flow and flow.catch then
+    flow:catch(function(why)
+      if why ~= nil and why ~= ABORT and S.idq then
+        echo("[eq] identify pass stalled — wrapping up.", "yellow")
+        idq_finish()
+      end
+    end)
+  end
 end
 
 -- ---- #eq scan: worn gear + inventory + look-in every container -----------------------------------

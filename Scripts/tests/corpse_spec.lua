@@ -1,114 +1,218 @@
--- Specs for the after-kill corpse automation (AlterAeon.lua). We HARVEST corpses (teeth + spellcomps),
--- never `get all`, and bsac/sac ONLY the corpses we're sure are empty — a corpse still holding loot is
--- left intact (sacrificing it would destroy the items, incl. binding/quest gear — the medallion bug).
--- "Has loot" comes from the contents the game auto-prints at the kill ("...the corpse of X contains:"),
--- recorded per NAME; each corpse's name is learned from its own harvest reply. The trigger REGEXES run in
--- Swift; here we test the pure decision (corpse_finish/corpse_sac) given the recorded state.
+-- Specs for the after-kill corpse automation (Corpse.lua).
+--
+-- CHARACTERIZATION suite. These assert OBSERVABLE BEHAVIOUR — the exact `send` sequence the pass emits
+-- (`harvest teeth N.corpse`, `harvest spellcomps N.corpse`, `bsac N.corpse`, `sac N.corpse`), the echo
+-- narration, and the OUTCOMES (which corpses get sacrificed vs left intact, whether the pass wraps up) —
+-- NOT the internal step-machine fields (corpse.active/step/idx/cur_empty/remaining/watchdog/promise). The
+-- point: a reactive reimplementation that stores its progress completely differently (a promise/stream
+-- flow instead of a step counter) must still turn these green, because it reproduces the same sends/
+-- echoes/outcomes. Any change to the actual command sequence — or to the loot-safety guarantee (never
+-- `sac` a corpse that might hold items) — breaks a test.
+--
+-- We HARVEST corpses (teeth + spellcomps), never `get all`, and bsac/sac ONLY the corpses we're sure are
+-- empty — a corpse still holding loot is left intact (sacrificing it would destroy the items, incl.
+-- binding/quest gear — the medallion bug). "Has loot" comes from the contents the game auto-prints at the
+-- kill ("...the corpse of X contains:"), recorded per NAME; each corpse's name is learned from its own
+-- harvest reply.
+--
+-- The scenario is DRIVEN through the same surface the live Swift triggers drive: corpse_start() kicks the
+-- pass off (out of combat), then the reply-line seams advance it — corpse_harvest_done() (a harvest
+-- terminal), corpse_sac() (the bsac reply), corpse_sac_done("ok"/"fail") (the sac reply), and setting
+-- corpse.cur_name / corpse.with_items (the harvest-name / contents lines). Reading the corpse table is
+-- used only to DRIVE; every ASSERTION is on captured send/echo or a pass outcome.
 
 local corpse = _AA_TEST.corpse
 
--- Run `fn(sent)` with the corpse table set to `fields` and `send` capturing, then restore both.
-local function with_corpse(fields, fn)
-  local saved_send, sent = send, {}
-  send = function(c) sent[#sent + 1] = c end
+-- Clear the learned per-kind harvest memory so each case is hermetic (module load may have read a file).
+local function clear_mem()
+  local hm = _AA_TEST.corpse_harvest()
+  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
+  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
+end
+
+-- Is a "harvesting corpses" promise row live in the HUD widget?
+local function widget_has(desc)
+  for _, e in ipairs(active_promises()) do if e.desc == desc then return true end end
+  return false
+end
+local function harvesting() return widget_has("harvesting corpses") end
+
+-- Run a corpse pass. `cfg` seeds the batch inputs (kill count, per-name contents, learned memory has been
+-- cleared); we force OUT-of-combat (corpse_start's in_combat gate), start the pass, then hand `drive` a
+-- table of reply-line seams + the captured send/echo logs. Everything is restored afterwards and any live
+-- promise is cancelled so cases stay hermetic. Returns (sent, echoed).
+local function pass(cfg, drive)
+  local saved_state, saved_send, saved_echo = state, send, echo
+  local sent, echoed = {}, {}
+  _PROMISE_TEST.cancel_all()
+  clear_mem()
+  cfg = cfg or {}
+  -- Seed learned per-kind harvest memory AFTER the wipe (arrays of normalized keys).
+  local hm = _AA_TEST.corpse_harvest()
+  for _, k in ipairs(cfg.no_teeth or {}) do hm.no_teeth[k] = true end
+  for _, k in ipairs(cfg.no_spellcomps or {}) do hm.no_spellcomps[k] = true end
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
-  for k, v in pairs(fields) do corpse[k] = v end
-  local ok, err = pcall(function() fn(sent) end)
-  send = saved_send
+  for k in pairs(corpse) do corpse[k] = nil end
+  corpse.on, corpse.active, corpse.killed = true, false, true
+  corpse.kills, corpse.kill_count, corpse.with_items, corpse.room = {}, 0, {}, nil
+  corpse.idx = 1
+  for k, v in pairs(cfg) do
+    if k ~= "no_teeth" and k ~= "no_spellcomps" then corpse[k] = v end
+  end
+  state = { opponents = {}, engaged_until = nil, fighting = false, action = 0 }
+  send = function(c) sent[#sent + 1] = c end
+  echo = function(s) echoed[#echoed + 1] = (tostring(s):gsub("\27%[[%d;]*m", "")) end
+  local api = {
+    sent = sent, echoed = echoed,
+    name         = function(n) corpse.cur_name = n end,          -- "You start harvesting teeth from the corpse of X"
+    contents     = function(n) corpse.with_items[n] = true end,  -- "(on ground) the corpse of X contains:"
+    harvest_done = function() corpse_harvest_done() end,         -- a harvest terminal / spellcomps yield line
+    bsac_reply   = function() corpse_sac() end,                  -- "You sacrifice blood from …"
+    sac_reply    = function(r) corpse_sac_done(r) end,           -- "… appreciates your sacrifice" / "too big …"
+    miss         = function() corpse_done() end,                 -- "You don't see anything named 'N.corpse'"
+    harvesting   = harvesting,
+  }
+  local ok, err = pcall(function()
+    corpse_start()
+    if drive then drive(api) end
+  end)
+  _PROMISE_TEST.cancel_all()
+  send, echo, state = saved_send, saved_echo, saved_state
   for k in pairs(corpse) do corpse[k] = nil end
   for k, v in pairs(snap) do corpse[k] = v end
   if not ok then error(err, 2) end
+  return sent, echoed
 end
 
+local function joined(sent) return table.concat(sent, " | ") end
+local function has_send(sent, needle)
+  for _, c in ipairs(sent) do if c:find(needle, 1, true) then return true end end
+  return false
+end
+-- Count sends whose whole command matches `pat` (anchor with ^ so "sac " doesn't match "bsac …").
+local function sends_matching(sent, pat)
+  local n = 0
+  for _, c in ipairs(sent) do if c:match(pat) then n = n + 1 end end
+  return n
+end
+local function sacs(sent)  return sends_matching(sent, "^sac ") end   -- true corpse REMOVALS
+local function bsacs(sent) return sends_matching(sent, "^bsac ") end  -- blood drains (safe on any corpse)
+
+-- ---- loot safety: bsac drains blood from ANY corpse; sac (removal) only on a proven-empty one ---------
+
 test("a corpse holding loot is BSAC'd (blood only) but never SAC'd (removed)", function()
-  with_corpse({ on = true, active = true, idx = 1, cur_name = "a jaguar",
-                with_items = { ["a jaguar"] = true } }, function(sent)
-    corpse_finish()
-    expect(sent[1]):eq("bsac 1.corpse")           -- bsac only drains blood → safe on a loot corpse
-    expect(corpse.cur_empty):eq(false)            -- but flagged not-empty, so NOT sac-safe
-    corpse_sac()                                  -- bsac reply → decide
-    expect(corpse.idx):eq(2)                      -- stepped PAST it, items intact
-    for _, c in ipairs(sent) do expect(c:find("^sac ") == nil):eq(true) end   -- never REMOVED
+  local sent = pass({ kill_count = 1 }, function(api)
+    api.contents("a jaguar")            -- the game auto-printed its contents at the kill → holds loot
+    api.name("a jaguar")                -- learned from its own harvest reply
+    api.harvest_done()                  -- teeth done → spellcomps
+    api.harvest_done()                  -- spellcomps done → decide → bsac
+    api.bsac_reply()                    -- blood taken → NOT empty → left intact, step past → pass ends
   end)
+  expect(has_send(sent, "bsac 1.corpse")):eq(true)   -- blood is safe to take from a loot corpse
+  expect(sacs(sent)):eq(0)                           -- but it is NEVER removed (would destroy the loot)
+  expect(harvesting()):eq(false)                     -- one corpse, left intact → pass wrapped up
 end)
 
-test("an EMPTY corpse (no auto-printed contents) is blood-sacrificed", function()
-  with_corpse({ on = true, active = true, idx = 1, cur_name = "a jaguar cub", with_items = {} }, function(sent)
-    corpse_finish()
-    expect(sent[1]):eq("bsac 1.corpse")
+test("an EMPTY corpse (no auto-printed contents) is blood-sacrificed AND removed", function()
+  local sent = pass({ kill_count = 1 }, function(api)
+    api.name("a jaguar cub")
+    api.harvest_done(); api.harvest_done()   -- teeth → spellcomps → decide
+    api.bsac_reply()                         -- empty → sac it
+    api.sac_reply("ok")                      -- god accepted → gone → pass ends
   end)
+  expect(joined(sent)):eq(
+    "harvest teeth 1.corpse | harvest spellcomps 1.corpse | bsac 1.corpse | sac 1.corpse")
+  expect(harvesting()):eq(false)
 end)
 
 test("a fully barren corpse (no name learned) IS sacrificed when the batch printed no loot", function()
-  -- The reported case: "a wall of sludge" with no teeth and no spellcomps never names itself, but nothing
-  -- in the room printed "…contains:", so it's safe (and correct) to bsac it rather than leave it forever.
-  with_corpse({ on = true, active = true, idx = 1, cur_name = nil, with_items = {} }, function(sent)
-    corpse_finish()
-    expect(sent[1]):eq("bsac 1.corpse")
+  -- "a wall of sludge" with no teeth and no spellcomps never names itself, but nothing in the room
+  -- printed "…contains:", so it's safe (and correct) to sac it rather than leave it forever.
+  local sent = pass({ kill_count = 1 }, function(api)
+    -- never learns a name (barren), never sees contents
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply()                         -- unknown name, but batch held no loot anywhere → sac-safe
+    api.sac_reply("ok")
   end)
+  expect(has_send(sent, "bsac 1.corpse")):eq(true)
+  expect(has_send(sent, "sac 1.corpse")):eq(true)
+  expect(harvesting()):eq(false)
 end)
 
 test("an un-named corpse (batch held loot somewhere) is bsac'd but left intact — never removed", function()
-  with_corpse({ on = true, active = true, idx = 1, cur_name = nil,
-                with_items = { ["a jaguar"] = true } }, function(sent)
-    corpse_finish()
-    expect(sent[1]):eq("bsac 1.corpse")             -- blood is always safe
-    expect(corpse.cur_empty):eq(false)              -- but can't prove it's empty → not sac-safe
-    corpse_sac()
-    expect(corpse.idx):eq(2)                        -- stepped past, not removed
-    for _, c in ipairs(sent) do expect(c:find("^sac ") == nil):eq(true) end
+  local sent = pass({ kill_count = 1 }, function(api)
+    api.contents("a jaguar")            -- SOME corpse in the batch printed loot…
+    -- …and THIS one never names itself, so we can't prove it's empty → mustn't remove it
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply()
+  end)
+  expect(has_send(sent, "bsac 1.corpse")):eq(true)   -- blood is always safe
+  expect(sacs(sent)):eq(0)                           -- can't prove empty → never removed
+  expect(harvesting()):eq(false)
+end)
+
+-- ---- the sac step is STREAM-driven (waits for the god's reply before re-indexing) --------------------
+
+test("sac is STREAM-driven: an EMPTY corpse sends `sac` and then WAITS for the god's reply", function()
+  local sent = pass({ kill_count = 2 }, function(api)
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply()                         -- empty → sends `sac 1.corpse`…
+    expect(api.sent[#api.sent]):eq("sac 1.corpse")
+    local n = #api.sent
+    -- …and NOTHING more until the sac is confirmed (no optimistic re-index — sacrificing shifts indices).
+    expect(#api.sent):eq(n)
+  end)
+  expect(sent[#sent]):eq("sac 1.corpse")
+end)
+
+test("a CONFIRMED sac re-processes the SAME index (the next corpse shifted into it)", function()
+  -- Two empty corpses. Sac'ing #1 removes it and shifts #2 into index 1, so the pass re-harvests index 1.
+  local sent = pass({ kill_count = 2 }, function(api)
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply(); api.sac_reply("ok")    -- corpse 1 gone → re-process index 1
+    expect(api.sent[#api.sent]):eq("harvest teeth 1.corpse")
+  end)
+  -- second corpse then processes at index 1 too
+  expect(sent[1]):eq("harvest teeth 1.corpse")
+end)
+
+test("a sac that FAILS (corpse too big) leaves it intact and steps PAST it to the next index", function()
+  local sent = pass({ kill_count = 3 }, function(api)
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply()
+    api.sac_reply("fail")                    -- "…is too big for you to sacrifice." → still here → step past
+    expect(api.sent[#api.sent]):eq("harvest teeth 2.corpse")   -- next index, not re-index 1
   end)
 end)
 
-test("sac is STREAM-driven: for an EMPTY corpse, corpse_sac sends `sac` and WAITS for the god's reply", function()
-  with_corpse({ on = true, active = true, idx = 1, step = "bsac", remaining = 2, cur_name = nil,
-                cur_empty = true, with_items = {} }, function(sent)
-    corpse_sac()
-    expect(sent[1]):eq("sac 1.corpse")
-    expect(#sent):eq(1)                              -- nothing else until the sac is confirmed
+test("a duplicate sac reply (god line + gold line) is ignored — the step already advanced", function()
+  local sent = pass({ kill_count = 2 }, function(api)
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply(); api.sac_reply("ok")    -- first reply advances (re-harvests index 1)
+    local n = #api.sent
+    api.sac_reply("ok")                      -- second reply for the SAME sac → gated out
+    expect(#api.sent):eq(n)
   end)
 end)
 
-test("a CONFIRMED sac drops `remaining` and re-processes the SAME index (the next corpse shifted in)", function()
-  with_corpse({ on = true, active = true, idx = 1, step = "sac", remaining = 2, cur_name = "old",
-                with_items = {} }, function(sent)
-    corpse_sac_done("ok")                            -- "Draak appreciates your sacrifice of the corpse of X."
-    expect(corpse.remaining):eq(1)                   -- one fewer corpse in the room
-    expect(sent[1]):eq("harvest teeth 1.corpse")     -- re-harvest the index the next corpse shifted into
-    expect(corpse.cur_name):eq(nil)                  -- name re-learned per corpse
-  end)
-end)
-
-test("a sac that FAILS (corpse too big) leaves it intact and steps PAST it — no decrement", function()
-  with_corpse({ on = true, active = true, idx = 1, step = "sac", remaining = 3, with_items = {} }, function(sent)
-    corpse_sac_done("fail")                          -- "…is too big for you to sacrifice."
-    expect(corpse.remaining):eq(3)                   -- still there → not removed
-    expect(corpse.idx):eq(2)                         -- stepped past it, next corpse
-    expect(sent[1]):eq("harvest teeth 2.corpse")
-  end)
-end)
-
-test("a duplicate sac reply (god line + gold line) is ignored — step already advanced", function()
-  with_corpse({ on = true, active = true, idx = 1, step = "sac", remaining = 2, with_items = {} }, function(sent)
-    corpse_sac_done("ok")                            -- first reply advances (step -> teeth)
-    local n = #sent
-    corpse_sac_done("ok")                            -- second reply for the same sac: gated out (step ~= "sac")
-    expect(#sent):eq(n)
-  end)
-end)
-
-test("a SUCCESSFUL spellcomps harvest (a yield line, no 'done' line) advances to the decision — no stall", function()
+test("a SUCCESSFUL spellcomps harvest (a yield line, no 'done' line) advances to the decision", function()
   -- The bug: `harvest spellcomps` that SUCCEEDS just prints its yield with no terminal, so the machine
-  -- used to hang at the spellcomps step forever. The yield triggers call corpse_harvest_done; from the
-  -- spellcomps step that must reach corpse_finish (→ bsac for an empty corpse).
-  with_corpse({ on = true, active = true, idx = 1, step = "spellcomps", cur_name = "a rat", with_items = {} }, function(sent)
-    corpse_harvest_done()
-    expect(sent[1]):eq("bsac 1.corpse")
-    expect(corpse.step):eq("bsac")
+  -- used to hang at the spellcomps step forever. The yield line drives corpse_harvest_done, which from the
+  -- spellcomps step must reach the bsac decision (→ bsac for an empty corpse).
+  local sent = pass({ kill_count = 1 }, function(api)
+    api.name("a rat")
+    api.harvest_done()                       -- teeth done → harvest spellcomps
+    expect(api.sent[#api.sent]):eq("harvest spellcomps 1.corpse")
+    api.harvest_done()                       -- the spellcomps YIELD line → decision → bsac
+    expect(api.sent[#api.sent]):eq("bsac 1.corpse")
   end)
 end)
 
--- ---- the walk is bounded by how many we actually killed (no phantom 2.corpse probe) --------------
+-- ---- the walk is bounded by how many we actually killed (no phantom N.corpse probe) ------------------
 
 test("note_kill counts every corpse we made (not just distinct kinds)", function()
   local snap = corpse.kills; corpse.kills = {}; corpse.kill_count = 0
@@ -119,86 +223,87 @@ test("note_kill counts every corpse we made (not just distinct kinds)", function
   corpse.kills = snap; corpse.kill_count = 0
 end)
 
-test("the walk STOPS once idx passes the corpses that REMAIN — no probe of a corpse we never made", function()
-  -- One corpse remains but it was left intact (loot/unknown name) so idx advanced to 2. There is no
-  -- 2.corpse, so the pass must end WITHOUT sending `harvest ... 2.corpse`.
-  with_corpse({ on = true, active = true, idx = 2, remaining = 1, killed = true, settle = nil }, function(sent)
-    corpse_process()
-    for _, c in ipairs(sent) do expect(c:find("harvest") == nil):eq(true) end   -- nothing probed
-    expect(corpse.active):eq(false)                                             -- pass wrapped up
+test("the walk STOPS once it passes the corpses that remain — no probe of one we never made", function()
+  -- One kill, but it's left intact (loot). After bsac the pass must END rather than probe a 2.corpse that
+  -- was never there.
+  local sent = pass({ kill_count = 1 }, function(api)
+    api.contents("a jaguar"); api.name("a jaguar")
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply()                         -- loot → left intact → idx would advance past remaining → done
   end)
+  expect(has_send(sent, "2.corpse")):eq(false)
+  expect(harvesting()):eq(false)
 end)
 
-test("the walk still harvests every index UP TO the remaining count", function()
-  with_corpse({ on = true, active = true, idx = 2, remaining = 2, killed = true, with_items = {} }, function(sent)
-    corpse_process()
-    expect(sent[1]):eq("harvest teeth 2.corpse")   -- idx 2 <= 2 remaining → still processed
-    expect(corpse.active):eq(true)
+test("an unknown remaining count (no kill tally) walks until the game says no such corpse", function()
+  -- With no kill count, the pass has no bound and walks index by index until the miss line terminates it.
+  local sent = pass({ kill_count = 0 }, function(api)
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply(); api.sac_reply("ok")    -- corpse 1 gone → keeps going (re-harvests index 1)
+    expect(api.sent[#api.sent]):eq("harvest teeth 1.corpse")
+    api.miss()                               -- "You don't see anything named '1.corpse'" → done
   end)
-end)
-
-test("an unknown remaining count (nil) falls back to walking until the game says no such corpse", function()
-  with_corpse({ on = true, active = true, idx = 2, remaining = nil, killed = true, with_items = {} }, function(sent)
-    corpse_process()
-    expect(sent[1]):eq("harvest teeth 2.corpse")   -- no cap → old behaviour (miss line terminates)
-    expect(corpse.active):eq(true)
-  end)
+  expect(harvesting()):eq(false)
 end)
 
 test("after sacrificing corpse 1, a leftover LOOT corpse doesn't cause a phantom 2.corpse probe", function()
-  -- The reported bug: two kills, corpse 1 empty (sac'd → remaining 2->1, and corpse 2 shifted into idx 1),
-  -- corpse 2 holds loot so it's left intact and idx advances to 2. Only one corpse remains (now at idx 1),
-  -- so there is NO 2.corpse — the walk must end instead of probing it.
-  with_corpse({ on = true, active = true, idx = 1, step = "spellcomps", remaining = 1,
-                cur_name = "a jaguar", with_items = { ["a jaguar"] = true } }, function(sent)
-    corpse_finish()                                  -- loot corpse → bsac (blood), then decide
-    expect(sent[1]):eq("bsac 1.corpse")
-    corpse_sac()                                     -- not empty → leave intact, idx->2 > remaining 1 → done
-    expect(corpse.active):eq(false)                  -- walk ended (corpse_done also resets idx)
-    for _, c in ipairs(sent) do expect(c:find("2%.corpse") == nil):eq(true) end   -- never probed 2.corpse
+  -- Two kills: corpse 1 empty (sac'd → the next shifts into index 1), corpse 2 holds loot so it's left
+  -- intact. Only one corpse ever remains at a time, so the walk must never probe a 2.corpse.
+  local sent = pass({ kill_count = 2 }, function(api)
+    api.contents("a jaguar")                 -- corpse 2's loot (a different name than corpse 1)
+    api.name("a jaguar cub")                 -- corpse 1: empty
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply(); api.sac_reply("ok")     -- corpse 1 removed → re-harvest index 1 (corpse 2 shifted in)
+    api.name("a jaguar")                      -- corpse 2: holds loot
+    api.harvest_done(); api.harvest_done()
+    api.bsac_reply()                          -- loot → left intact → pass ends
   end)
+  expect(has_send(sent, "2.corpse")):eq(false)         -- never probed a corpse that isn't there
+  expect(sacs(sent)):eq(1)                             -- exactly ONE removal: corpse 1 (empty)…
+  expect(bsacs(sent)):eq(2)                            -- …but BOTH got their blood drained
+  expect(harvesting()):eq(false)
+end)
+
+test("a whole batch of EMPTY corpses is harvested and removed one by one", function()
+  -- Two empty kills: each is harvested (teeth + spellcomps) then bsac'd + sac'd. Because a sac removes the
+  -- corpse and shifts the next into index 1, every corpse is worked at index 1 — no 2.corpse ever appears —
+  -- and the pass ends once the kill count is exhausted.
+  local sent = pass({ kill_count = 2 }, function(api)
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done(); api.bsac_reply(); api.sac_reply("ok")   -- corpse 1
+    api.name("a rat")
+    api.harvest_done(); api.harvest_done(); api.bsac_reply(); api.sac_reply("ok")   -- corpse 2 (shifted in)
+  end)
+  expect(sacs(sent)):eq(2)                         -- BOTH removed
+  expect(bsacs(sent)):eq(2)
+  expect(has_send(sent, "2.corpse")):eq(false)     -- always worked at index 1
+  expect(harvesting()):eq(false)                   -- kill count exhausted → pass ended
 end)
 
 test("end-to-end: a barren empty corpse harvests ONCE each and never re-harvests after the sac", function()
   -- The reported bug (old synchronous sac): teeth barren → learn no-teeth, spellcomps barren → bsac →
-  -- bsac fails ("only blood sacrifice corpses with blood in them") → sac. The old code re-processed the
-  -- index right after sending `sac`, and since no-teeth was just learned it fired a SECOND
-  -- `harvest spellcomps 1.corpse` at the corpse the sac had already removed. Stream-driven sac waits for
-  -- the god's reply, drops `remaining` to 0, and ends — no phantom re-harvest.
-  local hm = _AA_TEST.corpse_harvest()
-  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
-  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
-  local saved_send, sent = send, {}
-  send = function(c) sent[#sent + 1] = c end
-  local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
-  corpse.on, corpse.active, corpse.idx, corpse.remaining = true, true, 1, 1
-  corpse.kills = { ["wall of slime"] = true }; corpse.with_items = {}; corpse.cur_name = nil; corpse.step = nil
-
-  corpse_process()                                                     -- harvest teeth 1.corpse
-  _AA_TEST.learn_no_teeth(_AA_TEST.batch_kind()); corpse_harvest_done() -- barren teeth → harvest spellcomps 1.corpse
-  _AA_TEST.learn_no_spellcomps(_AA_TEST.batch_kind()); corpse_harvest_done() -- barren spellcomps → corpse_finish → bsac
-  corpse_sac()                                                          -- bsac-fail path → sac 1.corpse, then WAIT
-  corpse_sac_done("ok")                                                -- "Draak appreciates…" → remaining 0 → done
-
-  local active = corpse.active
-  send = saved_send
-  for k in pairs(corpse) do corpse[k] = nil end
-  for k, v in pairs(snap) do corpse[k] = v end
-  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
-  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
-
-  expect(table.concat(sent, " | ")):eq(
+  -- bsac fails → sac. The old code re-processed the index right after sending `sac`, and since no-teeth was
+  -- just learned it fired a SECOND `harvest spellcomps` at the corpse the sac had already removed. The
+  -- stream-driven sac waits for the god's reply, drops the count to 0, and ends — no phantom re-harvest.
+  local sent = pass({ kill_count = 1, kills = { ["wall of slime"] = true } }, function(api)
+    -- barren teeth reply learns the kind, then advances:
+    _AA_TEST.learn_no_teeth(_AA_TEST.batch_kind()); api.harvest_done()
+    -- barren spellcomps reply learns the kind, then advances → bsac:
+    _AA_TEST.learn_no_spellcomps(_AA_TEST.batch_kind()); api.harvest_done()
+    api.bsac_reply()                          -- bsac-fail path → sac 1.corpse, then WAIT
+    api.sac_reply("ok")                       -- confirmed gone → count 0 → done
+  end)
+  expect(joined(sent)):eq(
     "harvest teeth 1.corpse | harvest spellcomps 1.corpse | bsac 1.corpse | sac 1.corpse")
-  expect(active):eq(false)
+  expect(harvesting()):eq(false)
 end)
 
--- ---- learned per-kind harvest memory (skip barren teeth/spellcomps) ------------------------------
+-- ---- learned per-kind harvest memory (skip barren teeth/spellcomps) ----------------------------------
 
--- Reset the learned tables + kill tally so each case is hermetic (module-load may have read a real file).
+-- Reset the learned tables + kill tally so each case is hermetic.
 local function reset_harvest_mem()
-  local hm = _AA_TEST.corpse_harvest()
-  for k in pairs(hm.no_teeth) do hm.no_teeth[k] = nil end
-  for k in pairs(hm.no_spellcomps) do hm.no_spellcomps[k] = nil end
+  clear_mem()
   for k in pairs(corpse.kills) do corpse.kills[k] = nil end
 end
 
@@ -215,51 +320,40 @@ test("batch_kind: one killed kind is trusted; a mixed pack (or an ally) yields n
   _AA_TEST.note_kill("A skeletal spider")               -- our minion (is_ally) → not a kill kind
   expect(_AA_TEST.batch_kind()):eq(nil)
   state = saved
+  reset_harvest_mem()
 end)
 
-test("a known no-teeth kind SKIPS the teeth harvest (jumps to spellcomps), leaving the corpse un-named", function()
-  reset_harvest_mem()
-  _AA_TEST.corpse_harvest().no_teeth["jaguar"] = true
-  with_corpse({ on = true, active = true, idx = 1, kills = { jaguar = true } }, function(sent)
-    corpse_process()
-    expect(sent[1]):eq("harvest spellcomps 1.corpse")   -- teeth skipped
-    for _, c in ipairs(sent) do expect(c:find("harvest teeth") == nil):eq(true) end
-    expect(corpse.step):eq("spellcomps")
-    expect(corpse.cur_name):eq(nil)                      -- still un-named → sac decision unchanged (left intact)
-  end)
+test("a known no-teeth kind SKIPS the teeth harvest (jumps straight to spellcomps)", function()
+  -- Learned barren-teeth kind: don't waste the teeth command; the spellcomps harvest doubles as the
+  -- "does this index exist?" probe, so we still send exactly one harvest. cur_name stays un-learned (as it
+  -- would on any teeth failure), so the sacrifice decision is unchanged.
+  local sent = pass({ kill_count = 1, kills = { jaguar = true }, no_teeth = { "jaguar" } })
+  expect(sent[1]):eq("harvest spellcomps 1.corpse")     -- teeth skipped
+  expect(has_send(sent, "harvest teeth")):eq(false)
 end)
 
-test("a both-barren kind still sends ONE harvest (the existence probe) — teeth skipped, spellcomps stands in", function()
-  -- We can skip AT MOST one command: the harvest doubles as the "does this corpse index exist?" probe that
-  -- terminates the walk, so a both-barren kind skips teeth but must still send spellcomps.
-  reset_harvest_mem()
-  local hm = _AA_TEST.corpse_harvest(); hm.no_teeth["rat"] = true; hm.no_spellcomps["rat"] = true
-  with_corpse({ on = true, active = true, idx = 1, with_items = {}, kills = { rat = true } }, function(sent)
-    corpse_process()
-    expect(sent[1]):eq("harvest spellcomps 1.corpse")    -- teeth skipped; spellcomps is the probe
-    for _, c in ipairs(sent) do expect(c:find("harvest teeth") == nil):eq(true) end
-    expect(corpse.idx):eq(1)                             -- still on this index, awaiting the probe reply
-  end)
+test("a both-barren kind still sends ONE harvest (the probe) — teeth skipped, spellcomps stands in", function()
+  -- We can skip AT MOST one command: the harvest doubles as the existence probe that terminates the walk,
+  -- so a both-barren kind skips teeth but must still send spellcomps.
+  local sent = pass({ kill_count = 1, kills = { rat = true }, no_teeth = { "rat" }, no_spellcomps = { "rat" } })
+  expect(sent[1]):eq("harvest spellcomps 1.corpse")     -- teeth skipped; spellcomps is the probe
+  expect(has_send(sent, "harvest teeth")):eq(false)
 end)
 
 test("a known no-spellcomps kind harvests teeth but SKIPS spellcomps (name known → sac still works)", function()
-  reset_harvest_mem()
-  _AA_TEST.corpse_harvest().no_spellcomps["jaguar cub"] = true   -- stored under the NORMALIZED key
-  with_corpse({ on = true, active = true, idx = 1, step = "teeth", cur_name = "a jaguar cub",
-                with_items = {} }, function(sent)
-    corpse_harvest_done()                                -- teeth finished → normally sends harvest spellcomps
-    for _, c in ipairs(sent) do expect(c:find("harvest spellcomps") == nil):eq(true) end  -- skipped
-    expect(sent[1]):eq("bsac 1.corpse")                  -- straight to the empty-corpse sacrifice (name was known)
-  end)
+  local sent = pass({ kill_count = 1, kills = { ["jaguar cub"] = true }, no_spellcomps = { "jaguar cub" } },
+    function(api)
+      api.name("a jaguar cub")             -- learned from the teeth harvest reply
+      api.harvest_done()                   -- teeth finished → normally sends harvest spellcomps
+    end)
+  expect(has_send(sent, "harvest teeth 1.corpse")):eq(true)   -- teeth still harvested
+  expect(has_send(sent, "harvest spellcomps")):eq(false)      -- spellcomps skipped
+  expect(sent[#sent]):eq("bsac 1.corpse")                     -- straight to the empty-corpse sacrifice
 end)
 
 test("an ambiguous (mixed) kill batch never skips — teeth is harvested normally", function()
-  reset_harvest_mem()
-  _AA_TEST.corpse_harvest().no_teeth["jaguar"] = true
-  with_corpse({ on = true, active = true, idx = 1, kills = { jaguar = true, kobold = true } }, function(sent)
-    corpse_process()
-    expect(sent[1]):eq("harvest teeth 1.corpse")         -- batch_kind nil → no skip
-  end)
+  local sent = pass({ kill_count = 1, kills = { jaguar = true, kobold = true }, no_teeth = { "jaguar" } })
+  expect(sent[1]):eq("harvest teeth 1.corpse")   -- batch_kind nil → no skip
 end)
 
 test("learn_no_teeth / learn_no_spellcomps record the kind (deduped)", function()
@@ -272,28 +366,25 @@ test("learn_no_teeth / learn_no_spellcomps record the kind (deduped)", function(
   reset_harvest_mem()
 end)
 
--- ---- the harvest pass surfaces as a tracked promise (the HUD promise widget) --------------------
+-- ---- the harvest pass surfaces as a tracked promise (the HUD promise widget) -------------------------
 
-local function widget_has(desc)
-  for _, e in ipairs(active_promises()) do if e.desc == desc then return true end end
-  return false
-end
-
-test("a stall watchdog is armed while harvesting and cleared when the pass ends", function()
+test("corpse_start surfaces a 'harvesting corpses' promise; corpse_done settles it off the widget", function()
+  _PROMISE_TEST.cancel_all()
   local saved_state, saved_send = state, send
-  state = { opponents = {}, engaged_until = nil }   -- in_combat() false
+  state = { opponents = {}, engaged_until = nil }  -- in_combat() → false so the pass may start
   send = function() end
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
-  corpse.on, corpse.active, corpse.watchdog, corpse.killed, corpse.settle = true, false, nil, true, nil
+  corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
   corpse_start()
-  local armed = corpse.watchdog ~= nil      -- after() stub returned a timer id
+  local during = harvesting()                       -- shows while harvesting
   corpse_done()
-  local cleared = corpse.watchdog == nil     -- cancel() cleared it
+  local after_done = harvesting()                    -- gone once the pass ends
+  corpse_done()                                      -- second settle is a no-op (no double-resolve error)
   for k in pairs(corpse) do corpse[k] = nil end
   for k, v in pairs(snap) do corpse[k] = v end
   state, send = saved_state, saved_send
-  expect(armed):eq(true)
-  expect(cleared):eq(true)
+  expect(during):eq(true)
+  expect(after_done):eq(false)
 end)
 
 test("corpse OFF mid-pass CANCELS the promise (not resolve) and sends `stop` when busy", function()
@@ -304,12 +395,11 @@ test("corpse OFF mid-pass CANCELS the promise (not resolve) and sends `stop` whe
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
   corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
   corpse_start()                                     -- begins the pass + its tracked promise
-  expect(widget_has("harvesting corpses")):eq(true)
+  expect(harvesting()):eq(true)
   corpse_command("corpse", "off")                    -- kxwt.corpse("off") while a harvest is running
   local stopped = false; for _, c in ipairs(sent) do if c == "stop" then stopped = true end end
   expect(stopped):eq(true)                           -- busy → interrupt the MUD action
-  expect(widget_has("harvesting corpses")):eq(false) -- promise cancelled → row gone
-  expect(corpse.active):eq(false)
+  expect(harvesting()):eq(false)                     -- promise cancelled → row gone
   for k in pairs(corpse) do corpse[k] = nil end
   for k, v in pairs(snap) do corpse[k] = v end
   state, send = saved_state, saved_send
@@ -326,30 +416,36 @@ test("corpse OFF when NOT busy still cancels the pass but sends no `stop`", func
   corpse_command("corpse", "off")
   local stopped = false; for _, c in ipairs(sent) do if c == "stop" then stopped = true end end
   expect(stopped):eq(false)
-  expect(widget_has("harvesting corpses")):eq(false)
+  expect(harvesting()):eq(false)
   for k in pairs(corpse) do corpse[k] = nil end
   for k, v in pairs(snap) do corpse[k] = v end
   state, send = saved_state, saved_send
 end)
 
-test("corpse_start surfaces a 'harvesting corpses' promise; corpse_done settles it off the widget", function()
-  _PROMISE_TEST.cancel_all()                       -- clear any leftovers from other specs
-  local saved_state, saved_send = state, send
-  state = { opponents = {}, engaged_until = nil }  -- in_combat() → false so the pass may start
+test("a stalled loot pass wraps itself up (the watchdog safety net)", function()
+  -- Pacing is stream-driven, but if a terminal line is ever MISSED the pass would hang forever (blocking
+  -- every future loot pass and leaking the widget row). The watchdog is the net: after CORPSE_WATCHDOG
+  -- seconds with no progress it forces the pass closed with a "loot pass stalled" notice.
+  _PROMISE_TEST.cancel_all()
+  local saved_state, saved_send, saved_echo, saved_after, saved_cancel = state, send, echo, after, cancel
+  local timers, echoed = {}, {}
+  state = { opponents = {}, engaged_until = nil, action = 0 }
   send = function() end
+  echo = function(s) echoed[#echoed + 1] = (tostring(s):gsub("\27%[[%d;]*m", "")) end
+  _G.after = function(delay, cb) timers[#timers + 1] = { delay = delay, cb = cb, id = #timers + 1 }; return #timers end
+  _G.cancel = function(id) if id then for _, t in ipairs(timers) do if t.id == id then t.cb = nil end end end end
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
   corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
+  corpse.kill_count = 1
   corpse_start()
-  -- corpse_start starts the promise SYNCHRONOUSLY (it must, or corpse_done can fire before the executor
-  -- wires corpse.settle and the row leaks). No manual __start here — if the sync-start regressed, `after`
-  -- below would be true (the row never resolves) and this test fails.
-  local during = widget_has("harvesting corpses")   -- shows while harvesting
-  corpse_done()
-  local after = widget_has("harvesting corpses")     -- gone once the pass ends
-  corpse_done()                                      -- second settle is a no-op (no double-resolve error)
+  local during = harvesting()
+  -- Fire the stall watchdog (the CORPSE_WATCHDOG-delay timer, the only long-delay one still armed).
+  for _, t in ipairs(timers) do if t.cb and (t.delay or 0) >= 5 then t.cb() end end
+  local after_fire = harvesting()
   for k in pairs(corpse) do corpse[k] = nil end
   for k, v in pairs(snap) do corpse[k] = v end
-  state, send = saved_state, saved_send
-  expect(during):eq(true)
-  expect(after):eq(false)
+  state, send, echo, _G.after, _G.cancel = saved_state, saved_send, saved_echo, saved_after, saved_cancel
+  expect(during):eq(true)                                   -- pass was running…
+  expect(after_fire):eq(false)                              -- …and the watchdog wrapped it up
+  expect(table.concat(echoed, "\n")):contains("stalled")    -- with the stall notice
 end)

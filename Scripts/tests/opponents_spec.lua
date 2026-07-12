@@ -1,12 +1,24 @@
--- Specs for AlterAeon.lua's INFERRED multi-opponent tracker. The kxwt protocol reports only ONE health
+-- Specs for Combat.lua's INFERRED multi-opponent tracker. The kxwt protocol reports only ONE health
 -- bar (the current target), so bars for the other mobs you're fighting are inferred from the textual
--- condition ladder ('help injury injuries damage descriptions'). These pin the pure helpers: the
--- phrase->pct mapping, the line parser, and the table update/expiry/removal logic.
+-- condition ladder ('help injury injuries damage descriptions').
+--
+-- BEHAVIOUR-LEVEL: the tracker is exercised through its OBSERVABLE surface — feed readings in through the
+-- tracker-update seam (opponent_note, a preserved pure helper) and assert on what a consumer actually
+-- sees: the public active_opponents() roster and the engaged()/in_combat() predicates. The pure PARSERS
+-- (condition_pct / parse_opponent / parse_melee / parse_target_line) are unit-tested directly — they stay
+-- plain functions the streams call, so their line→value mapping is pinned here, but no test reaches into
+-- state.opponents internals (the tracker table shape is a HUD contract, covered in hud_layout_spec).
 
 local condition_pct   = _AA_TEST.condition_pct
 local parse_opponent  = _AA_TEST.parse_opponent
-local opponent_note   = _AA_TEST.opponent_note
-local opponents_active = _AA_TEST.opponents_active
+local opponent_note   = _AA_TEST.opponent_note   -- the tracker-update seam: a reading in → the roster reflects it
+
+-- Index active_opponents()'s array by name, so tests read the observable roster instead of the table.
+local function by_name(list)
+  local m = {}
+  for _, o in ipairs(list) do m[o.name] = o end
+  return m
+end
 
 test("condition_pct maps every rung of the injury ladder (plus 'near death') to a descending %", function()
   -- The full 8-rung ladder from 'help injury injuries damage descriptions', plus the combat-only
@@ -58,35 +70,40 @@ test("parse_opponent extracts the mob name + estimate, rejecting self, minions a
   expect(parse_opponent("You hit the goblin hard. A goblin is near death!")):eq(nil)
 end)
 
-test("opponents_active: target exact, others inferred, expiry prunes, exclude drops the current target", function()
-  local tbl = {}
-  opponent_note(tbl, "a goblin", 50, 100, true)    -- current target, exact
-  opponent_note(tbl, "a rat",    3,  100, false)   -- inferred
-  opponent_note(tbl, "an orc",   55, 90,  false)   -- older inferred
+test("active_opponents excludes the kxwt target, flags the others as estimates, and prunes expired mobs", function()
+  local so, sf = state.opponents, state.fight_name
+  state.opponents = {}
+  state.fight_name = "a goblin"                              -- the current kxwt target: its own exact bar
+  opponent_note(state.opponents, "a goblin", 50, 100, true)  -- current target, exact
+  opponent_note(state.opponents, "a rat",    3,  100, false) -- inferred
+  opponent_note(state.opponents, "an orc",   55, 90,  false) -- older inferred
 
-  -- Exclude the current target -> only the two others, newest-first (a rat @100 before an orc @90).
-  local out = opponents_active(tbl, 105, 30, "a goblin")
+  -- The roster a consumer (the HUD) sees: the current target excluded, others newest-first, flagged est.
+  local out = active_opponents(105)                          -- OPP_TTL is 30s, applied inside active_opponents
   expect(#out):eq(2)
   expect(out[1].name):eq("a rat")
-  expect(out[1].est):truthy()                      -- inferred -> flagged estimate
+  expect(out[1].est):truthy()                                -- inferred -> flagged estimate
   expect(out[2].name):eq("an orc")
 
-  -- Age out anything not seen within ttl (an orc last seen at t=90, now 130, ttl 30 -> gone; pruned in place).
-  local out2 = opponents_active(tbl, 130, 30, "a goblin")
+  -- Age out anything not seen within 30s (an orc last seen at t=90; now 130 -> off the roster).
+  local out2 = active_opponents(130)
   expect(#out2):eq(1)
   expect(out2[1].name):eq("a rat")
-  expect(tbl["an orc"]):eq(nil)                    -- expired entry removed from the table
+  expect(by_name(active_opponents(130))["an orc"]):eq(nil)   -- expired -> no longer reported
+  state.opponents, state.fight_name = so, sf
 end)
 
-test("opponents_active sort is deterministic on a same-timestamp tie (by name)", function()
-  local tbl = {}
-  opponent_note(tbl, "zeta mob", 40, 100, false)
-  opponent_note(tbl, "alpha mob", 40, 100, false)
+test("active_opponents sort is deterministic on a same-timestamp tie (by name)", function()
+  local so, sf = state.opponents, state.fight_name
+  state.opponents, state.fight_name = {}, nil
+  opponent_note(state.opponents, "zeta mob", 40, 100, false)
+  opponent_note(state.opponents, "alpha mob", 40, 100, false)
   for _ = 1, 25 do
-    local out = opponents_active(tbl, 100, 30, nil)
+    local out = active_opponents(100)
     expect(out[1].name):eq("alpha mob")           -- ties break by name, never flap
     expect(out[2].name):eq("zeta mob")
   end
+  state.opponents, state.fight_name = so, sf
 end)
 
 -- ---- nomelee fights: melee-round parsing + the text-inferred engaged() state -----------------------
@@ -97,7 +114,6 @@ end)
 
 local parse_melee = _AA_TEST.parse_melee
 local melee_enemy = _AA_TEST.melee_enemy
-local is_ally     = _AA_TEST.is_ally
 
 test("parse_melee parses the verbatim nomelee-log round lines into attacker/target", function()
   local a, t = parse_melee("An orc bachelor's punch hits A flesh beast.")
@@ -125,7 +141,7 @@ test("parse_melee parses the verbatim nomelee-log round lines into attacker/targ
   expect(parse_melee("An orc bachelor is burned by your fire shield!")):eq(nil)
 end)
 
-test("melee_enemy picks the non-ally side of a round line, using the kxwt_group roster", function()
+test("melee_enemy / is_ally pick the enemy side of a round line, using the kxwt_group roster", function()
   local saved = state.group
   -- The verbatim kxwt_group roster from the log: you + three minions.
   state.group = {
@@ -140,7 +156,7 @@ test("melee_enemy picks the non-ally side of a round line, using the kxwt_group 
   -- Both sides yours (minion sparring?) or neither (bystander fight) -> no enemy.
   expect(melee_enemy("A skeleton", "A flesh beast")):eq(nil)
   expect(melee_enemy("a rabid dog", "a deer")):eq(nil)
-  expect(is_ally("A FLESH BEAST")):truthy()          -- roster match is case-insensitive
+  expect(is_ally("A FLESH BEAST")):truthy()          -- is_ally (public) roster match is case-insensitive
   state.group = saved
 end)
 
@@ -162,37 +178,40 @@ test("is_self is YOU only, not your minions — so a minion-only brawl doesn't o
   state.name, state.group = saved_name, saved_group
 end)
 
-test("engaged() is true while the text-inferred window is open, without any kxwt_fighting", function()
+test("engaged() / in_combat() are true while the text-inferred window is open, without any kxwt_fighting", function()
   local saved_f, saved_u = state.fighting, state.engaged_until
   state.fighting = false
   state.engaged_until = nil
   expect(engaged(1000)):falsy()                      -- idle
+  expect(in_combat()):falsy()                        -- in_combat() sits on engaged()
   state.engaged_until = 1000 + _AA_TEST.ENGAGE_TTL   -- a melee-round line just refreshed the window
   expect(engaged(1000)):truthy()                     -- engaged with state.fighting == false (nomelee!)
   expect(engaged(1000 + _AA_TEST.ENGAGE_TTL + 1)):falsy()   -- window expired -> fight over
   state.fighting, state.engaged_until = saved_f, saved_u
 end)
 
-test("opponent keys are case-insensitive: 'An orc bachelor' and 'an orc bachelor' are ONE mob", function()
-  local tbl = {}
+test("opponent readings are case-insensitive: 'An orc bachelor' and 'an orc bachelor' are ONE mob", function()
+  local so, sf = state.opponents, state.fight_name
+  state.opponents, state.fight_name = {}, nil
   -- Melee sighting (no health info yet) under one casing...
-  opponent_note(tbl, "an orc bachelor", nil, 100, false)
-  -- ...then the condition line under sentence-case must UPDATE it, not fork a second entry.
-  opponent_note(tbl, "An orc bachelor", 3, 101, false)
-  local out = opponents_active(tbl, 101, 30, nil)
+  opponent_note(state.opponents, "an orc bachelor", nil, 100, false)
+  -- ...then the condition line under sentence-case must UPDATE the same roster entry, not fork a second.
+  opponent_note(state.opponents, "An orc bachelor", 3, 101, false)
+  local out = active_opponents(101)
   expect(#out):eq(1)
   expect(out[1].pct):eq(3)
   -- And a later pct-less melee sighting refreshes recency WITHOUT clobbering the known estimate.
-  opponent_note(tbl, "an orc bachelor", nil, 105, false)
-  out = opponents_active(tbl, 105, 30, nil)
+  opponent_note(state.opponents, "an orc bachelor", nil, 105, false)
+  out = active_opponents(105)
   expect(out[1].pct):eq(3)
   expect(out[1].t):eq(105)
+  state.opponents, state.fight_name = so, sf
 end)
 
 -- ---- explicit targeting lines (the `target` command) -------------------------------------------
 -- There is NO kxwt target tag; targeting is confirmed only in text. The "acquire" and "already"
 -- wordings below are VERBATIM from human-traces; "report" is the verbatim `score` line. The "clear"
--- forms are researched best guesses (never observed in traces/help — flagged in AlterAeon.lua for
+-- forms are researched best guesses (never observed in traces/help — flagged in Combat.lua for
 -- live confirmation).
 
 local parse_target_line = _AA_TEST.parse_target_line
@@ -224,38 +243,41 @@ test("parse_target_line classifies the researched targeting wordings", function(
   expect(parse_target_line("A druidess is near death!")):eq(nil)
 end)
 
-test("acquisition seeds the enemy name at fight start, before any melee round or condition line", function()
-  -- Simulate the trigger bodies with the pure helpers: `target druidess` acquisition...
-  local tbl = {}
+test("acquisition seeds the enemy name onto the roster before any melee round or condition line", function()
+  -- `target druidess` acquisition seeds the name with no health reading yet...
+  local so, sf = state.opponents, state.fight_name
+  state.opponents, state.fight_name = {}, nil
   local kind, name = parse_target_line("You keep a steady eye on a druidess.")
   expect(kind):eq("acquire")
-  opponent_note(tbl, name, nil, 100, false)         -- seeded by name, no health reading yet
-  local out = opponents_active(tbl, 100, 30, nil)
+  opponent_note(state.opponents, name, nil, 100, false)       -- seeded by name, no health reading yet
+  local out = active_opponents(100)
   expect(#out):eq(1)
   expect(out[1].name):eq("a druidess")
-  expect(out[1].pct):eq(nil)                        -- unknown health -> the HUD shows "?"
-  -- ...and the first condition line later fills in the estimate on the SAME entry.
-  opponent_note(tbl, "A druidess", 3, 105, false)
-  out = opponents_active(tbl, 105, 30, nil)
+  expect(out[1].pct):eq(nil)                                  -- unknown health -> the HUD shows "?"
+  -- ...and the first condition line later fills in the estimate on the SAME roster entry.
+  opponent_note(state.opponents, "A druidess", 3, 105, false)
+  out = active_opponents(105)
   expect(#out):eq(1)
   expect(out[1].pct):eq(3)
+  state.opponents, state.fight_name = so, sf
 end)
 
-test("target-clear withdraws a purely-seeded entry but never one with combat evidence", function()
-  local tbl = {}
-  opponent_note(tbl, "a druidess", nil, 100, false)  -- seeded by targeting only (pct nil)
-  -- The clear trigger's rule: remove only when pct == nil.
-  local e = tbl["a druidess"]
-  expect(e.pct):eq(nil)
-  tbl["a druidess"] = nil                            -- (what the trigger does for a pct-less entry)
-  expect(next(tbl)):eq(nil)
-
-  opponent_note(tbl, "an orc", 42, 100, false)       -- has a health reading -> still fighting us
-  local e2 = tbl["an orc"]
-  expect(e2.pct):eq(42)                              -- the trigger's guard (pct ~= nil) keeps this one
+test("a purely-seeded target reports unknown health; an evidenced one carries its estimate", function()
+  -- The target-clear trigger's rule (applied Swift-side) withdraws an entry ONLY when it's purely seeded
+  -- (pct == nil): a mob with a health reading is still fighting us regardless of our targeting choice.
+  -- Here we pin the OBSERVABLE distinction that guard keys on, via the public roster.
+  local so, sf = state.opponents, state.fight_name
+  state.opponents, state.fight_name = {}, nil
+  opponent_note(state.opponents, "a druidess", nil, 100, false)  -- seeded by targeting only (pct nil)
+  opponent_note(state.opponents, "an orc", 42, 100, false)       -- has a health reading
+  local out = by_name(active_opponents(100))
+  expect(out["a druidess"].pct):eq(nil)   -- purely-seeded -> the clear trigger may withdraw it
+  expect(out["an orc"].pct):eq(42)        -- combat evidence -> the clear trigger's guard keeps it
+  state.opponents, state.fight_name = so, sf
 end)
 
 -- Trigger-level behaviours (kxwt_fighting -1 clear, room change clear, mdeath removal, and the
--- engaged-window writes by the targeting triggers) are wired through Swift-side regex triggers; the
--- pure logic above covers the parts we can exercise from Lua. The whole-widget rendering lives in
--- hud_spec.lua / hud_layout_spec.lua.
+-- engaged-window writes by the targeting/melee triggers) are wired through Swift-side regex triggers; the
+-- observable surface above (active_opponents / engaged / in_combat) covers the parts we can exercise from
+-- Lua. The whole-widget rendering lives in hud_spec.lua / hud_layout_spec.lua; auto-assist send behaviour
+-- lives in assist_spec.lua.

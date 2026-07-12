@@ -6,11 +6,13 @@
 //  was sent to and received from the server.
 //
 
+import DependencyInjection
 import Foundation
 import Testing
 @testable import MudClient
 
 @Test func transcriptSeparatesSentAndReceivedNewestLast() {
+  try withTestContainer {
     let t = TranscriptStore()
     t.recordReceived("You see an orc here.")
     t.recordSent("kill orc", origin: .user)
@@ -24,9 +26,11 @@ import Testing
     let recv = t.received(last: nil)
     #expect(recv.map(\.text) == ["You see an orc here.", "The orc dies."])
     #expect(recv.allSatisfy { $0.origin == nil })
+  }
 }
 
 @Test func transcriptSentAndReceivedRespectLastN() {
+  try withTestContainer {
     let t = TranscriptStore()
     for i in 1...5 { t.recordSent("cmd\(i)", origin: .user) }
     for i in 1...5 { t.recordReceived("line\(i)") }
@@ -34,9 +38,11 @@ import Testing
     #expect(t.received(last: 3).map(\.text) == ["line3", "line4", "line5"])
     #expect(t.sent(last: 99).count == 5)                           // n > available → all
     #expect(t.sent(last: nil).count == 5)                          // nil → all
+  }
 }
 
 @Test func transcriptGrepIsCaseInsensitiveAcrossBothKindsAndStripsAnsi() {
+  try withTestContainer {
     let t = TranscriptStore()
     t.recordReceived("A \u{1B}[31mfierce Orc\u{1B}[0m snarls.")     // ANSI around the match
     t.recordSent("look ORC", origin: .user)
@@ -49,17 +55,21 @@ import Testing
     #expect(t.grep("rabbit").count == 1)
     #expect(t.grep("dragon").isEmpty)
     #expect(t.grep("").isEmpty)                                    // empty needle matches nothing
+  }
 }
 
 @Test func transcriptRingDropsOldestPastLimit() {
+  try withTestContainer {
     let t = TranscriptStore(limit: 3)
     for i in 1...5 { t.recordSent("s\(i)", origin: .user) }
     let all = t.sent(last: nil)
     #expect(all.count == 3)
     #expect(all.map(\.text) == ["s3", "s4", "s5"])                 // s1/s2 evicted
+  }
 }
 
 @Test func formatTranscriptLabelsByKindAndOrigin() {
+  try withTestContainer {
     let entries: [TranscriptStore.Entry] = [
         .init(kind: .sent, origin: .user, text: "kill orc", at: Date()),
         .init(kind: .sent, origin: .script, text: "c icebolt", at: Date()),
@@ -71,4 +81,5 @@ import Testing
     #expect(lines[1].contains("lua") && lines[1].hasSuffix("c icebolt"))
     #expect(lines[2].hasSuffix("The orc dies."))
     #expect(!lines[2].contains("you") && !lines[2].contains("lua"))
+  }
 }

@@ -123,13 +123,24 @@ end)
 local noexit       = _AIP_TEST.noexit_command
 local has_frontier = _AIP_TEST.has_frontier
 
+-- Capture noexit's echo confirmations (its observable acknowledgement) alongside the routing effect.
+local function with_echo(fn)
+  local real_echo, msgs = echo, {}
+  echo = function(s) msgs[#msgs + 1] = tostring(s) end
+  local ok, err = pcall(function() fn(msgs) end)
+  echo = real_echo
+  if not ok then error(err, 2) end
+end
+
 test("noexit <dir> blocks a direction out of the current room, and explore skips it", function()
   local saved_rooms, saved_cur = P.rooms, P.current_room
   P.rooms = { A = { exits = { north = true, south = true }, moves = {} } }
   P.current_room = "A"
-  noexit("north")
-  expect(P.rooms.A.blocked.north):eq(true)
-  expect(best_explore_dir()):eq("south")   -- north blocked → south is the untaken exit
+  with_echo(function(msgs)
+    noexit("north")
+    expect(table.concat(msgs, "\n"):find("blocked north", 1, true) ~= nil):truthy()  -- acknowledged
+  end)
+  expect(best_explore_dir()):eq("south")   -- north blocked → routing takes the south exit instead
   expect(untaken_exit("A")):eq("south")
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
@@ -139,9 +150,11 @@ test("noexit accepts direction abbreviations and ignores non-directions", functi
   P.rooms = { A = { exits = { northeast = true }, moves = {} } }
   P.current_room = "A"
   noexit("ne")
-  expect(P.rooms.A.blocked.northeast):eq(true)
-  noexit("banana")                          -- not a direction → nothing blocked under that key
-  expect(P.rooms.A.blocked.banana):eq(nil)
+  expect(best_explore_dir()):eq(nil)        -- the only exit (ne) is now blocked → nothing to explore
+  with_echo(function(msgs)
+    noexit("banana")                        -- not a direction → refused, nothing blocked
+    expect(table.concat(msgs, "\n"):find("isn't a direction", 1, true) ~= nil):truthy()
+  end)
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
 
@@ -151,10 +164,9 @@ test("noexit clear <dir> unblocks one; noexit clear wipes every block here", fun
                     blocked = { north = true, east = true } } }
   P.current_room = "A"
   noexit("clear north")
-  expect(P.rooms.A.blocked.north):eq(nil)
-  expect(P.rooms.A.blocked.east):eq(true)
+  expect(untaken_exit("A")):eq("north")     -- north explorable again; east still blocked (sorts first if open)
   noexit("clear")
-  expect(P.rooms.A.blocked):eq(nil)         -- emptied table is dropped
+  expect(untaken_exit("A")):eq("east")      -- everything unblocked → first sorted untaken exit
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
 

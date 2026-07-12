@@ -1443,17 +1443,24 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// Schedule one firing of timer `id` on `timerQueue`. On fire it re-checks that the timer is still
     /// armed (not cancelled/reloaded) before calling into Lua, and re-arms itself when repeating.
     private func arm(id: Int, delay: Double, repeating: Double?, _ callback: LuaFunctionRef) {
+        // Capture the DI container context at SCHEDULE time and re-apply it when the work item fires:
+        // `timerQueue` is a GCD queue, which does NOT carry Swift task-local values, so the Lua callback
+        // (which resolves services like terminalService via echo, or the LLM clients) would otherwise
+        // run against whatever container is ambient on the queue. `withContainer` puts the right one back.
+        let container = Container.current
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.lock.lock(); let armed = self.timers[id] != nil; self.lock.unlock()
-            guard armed else { return }
-            self.fire(callback, [])
-            if let interval = repeating {
-                // fire() may have cancelled this timer; only re-arm if it's still live.
-                self.lock.lock(); let live = self.timers[id] != nil; self.lock.unlock()
-                if live { self.arm(id: id, delay: interval, repeating: interval, callback) }
-            } else {
-                self.lock.lock(); self.timers[id] = nil; self.lock.unlock()
+            withContainer(container) {
+                self.lock.lock(); let armed = self.timers[id] != nil; self.lock.unlock()
+                guard armed else { return }
+                self.fire(callback, [])
+                if let interval = repeating {
+                    // fire() may have cancelled this timer; only re-arm if it's still live.
+                    self.lock.lock(); let live = self.timers[id] != nil; self.lock.unlock()
+                    if live { self.arm(id: id, delay: interval, repeating: interval, callback) }
+                } else {
+                    self.lock.lock(); self.timers[id] = nil; self.lock.unlock()
+                }
             }
         }
         lock.lock(); timers[id] = item; lock.unlock()

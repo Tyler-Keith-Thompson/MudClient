@@ -158,7 +158,7 @@ local function make(executor, label)
       if p.state ~= "cancelled" then h.finally(p.state == "failed", p.err) end
       return
     end
-    if p.state == "done" then run_handler(h.onOk, nil, h.result, false)
+    if p.state == "done" then run_handler(h.onOk, p.value, h.result, false)
     elseif p.state == "failed" then run_handler(h.onErr, p.err, h.result, true) end
   end
 
@@ -168,7 +168,9 @@ local function make(executor, label)
   --   handler threw → result rejects with the error.
   run_handler = function(fn, reason, result, is_err)
     if not fn then
-      if result then if is_err then result.__reject(reason) else result.__resolve() end end
+      -- no handler on this side: pass the outcome straight through — the incoming VALUE on the ok side,
+      -- the reason on the error side — so a value survives chain nodes that only handle the other side.
+      if result then if is_err then result.__reject(reason) else result.__resolve(reason) end end
       return
     end
     local ok, ret = pcall(fn, reason)
@@ -178,16 +180,16 @@ local function make(executor, label)
       cancel_timer(ret.__start_timer); ret.__start_timer = nil
       untrack(ret)                                    -- it's a continuation now, not its own widget row
       ret._parent = result; result._adopted = ret
-      ret._attach(function() result.__resolve() end, function(e) result.__reject(e) end)
+      ret._attach(function(v) result.__resolve(v) end, function(e) result.__reject(e) end)
       ret.__start()
     else
-      result.__resolve()
+      result.__resolve(ret)                           -- a handler's plain RETURN becomes the chain's value
     end
   end
 
-  local function settle(newstate, err)
+  local function settle(newstate, err, value)
     if p.state ~= "cold" and p.state ~= "running" then return end   -- settle-once (incl. after cancel)
-    p.state, p.err = newstate, err
+    p.state, p.err, p.value = newstate, err, value
     live[p] = nil                                                   -- settled → no longer in-flight
     local hs = p._handlers; p._handlers = {}
     for _, h in ipairs(hs) do dispatch(h) end
@@ -196,7 +198,7 @@ local function make(executor, label)
     end
   end
 
-  p.__resolve = function() settle("done") end
+  p.__resolve = function(value) settle("done", nil, value) end
   p.__reject  = function(err) settle("failed", err) end
 
   p.__start = function()
@@ -251,7 +253,7 @@ local function make(executor, label)
     if a == p then secs, why = b, c else secs, why = a, b end
     local result = make(function() end, label)
     result._parent = p
-    p._attach(function() cancel_timer(result._timeout_timer); result.__resolve() end,
+    p._attach(function(v) cancel_timer(result._timeout_timer); result.__resolve(v) end,
               function(e) cancel_timer(result._timeout_timer); result.__reject(e) end)
     result._timeout_timer = after and after(secs, function()
       result._timeout_timer = nil

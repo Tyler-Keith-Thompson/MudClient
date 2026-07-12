@@ -1,3 +1,4 @@
+import DependencyInjection
 import Foundation
 import Testing
 
@@ -8,6 +9,7 @@ import Testing
 // path multiplies an effect's own volume by before playback. This proves an effect started at any base
 // volume is scaled by the master, and that a master of 0 silences it.
 @Test func mspServiceVolumeScalesEffectVolume() {
+  try withTestContainer {
     let svc = MSPService()
     #expect(svc.scaledVolume(1.0) == 1.0)     // default master = 1 (full): unchanged
     #expect(svc.scaledVolume(0.8) == 0.8)
@@ -19,12 +21,15 @@ import Testing
     svc.setVolume(percent: 0)
     #expect(svc.scaledVolume(1.0) == 0.0)     // master 0 => silent regardless of the effect's own volume
     #expect(svc.scaledVolume(0.7) == 0.0)
+  }
 }
 
 @Test func mspServiceVolumeClampsPercent() {
+  try withTestContainer {
     let svc = MSPService()
     svc.setVolume(percent: 250)
     #expect(svc.scaledVolume(1.0) == 1.0)     // clamped to 100%
     svc.setVolume(percent: -10)
     #expect(svc.scaledVolume(1.0) == 0.0)     // clamped to 0%
+  }
 }

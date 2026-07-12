@@ -71,11 +71,8 @@ test("a rejected target keyword retries the minion's other name-words, then give
       AA.try_cast_heal()                                    -- first cast: primary keyword 'man'
       expect(sent[#sent]:match("(%S+)$")):eq("man")
       AA.minion_target_invalid("man")                       -- game refuses 'man' → retry 'clay'
-      expect(AA.minion_heal.tried["a clay man"]["man"]):truthy()
-      expect(AA.minion_heal.word_blocked["a clay man"]):falsy()
-      expect(sent[#sent]:match("(%S+)$")):eq("clay")        -- re-cast at the alternate keyword
+      expect(sent[#sent]:match("(%S+)$")):eq("clay")        -- re-cast at the alternate keyword (observable retry)
       AA.minion_target_invalid("clay")                      -- refuses 'clay' too → give up on this minion
-      expect(AA.minion_heal.word_blocked["a clay man"]):truthy()
       local before = #sent
       AA.try_cast_heal()                                    -- driver moves on; no more casts at the blocked minion
       expect(#sent):eq(before)
@@ -278,17 +275,26 @@ test("a landed heal waits for the next roster before the next cast", function()
     expect(#sent):eq(1)
     AA.minion_cast_settled("ok")               -- landed → do NOT immediately re-cast (roster drives next)
     expect(#sent):eq(1)
-    expect(AA.minion_heal.casting):falsy()
+    -- Un-busied (the landed cast settled): the NEXT roster tick drives another cast (spider still hurt).
+    AA.try_cast_heal()
+    expect(#sent):eq(2)
   end)
 end)
 
 test("gives up on a keyword after sweeping it without ever landing a heal (no infinite loop)", function()
   local g = { me(), minion("A skeletal spider", 10, 39), minion("A skeletal spider", 20, 39) }
   with_group(g, {}, function(sent)
+    local echoed, saved_echo = {}, echo
+    _G.echo = function(s) echoed[#echoed + 1] = (tostring(s):gsub("\27%[[%d;]*m", "")) end
     AA.try_cast_heal()                         -- K=2 → cap is K+3 = 5 refusals
     for _ = 1, 6 do AA.minion_cast_settled("full") end
-    expect(AA.minion_heal.blocked["spider"]):truthy()
-    expect(AA.minions_pending_spell_heal()):truthy()   -- still hurt, but we stop hammering it
+    _G.echo = saved_echo
+    -- Gave up on the keyword: narrated the skip AND stops sending (no more casts at 'spider').
+    expect(table.concat(echoed, "\n"):find("skipping it", 1, true) ~= nil):truthy()
+    local before = #sent
+    AA.try_cast_heal()
+    expect(#sent):eq(before)                             -- stopped hammering it
+    expect(AA.minions_pending_spell_heal()):truthy()     -- still hurt, but we don't cast at it
   end)
 end)
 

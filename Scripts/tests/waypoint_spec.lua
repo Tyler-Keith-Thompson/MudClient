@@ -52,18 +52,20 @@ end)
 
 test("learn_waypoint records number<->room both ways and re-points on reorder", function()
   local P = _AIP_TEST.P
-  local saved = { rooms = P.rooms, wr = P.wp_room, rw = P.room_wp }
-  P.rooms = { RX = { moves = {} }, RY = { moves = {} } }
-  P.wp_room, P.room_wp = nil, nil
+  local num_for = _AIP_TEST.waypoint_num_for_room
+  local nearest = _AIP_TEST.nearest_waypoint_for
+  local saved = { rooms = P.rooms, cur = P.current_room, wp = P.waypoints, wr = P.wp_room, rw = P.room_wp }
+  P.rooms = { RX = { moves = {}, marks = { forge = true } }, RY = { moves = {} } }
+  P.waypoints, P.wp_room, P.room_wp = nil, nil, nil
+  P.current_room = "RY"
   _AIP_TEST.learn_waypoint(4, "RX")
-  expect(P.wp_room[4]):eq("RX")
-  expect(P.room_wp["RX"]):eq(4)
-  expect(P.rooms["RX"].waypoint):truthy()          -- travelling there proves it's a waypoint
+  expect(num_for("RX")):eq(4)                       -- number now resolvable for that room
+  expect(nearest("forge")):eq("RX")                -- travelling there proved it's a waypoint (routable as one)
   _AIP_TEST.learn_waypoint(4, "RY")                 -- reorder: number 4 now reaches RY
-  expect(P.wp_room[4]):eq("RY")
-  expect(P.room_wp["RY"]):eq(4)
-  expect(P.room_wp["RX"]):falsy()                   -- stale reverse mapping dropped
-  P.rooms, P.wp_room, P.room_wp = saved.rooms, saved.wr, saved.rw
+  expect(num_for("RY")):eq(4)                       -- RY resolves to 4...
+  expect(num_for("RX")):falsy()                    -- ...and RX's stale number is dropped
+  P.rooms, P.current_room, P.waypoints, P.wp_room, P.room_wp =
+    saved.rooms, saved.cur, saved.wp, saved.wr, saved.rw
 end)
 
 test("nearest_waypoint_for picks the waypoint fewest walk-steps from the mark", function()
@@ -113,9 +115,12 @@ test("goto bridge hands off (no blind hop) when the target number is unknown", f
   P.current_room = "HERE"
   P.wp_room, P.room_wp = {}, {}                                    -- we've NOT learned DEST's number
   P.goto_bridge = { label = "trainer", target_wp = "DEST", tries = 0, hops = 0 }
+  local real_echo, msgs = echo, {}
+  echo = function(s) msgs[#msgs + 1] = tostring(s) end
   goto_bridge_advance()
+  echo = real_echo
   expect(sent):falsy()                                            -- never guesses a waypoint number
-  expect(P.goto_bridge):falsy()                                   -- handed off instead
+  expect(table.concat(msgs, "\n"):find("don't know which waypoint number", 1, true) ~= nil):truthy()  -- handed off
   send = real_send
   P.rooms, P.current_room = saved.rooms, saved.cur
   P.wp_room, P.room_wp, P.goto_bridge = saved.wr, saved.rw, saved.br
@@ -166,11 +171,13 @@ test("goto recall bridge retries recall then gives up at the cap", function()
   local P = _AIP_TEST.P
   local real_send = send
   local sent = 0
-  send = function() sent = sent + 1 end            -- stub the host builtin; count recall attempts
+  send = function(c) if c == "recall" then sent = sent + 1 end end   -- count recall attempts
+  local real_echo, msgs = echo, {}
+  echo = function(s) msgs[#msgs + 1] = tostring(s) end
   P.goto_bridge = { label = "trainer", tries = 0 }
   -- Drive the retry loop the way pilot_observe would on repeated fizzles.
-  for _ = 1, 12 do if P.goto_bridge then goto_recall_attempt() end end
-  send = real_send
-  expect(sent):eq(6)                                -- exactly RECALL_MAX_TRIES attempts, no more
-  expect(P.goto_bridge):falsy()                     -- bridge cleared after giving up
+  for _ = 1, 12 do goto_recall_attempt() end
+  send, echo = real_send, real_echo
+  expect(sent):eq(6)                                -- exactly RECALL_MAX_TRIES recalls, no more
+  expect(table.concat(msgs, "\n"):find("recall kept failing", 1, true) ~= nil):truthy()  -- gave up, told you
 end)

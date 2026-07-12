@@ -14,14 +14,20 @@ _AA_TEST = _AA_TEST or {}
 -- guards an un-relaunched binary that lacks the new builtin.
 local SOUNDPACK = (os.getenv("HOME") or "") .. "/Library/AlterAeon/soundpack/ogg_v1/"
 state.music = state.music or {}
-trigger([[^kxwt_music channel_play (\S+) (\S+)]], function(_, ch, tr)
+-- Plain router helpers (the trigger bodies call these; unit-tested via _AA_TEST/music_spec). A single
+-- consumer, no fan-out/compose/dedupe: `distinctUntilChanged` would SUPPRESS a repeat channel_play that
+-- currently re-issues music.play, so this deliberately stays a plain trigger->function router (like
+-- AlterAeon/ChatDecode), NOT an rx stream — parity requires the re-issue on every line.
+local function music_channel_play(ch, tr)
   state.music[ch] = tr
   if music then music.play(ch, SOUNDPACK .. tr .. ".ogg") end
-end)
-trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch)
+end
+local function music_channel_stop(ch)
   state.music[ch] = nil
   if music then music.stop(ch) end
-end)
+end
+trigger([[^kxwt_music channel_play (\S+) (\S+)]], function(_, ch, tr) music_channel_play(ch, tr) end)
+trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch) music_channel_stop(ch) end)
 
 -- Audio volume: a MASTER plus three categories — music (layered player), sfx (MSP sound effects), and
 -- voice (TTS). The effective level pushed to each host service = round(master% × category%), so
@@ -116,3 +122,6 @@ _AA_TEST.volume_effective = volume_effective
 _AA_TEST.volume_apply = volume_apply
 _AA_TEST.volume_command = volume_command
 _AA_TEST.VOLUME_DEFAULTS = VOLUME_DEFAULTS
+_AA_TEST.music_channel_play = music_channel_play
+_AA_TEST.music_channel_stop = music_channel_stop
+_AA_TEST.SOUNDPACK = SOUNDPACK

@@ -13,6 +13,7 @@
 //  Adding a hook or builtin in Swift without documenting it fails these tests BY NAME.
 //
 
+import DependencyInjection
 import Foundation
 import Testing
 
@@ -41,6 +42,7 @@ private func bootstrapSource() throws -> String {
 }
 
 @Test func hookDocsCoverSwiftCallSites() throws {
+  try withTestContainer {
     // Collect every distinct on_* hook name the host consults from Lua-global call sites.
     let callSite = try Regex(#"callGlobal\w*\(\s*"(on_[a-z_]+)""#)
     var hooks: Set<String> = []
@@ -68,9 +70,11 @@ private func bootstrapSource() throws -> String {
         Swift consults hooks that Scripts/bootstrap.lua does not document: \(missing.joined(separator: ", ")).
         Add doc("<hook>", { sig = …, text = …, group = "hooks" }) entries for them.
         """)
+  }
 }
 
 @Test func builtinDocsCoverSwiftRegistrations() throws {
+  try withTestContainer {
     // Every lua.register("name") in the engine must be a doc() target in bootstrap.lua — by its own
     // name, or (for raw registrations wrapped into a table, like panel_render) by its dotted form.
     let registration = try Regex(#"lua\.register\(\s*"([A-Za-z0-9_]+)""#)
@@ -97,4 +101,5 @@ private func bootstrapSource() throws -> String {
         Host builtins registered in Swift but not documented in Scripts/bootstrap.lua: \
         \(missing.joined(separator: ", ")). Add doc() entries (see THE RULE banner in bootstrap.lua).
         """)
+  }
 }

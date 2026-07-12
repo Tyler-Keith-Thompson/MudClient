@@ -1,3 +1,4 @@
+import DependencyInjection
 import Foundation
 import Testing
 
@@ -46,6 +47,7 @@ private final class Recorder: @unchecked Sendable {
 // MARK: - Queue behaviour
 
 @Test func speaksFIFOAndDropsOldestOverBacklog() {
+  try withTestContainer {
     let rec = Recorder()
     let service = SpeechService(maxBacklog: 3,
                                 makeUtterance: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
@@ -64,9 +66,11 @@ private final class Recorder: @unchecked Sendable {
     rec.waitForCount(4); for u in rec.utterances { u.release() }
 
     #expect(rec.spokenText == ["1", "3", "4", "5"])      // FIFO order, "2" dropped
+  }
 }
 
 @Test func stopFlushesQueueAndCancelsCurrent() {
+  try withTestContainer {
     let rec = Recorder()
     let service = SpeechService(maxBacklog: 8,
                                 makeUtterance: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
@@ -82,11 +86,13 @@ private final class Recorder: @unchecked Sendable {
     Thread.sleep(forTimeInterval: 0.2)
     #expect(rec.spokenText == ["a"])                    // only the in-flight one ever started
     #expect(rec.utterances.first?.cancelled == true)     // and it was cancelled
+  }
 }
 
 // MARK: - Voice listing
 
 @Test func parseVoicesReadsNameAndLocaleAndFiltersEnglish() {
+  try withTestContainer {
     // Canned `say -v ?` output: names with spaces/parens, mixed locales, a comment column.
     let canned = """
     Alex                en_US    # Most people recognize me by my voice.
@@ -108,15 +114,18 @@ private final class Recorder: @unchecked Sendable {
     #expect(!en.contains { $0.name == "Ting-Ting" })
     #expect(en.contains { $0.name == "Daniel" })
     #expect(service.voices(all: true).contains { $0.name == "Ting-Ting" })
+  }
 }
 
 @Test func speakIgnoresEmptyText() {
+  try withTestContainer {
     let rec = Recorder()
     let service = SpeechService(makeUtterance: { args in FakeUtterance(text: args.last ?? "", onStart: rec.record) },
                                 voiceListing: { "" })
     service.speak(text: "   ")           // whitespace only
     Thread.sleep(forTimeInterval: 0.1)
     #expect(rec.spokenText.isEmpty)
+  }
 }
 
 // MARK: - Kokoro backend
@@ -156,6 +165,7 @@ private final class ArgLog: @unchecked Sendable {
 }
 
 @Test func kokoroSynthesizesThenPlaysViaAfplay() {
+  try withTestContainer {
     let rec = Recorder()
     let playLog = ArgLog()
     let synth = FakeSynthesizer(result: .success(Data(count: 200)))
@@ -174,9 +184,11 @@ private final class ArgLog: @unchecked Sendable {
     #expect(playLog.all == [["/tmp/mudclient_test_tts.wav"]])   // afplay launched with the temp file
     #expect(service.backendStatus().backend == "kokoro")        // healthy, no fallback
     for u in rec.utterances { u.release() }
+  }
 }
 
 @Test func kokoroFallsBackToSayAndArmsCooldown() {
+  try withTestContainer {
     let rec = Recorder()
     let sayLog = ArgLog()
     let synth = FakeSynthesizer(result: .failure(NSError(domain: "down", code: 61)))   // ECONNREFUSED-ish
@@ -195,9 +207,11 @@ private final class ArgLog: @unchecked Sendable {
     // Cooldown armed: the effective backend now reports `say` so we don't hammer the dead server.
     #expect(service.backendStatus().backend == "say")
     for u in rec.utterances { u.release() }
+  }
 }
 
 @Test func stopCancelsInFlightKokoroRequest() {
+  try withTestContainer {
     let rec = Recorder()
     let synth = FakeSynthesizer(result: .success(Data(count: 200)), block: true)   // blocks mid-request
     let service = SpeechService(
@@ -214,6 +228,7 @@ private final class ArgLog: @unchecked Sendable {
     Thread.sleep(forTimeInterval: 0.2)
     #expect(synth.cancelled == true)     // in-flight request cancelled
     #expect(rec.spokenText.isEmpty)      // nothing ever played (no afplay, no say fallback)
+  }
 }
 
 // MARK: - Volume
@@ -221,6 +236,7 @@ private final class ArgLog: @unchecked Sendable {
 /// At TTS volume 0 an utterance must be DROPPED at `speak()` time: no synthesis (no HTTP to Kokoro)
 /// and no playback (no afplay, no say). This is what makes a master `volume 0` truly silence voices.
 @Test func volumeZeroSkipsSynthAndPlaybackEntirely() {
+  try withTestContainer {
     let rec = Recorder()
     let sayLog = ArgLog()
     let playLog = ArgLog()
@@ -241,10 +257,12 @@ private final class ArgLog: @unchecked Sendable {
     #expect(playLog.all.isEmpty)                        // NEVER played via afplay
     #expect(sayLog.all.isEmpty)                         // NEVER fell back to say
     #expect(rec.spokenText.isEmpty)                     // nothing spoke at all
+  }
 }
 
 /// At a partial volume the kokoro playback passes afplay a `-v <0..1>` gain flag (here 50% -> "0.5").
 @Test func volumeHalfPassesGainToAfplay() {
+  try withTestContainer {
     let rec = Recorder()
     let playLog = ArgLog()
     let synth = FakeSynthesizer(result: .success(Data(count: 200)))
@@ -261,10 +279,12 @@ private final class ArgLog: @unchecked Sendable {
 
     #expect(playLog.all == [["-v", "0.5", "/tmp/mudclient_test_tts.wav"]])
     for u in rec.utterances { u.release() }
+  }
 }
 
 /// The `say` backend carries volume as a `[[volm <0..1>]]` inline prefix on the text (single argv slot).
 @Test func volumeHalfPrefixesSayText() {
+  try withTestContainer {
     let rec = Recorder()
     let sayLog = ArgLog()
     let service = SpeechService(
@@ -277,18 +297,22 @@ private final class ArgLog: @unchecked Sendable {
 
     #expect(sayLog.all == [["-v", "Samantha", "[[volm 0.5]] half say"]])
     for u in rec.utterances { u.release() }
+  }
 }
 
 /// Full volume (the default) leaves both argv paths untouched — no `-v` for afplay, no prefix for say.
 @Test func fullVolumeLeavesArgsUnchanged() {
+  try withTestContainer {
     #expect(SpeechService.afplayArgs(path: "/tmp/a.wav", volume: 1) == ["/tmp/a.wav"])
     #expect(SpeechService.afplayArgs(path: "/tmp/a.wav", volume: 0.5) == ["-v", "0.5", "/tmp/a.wav"])
     #expect(SpeechService.volumeString(0.5) == "0.5")
     #expect(SpeechService.volumeString(0) == "0")
     #expect(SpeechService.volumeString(1) == "1")
+  }
 }
 
 @Test func kokoroRequestBodyIsCorrect() throws {
+  try withTestContainer {
     let req = KokoroHTTPSynthesizer.makeRequest(base: "http://127.0.0.1:8880",
                                                 text: "true fishing is awesome", voice: "am_adam", timeout: 3)
     #expect(req.url?.absoluteString == "http://127.0.0.1:8880/v1/audio/speech")
@@ -298,4 +322,5 @@ private final class ArgLog: @unchecked Sendable {
     let obj = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
     #expect(obj["input"] as? String == "true fishing is awesome")
     #expect(obj["voice"] as? String == "am_adam")
+  }
 }

@@ -11,6 +11,29 @@
 -- before our `.*` observer) is guaranteed by the engine's specificity firing, not by load order.
 state = state or {}
 
+-- Reactive core (__rx): the goto/recall bridge REACTS to streams — a recall landing (a room change) vs
+-- a fizzle ("No god responds") — modelled as Observables; the promise layer (__promise) chains the
+-- one-shot recall→await→retry flow (mirrors AutoFight/Corpse/Recovery). `_`-prefixed files aren't
+-- auto-loaded, so pull _rx the documented way (dofile fallback for the bare Lua test harness). Promise.lua
+-- loads AFTER this file under the directory loader, but __promise is only needed at CALL time (a live
+-- recall), by which point every script is loaded — same as AutoFight/Corpse, which also load first.
+pcall(require, "_rx")
+if not __rx then dofile("Scripts/_rx.lua") end
+local rx = __rx
+
+-- Internal hot streams the reactive flows subscribe to, fed from the SINGLE room-change / line matchers
+-- (pilot_room_change / pilot_observe) so there's no second matcher to drift. Re-entrancy-safe Subjects
+-- (see _rx): a resolving await may synchronously subscribe the next one on the same stream.
+local roomChangeS   = rx and rx.subject() or nil   -- a room change landed; emits the new room id
+local recallFizzleS = rx and rx.subject() or nil   -- a recall fizzled ("No god responds"); emits ()
+
+-- Keep a reactive flow promise OUT of the HUD promise widget (AIPilot contributes no `active_promises`
+-- rows — the recall await is internal plumbing, not a user-visible action). Mirrors AutoFight/Corpse's P().
+local function untrack_flow(p)
+  if p and __untrack_promise then __untrack_promise(p) end
+  return p
+end
+
 local cfg = {
   quiet = 0.75, min_interval = 2, human_grace = 4, max_cmds = 3, loop_threshold = 8,
   -- A combat command is ~5-15 tokens (`kill X` / `cast 'X'`), so cap generation hard for combat turns:
@@ -185,6 +208,9 @@ function pilot_room_change(id, coord)
     while #P.room_trail > 8 do table.remove(P.room_trail, 1) end
   end
   P.current_room = id
+  -- A landing (room-identity change): feed the reactive room-change stream so the in-flight recall await
+  -- (goto_recall_attempt) resolves "landed". No subscriber when no recall is in flight → simply dropped.
+  if id ~= from_id and roomChangeS then roomChangeS:onNext(id) end
   -- Learn which room a waypoint NUMBER travels to, from an observed `waypoint <n>` that just landed
   -- here (set in on_user_input). This is ground truth — no fragile description matching. `moved` guards
   -- against a failed hop attributing a later step to the number.
@@ -796,9 +822,10 @@ function pilot_observe(line)
   line = line:gsub("\27%[[%d;]*%a", "")   -- strip ANSI color/escape codes
   local t = trim(line)
   if t:lower():find("cannot go that way", 1, true) then block_last_move() end
-  -- Recall bridge: a fizzled recall means try again shortly (a successful one arrives as a room change,
-  -- handled in pilot_room_change). Small delay so we don't hammer the game.
-  if P.goto_bridge and recall_failed(t) then after(2, goto_recall_attempt) end
+  -- Recall bridge: a fizzled recall feeds the recall await's fizzle stream, which retries after a short
+  -- delay (a successful recall instead arrives as a room change → roomChangeS, resolving "landed"). No
+  -- subscriber when no recall is in flight → dropped.
+  if recall_failed(t) and recallFizzleS then recallFizzleS:onNext() end
   -- Learn the fast-travel network as `waypoint` listings scroll by, so `goto`'s hand-off and the AI MAP
   -- block can show real numbers. Session-only (numbers change with decay/reorder) — not persisted.
   local wpe = parse_waypoint_line(t)
@@ -2035,8 +2062,12 @@ doc(waypoints, { name = "waypoints", sig = "waypoints()", group = "map",
 
 local RECALL_MAX_TRIES, HOP_MAX = 6, 5
 
--- One recall attempt. Recall is unreliable, so pilot_observe retries this on the fizzle line; a room
--- change is instead picked up as a landing (goto_bridge_advance). Bounded by RECALL_MAX_TRIES.
+-- One recall attempt, as a PROMISE CHAIN: send recall → await the landing (a room change) OR a fizzle
+-- (rx.merge(roomChange$, fizzle$):first()) → on a fizzle, retry after a short delay, bounded by
+-- RECALL_MAX_TRIES; a landing is picked up by pilot_room_change → goto_bridge_advance. Recall is
+-- unreliable, hence the retry. The synchronous cap/tries/echo/send is preserved EXACTLY (the recall-cap
+-- spec drives this seam directly): the reactive await is layered AROUND it, and is inert until a stream
+-- event arrives (no subscriber → dropped), so a direct re-drive of goto_recall_attempt caps at 6 sends.
 function goto_recall_attempt()
   local b = P.goto_bridge
   if not b then return end
@@ -2047,7 +2078,23 @@ function goto_recall_attempt()
   end
   b.tries = b.tries + 1
   echo("[goto] recalling… (attempt " .. b.tries .. "/" .. RECALL_MAX_TRIES .. ")")
+  -- Drop any prior in-flight recall await so only one is ever live (cancel cascades upstream to the
+  -- merged-stream subscription, unsubscribing it).
+  if P._recall_await then P._recall_await.cancel(); P._recall_await = nil end
   send("recall")
+  if not rx then return end
+  local head = rx.merge(
+    roomChangeS:map(function() return "landed" end),
+    recallFizzleS:map(function() return "fizzle" end)
+  ):first():toPromise()
+  untrack_flow(head)                              -- internal plumbing → no HUD promise row
+  P._recall_await = head.andThen(function(ev)
+    P._recall_await = nil
+    if ev == "fizzle" and P.goto_bridge == b then
+      -- Small delay so we don't hammer the game, then retry (the cap above ends the loop).
+      after(2, function() if P.goto_bridge == b then goto_recall_attempt() end end)
+    end
+  end)
 end
 
 -- The bridge state machine, re-run on every landing (room change) while a `goto` bridge is active. It's
@@ -2566,27 +2613,58 @@ setmetatable(pilot, { __call = function(_, args) return ai(args) end })
 doc("ai", { sig = "ai(args)", group = "pilot",
   text = "Deprecated: use the pilot.* table (pilot.on(), pilot.status(), …). Thin wrapper kept for the legacy `#ai …` typed form; ai('reload') re-runs scripts, else forwards to the pilot." })
 
--- ---- wiring --------------------------------------------------------------------------------
-trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
-  pilot_room_change(tonumber(vnum), { tonumber(x), tonumber(y), tonumber(z), tonumber(plane) })
-end)
-trigger([[^kxwt_rshort (.+)$]], function(_, n) pilot_room_name(n) end)
--- Tag the current room with its terrain type (kxwt_terrain arrives just after rvnum, so current_room
--- is already set). Persisted, so the minimap can colour each room by terrain.
-trigger([[^kxwt_terrain (\d+)]], function(_, t)
-  local id = P.current_room
-  if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(t) then
-    P.rooms[id].terrain = tonumber(t); schedule_save()
-  end
-end)
--- kxwt_waypoint marks the current room as a travel waypoint; remember it so the minimap can flag it.
-trigger([[^kxwt_waypoint]], function()
-  local id = P.current_room
-  if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
-end)
--- Your own death (only ever printed for YOU) teleports you to recall — mark the corpse room first.
-trigger([[^You have been KILLED]], function() mark_death() end)
-trigger([[.*]], function(line) pilot_observe(line) end)
+-- ---- wiring (reactive: the room-parse / observe triggers as Observables) -------------------
+-- The kxwt_* room parsers and the broad `.*` observer are rx.fromTrigger streams: each registers its
+-- trigger on first subscribe (here, at load) and emits a `caps` table per match (caps[1..N] = capture
+-- groups, caps.line = the full line). Subscribed in this order — SPECIFIC parsers BEFORE the broad
+-- observer — so the underlying trigger registration keeps that order; and same-line firing is by pattern
+-- specificity in the engine regardless, so the specific kxwt parsers still write the state the `.*`
+-- observer reads (a broad `.*` is the least specific, so it fires last). fromTrigger returns nil (no gag)
+-- from its handler, so every line still displays exactly as before. A permanent subscribe keeps the
+-- trigger registered for the session, identical to a plain trigger().
+if rx then
+  rx.fromTrigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]]):subscribe(function(c)
+    pilot_room_change(tonumber(c[1]), { tonumber(c[2]), tonumber(c[3]), tonumber(c[4]), tonumber(c[5]) })
+  end)
+  rx.fromTrigger([[^kxwt_rshort (.+)$]]):subscribe(function(c) pilot_room_name(c[1]) end)
+  -- Tag the current room with its terrain type (kxwt_terrain arrives just after rvnum, so current_room
+  -- is already set). Persisted, so the minimap can colour each room by terrain.
+  rx.fromTrigger([[^kxwt_terrain (\d+)]]):subscribe(function(c)
+    local id = P.current_room
+    if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(c[1]) then
+      P.rooms[id].terrain = tonumber(c[1]); schedule_save()
+    end
+  end)
+  -- kxwt_waypoint marks the current room as a travel waypoint; remember it so the minimap can flag it.
+  rx.fromTrigger([[^kxwt_waypoint]]):subscribe(function()
+    local id = P.current_room
+    if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+  end)
+  -- Your own death (only ever printed for YOU) teleports you to recall — mark the corpse room first.
+  rx.fromTrigger([[^You have been KILLED]]):subscribe(function() mark_death() end)
+  -- The broad observer (least specific → fires LAST on any line): feeds the transcript, exits parse, the
+  -- waypoint-listing learner, the recall fizzle, and the turn arm.
+  rx.fromTrigger([[.*]]):subscribe(function(c) pilot_observe(c.line) end)
+else
+  -- No reactive core (shouldn't happen — _rx loads at the top): fall back to plain triggers so the pilot
+  -- still wires up its room parsing/observe.
+  trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
+    pilot_room_change(tonumber(vnum), { tonumber(x), tonumber(y), tonumber(z), tonumber(plane) })
+  end)
+  trigger([[^kxwt_rshort (.+)$]], function(_, n) pilot_room_name(n) end)
+  trigger([[^kxwt_terrain (\d+)]], function(_, t)
+    local id = P.current_room
+    if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(t) then
+      P.rooms[id].terrain = tonumber(t); schedule_save()
+    end
+  end)
+  trigger([[^kxwt_waypoint]], function()
+    local id = P.current_room
+    if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+  end)
+  trigger([[^You have been KILLED]], function() mark_death() end)
+  trigger([[.*]], function(line) pilot_observe(line) end)
+end
 
 load_map()
 local brain_desc = set_brain(cfg.brain)                         -- apply the default decision model NOW

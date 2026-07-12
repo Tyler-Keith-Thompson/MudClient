@@ -12,6 +12,9 @@ import DependencyInjection
 @testable import MudClient
 
 @Test func dispatchBundleWritesFeedbackAndInterleavedTranscript() throws {
+  try withTestContainer {
+    let sharedStore = TranscriptStore()
+    Container.transcriptStore.register { sharedStore }
     let store = Container.transcriptStore()
     let tag = "zzq\(Int(Date().timeIntervalSince1970))"   // unique marker so we read back OUR lines
     store.recordSent("kill \(tag)", origin: .user)
@@ -31,9 +34,13 @@ import DependencyInjection
     #expect(md.contains("srv  The \(tag) dies."))
 
     try? FileManager.default.removeItem(at: bundle.dir)
+  }
 }
 
 @Test func dispatchBundleStripsAnsiFromTranscript() throws {
+  try withTestContainer {
+    let sharedStore = TranscriptStore()
+    Container.transcriptStore.register { sharedStore }
     let store = Container.transcriptStore()
     let tag = "ansi\(Int(Date().timeIntervalSince1970))"
     store.recordReceived("A \u{1B}[31mfierce \(tag)\u{1B}[0m snarls.")
@@ -45,4 +52,5 @@ import DependencyInjection
     #expect(!md.contains("\u{1B}["))   // no raw escape sequences leaked into the bundle
 
     try? FileManager.default.removeItem(at: bundle.dir)
+  }
 }

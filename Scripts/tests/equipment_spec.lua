@@ -707,27 +707,38 @@ test("build_id_queue: container items carry their container name + within-contai
   expect(byname["chameleon ring"].kw):eq("ring")         -- its own keyword, bare (one ring in this sack)
 end)
 
--- ---- the phase machine (pacing / get-id-put / failure-skip / summary) ------------------------------
--- Drive the queue deterministically: capture sends + echoes, record timers, fire the pending one to step.
+-- ---- the identify pass, at the BEHAVIOUR level (send order / echo narration / outcome tally) -------
+-- The pass is driven through the SAME reply seams the live Swift triggers push through — idq_start()
+-- kicks it off, then idq_get_result(ok)/idq_advance(ok)/idq_put_result(ok) are the get/identify/put
+-- replies, and d.tick() fires the one pacing timer the flow is currently waiting on (the inter-item gap
+-- or the combat-retry beat). Every ASSERTION below is on captured send/echo or the pass outcome — NOT on
+-- any internal queue field (index/phase/cursor/pending flags) — so the reactive reimplementation, which
+-- stores its progress as a promise flow rather than a step counter, must still turn them green.
+--
+-- Timer capture is representation-agnostic (like corpse_spec): we record every after() and fire the most
+-- recently-armed LIVE one. A reply seam cancels its phase watchdog before the next step arms the pacing
+-- beat, so the newest live timer is always that beat — whether it lives in an S.idq field or a promise.
 local function drive(queue, known)
   local sent, echoes, timers = {}, {}, {}
   local o_send, o_after, o_cancel, o_echo, o_incombat = send, after, cancel, echo, in_combat
   send = function(s) sent[#sent + 1] = s end
-  after = function(_d, cb) timers[#timers + 1] = cb; return #timers end
-  cancel = function(id) if id then timers[id] = false end end
+  after = function(_d, cb) timers[#timers + 1] = { delay = _d, cb = cb }; return #timers end
+  cancel = function(id) if id and timers[id] then timers[id].cb = false end end
   echo = function(s) echoes[#echoes + 1] = tostring(s) end
+  in_combat = nil
   local ctx = {
     sent = sent, echoes = echoes,
-    -- fire whatever timer the queue is currently waiting on (a gap step or combat-retry).
+    -- Fire the single pacing timer the flow is waiting on (the gap between items, or the combat-retry).
     tick = function()
-      local q = E.idq_state()
-      if q and q.timer and timers[q.timer] then local cb = timers[q.timer]; timers[q.timer] = false; cb() end
+      for i = #timers, 1, -1 do
+        local t = timers[i]
+        if t.cb then local cb = t.cb; t.cb = false; cb(); return end
+      end
     end,
     set_combat = function(f) in_combat = f end,
     restore = function() send, after, cancel, echo, in_combat = o_send, o_after, o_cancel, o_echo, o_incombat end,
     summary = function() for _, e in ipairs(echoes) do if e:find("identify pass:", 1, true) then return e end end end,
   }
-  in_combat = nil
   E.idq_start(queue, known)
   return ctx
 end
@@ -743,7 +754,7 @@ test("QUEUE: paces inventory identifies one at a time and reports the summary co
   E.idq_advance(true); d.tick()                          -- block parsed -> gap -> next entry
   expect(d.sent[2]):eq("identify ring")
   E.idq_advance(true); d.tick()                          -- done
-  expect(E.idq_state()):eq(nil)                          -- queue torn down
+  expect(#d.sent):eq(2)                                  -- exactly the two identifies — pass wrapped up
   expect(d.summary()):contains("2 identified, 0 failed, 3 already known")
   d.restore()
 end)
@@ -787,7 +798,7 @@ test("QUEUE: identify FAILING on a container item STILL puts it back (never left
   E.idq_advance(false)                                   -- identify failed
   expect(d.sent[3]):eq("put idol chest")                 -- restored anyway
   E.idq_put_result(true); d.tick()
-  expect(E.idq_state()):eq(nil)
+  expect(d.summary()):contains("0 identified, 1 failed")   -- pass completed: id failed but item restored
   d.restore()
 end)
 
@@ -831,7 +842,7 @@ test("QUEUE: combat pause defers the next entry until combat clears", function()
   d.tick()                                               -- combat-retry timer -> now proceeds
   expect(d.sent[2]):eq("identify ring")
   E.idq_advance(true); d.tick()
-  expect(E.idq_state()):eq(nil)
+  expect(d.summary()):contains("2 identified")             -- both identified once combat cleared
   d.restore()
 end)
 

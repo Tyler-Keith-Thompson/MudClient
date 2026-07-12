@@ -8,6 +8,13 @@
 state = state or {}
 _AA_TEST = _AA_TEST or {}
 
+-- Reactive core (__rx: Observables/Subjects) + the promise layer (__promise). The recovery machine reacts
+-- to STREAMS — the cast reply lines, vitals/position/group/spellup/spelldown events — and paces its casts
+-- as PROMISES (a cast-step awaits its own reply line). `_`-prefixed files aren't auto-loaded, so pull _rx
+-- here the documented way (dofile fallback for the bare Lua test harness); __promise loads via the loader.
+pcall(require, "_rx")
+if not __rx then dofile("Scripts/_rx.lua") end
+
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
 -- "Ready" = recovered enough to keep exploring: every vital at least 90%. Drives the `recover` alias's
 -- auto-stand and the AI's " (ready)" readiness label, so both share one definition.
@@ -615,21 +622,78 @@ all_minions_ready = function(frac)
   return true
 end
 
--- Driver state. `casting` = a heal is out, awaiting its reply line. `sweep[word]` = next ordinal to try
--- for that keyword. `blocked[word]` = gave up on it this recovery (backstop against a refuse loop).
--- `token` invalidates a stale timeout when a reply arrives first.
--- `tried[name]` = set of keywords the game refused as invalid for that minion this recovery; `word_blocked
--- [name]` = we exhausted its keywords and gave up healing it (both keyed by minion NAME, since the failing
--- thing is the keyword, not a room ordinal — distinct from `blocked[word]`, the topped-off refuse backstop).
-local minion_heal = { casting = false, sweep = {}, blocked = {}, tried = {}, word_blocked = {},
-                      refuse_streak = 0, token = 0, last = nil }
+-- ---- reactive cast pacing (promises + streams) --------------------------------------------------
+-- The heal driver USED to hand-walk a `casting` boolean plus a `token`-guarded 3s `after` backstop, and
+-- route replies imperatively. It's now a PROMISE + STREAM flow (mirrors AutoFight): a cast goes out inside
+-- a cast-step promise that AWAITS the game's own reply line off a hot stream, backed by a 3s REACTIVE
+-- backstop and torn down by `recoveryEndS` (recovery ended/cancelled). The in-flight cast-step promise IS
+-- the "busy" gate — there is no boolean; only one cast is ever outstanding, and its resolution routes the
+-- outcome (advance the sweep / retry / block) and re-drives the next cast.
+local rx = __rx
+
+-- A flow promise STARTED synchronously (a cast-step is built exactly when it should run — inside the
+-- previous cast's resolution — so construct == execute), and kept OUT of the HUD promise widget (only
+-- recover()'s own promise is a widget row).
+local function P(executor)
+  local p = __promise(executor, "recover-flow")
+  if __untrack_promise then __untrack_promise(p) end
+  p.__start()
+  return p
+end
+
+-- Internal hot streams the cast flow reacts to. Fed by the settle SEAMS below (minion_cast_settled /
+-- minion_target_invalid), which BOTH the live reply triggers AND the _AA_TEST specs call — one path, no
+-- second reply matcher to drift (exactly AutoFight's hit_* design).
+local castReplyS   = rx and rx.subject() or nil   -- a cast settled: emits "ok"/"fail"/"full"/"notgt"
+local castInvalidS = rx and rx.subject() or nil   -- a target keyword named nothing: emits the bad word
+local recoveryEndS = rx and rx.subject() or nil   -- recovery ended/cancelled → tear down any in-flight cast
+
+local heal_inflight            -- the in-flight cast-step promise (nil = idle); its presence IS the busy gate
+local advance_after_reply      -- (kind) -> route a settled cast + re-drive           (fwd; defined below)
+local handle_invalid_target    -- (word) -> keyword retry / give-up                    (fwd; defined below)
+local minion_target_invalid    -- (word) -> invalid-target SEAM (push onto the stream) (fwd; defined below)
+local try_cast_heal            -- () -> issue the next cast if idle (the driver)        (fwd; defined below)
+
+-- Build + START the cast-step for the cast just sent: await ITS reply off castReplyS / castInvalidS (a 3s
+-- reactive backstop resolves "timeout" so a silent failure still moves us on), torn down by recoveryEndS.
+-- The single active subscription IS the "busy" gate: a stray reply with no cast in flight has no subscriber.
+local function begin_cast_step()
+  if not rx then return end
+  heal_inflight = P(function(resolve, _, onCancel)
+    local sub, timer, done = nil, nil, false
+    local function cleanup()
+      if sub then sub:unsubscribe(); sub = nil end
+      if timer and cancel then cancel(timer); timer = nil end
+    end
+    local function fin(ev, arg) if done then return end; done = true; cleanup(); resolve({ ev = ev, arg = arg }) end
+    sub = rx.merge(
+      castReplyS:map(function(kind) return { "reply", kind } end),
+      castInvalidS:map(function(w) return { "invalid", w } end)
+    ):takeUntil(recoveryEndS):subscribe(function(e) fin(e[1], e[2]) end)
+    timer = after and after(3, function() fin("timeout") end) or nil
+    onCancel(function() done = true; cleanup() end)
+  end):andThen(function(r)
+    heal_inflight = nil
+    if     r.ev == "reply"   then advance_after_reply(r.arg)
+    elseif r.ev == "invalid" then handle_invalid_target(r.arg)
+    else                          try_cast_heal() end   -- "timeout" backstop → try the next cast
+  end)
+end
+
+-- Driver bookkeeping (target selection — kept plain; the pacing is the streams above). `sweep[word]` = next
+-- ordinal to try for that keyword; `blocked[word]` = gave up on it this recovery (refuse-loop backstop);
+-- `tried[name]` = keywords the game refused as invalid for that minion; `word_blocked[name]` = we exhausted
+-- its keywords (both keyed by NAME, since the failing thing is the keyword, not a room ordinal).
+local minion_heal = { sweep = {}, blocked = {}, tried = {}, word_blocked = {}, refuse_streak = 0, last = nil }
 
 reset_minion_heal = function()
-  minion_heal.casting, minion_heal.refuse_streak = false, 0
+  minion_heal.refuse_streak = 0
   minion_heal.sweep, minion_heal.blocked, minion_heal.last = {}, {}, nil
   minion_heal.tried, minion_heal.word_blocked = {}, {}
   minion_heal.self_hp_blocked, minion_heal.self_stam_blocked = false, false
-  minion_heal.token = minion_heal.token + 1   -- kill any in-flight timeout
+  if recoveryEndS then recoveryEndS:onNext() end          -- tear down any in-flight cast-step subscription
+  if heal_inflight and heal_inflight.cancel then heal_inflight.cancel() end
+  heal_inflight = nil
 end
 
 -- The next candidate keyword for `name` we haven't already had the game refuse this recovery (nil once
@@ -679,12 +743,22 @@ local function keyword_count(word)
   return n
 end
 
--- Fire the 3s reply-backstop shared by every recovery cast: if no reply line arrives (silent failure),
--- clear the casting flag and try the next cast. Returns the token so a real reply can invalidate it.
-local function arm_cast_backstop()
-  local token = minion_heal.token + 1
-  minion_heal.token = token
-  after(3, function() if minion_heal.token == token then minion_heal.casting = false; try_cast_heal() end end)
+-- Fluent recovery-cast builder — one readable line for the "send `c <spell> [target]`, then AWAIT its
+-- reply via a fresh cast-step" ceremony every heal shares:
+--     cast("bolster") : at("2.spider") : records{ word=…, kind="minion", … } : go()
+--     cast("refresh")               : records{ kind="self_stam" }            : go()
+-- :at(nil) omits the target (self-refresh); :records stashes the last-cast bookkeeping advance_after_reply
+-- reads to route ok/fail/refuse. :go() SENDS then begins the reactive cast-step (the pacing gate).
+local function cast(spell)
+  local c = { spell = spell, target = nil, last = nil }
+  function c:at(t)        self.target = t;   return self end
+  function c:records(l)   self.last = l;     return self end
+  function c:go()
+    minion_heal.last = self.last
+    send("c " .. self.spell .. (self.target and (" " .. self.target) or ""))
+    begin_cast_step()                        -- await this cast's reply (the in-flight busy gate)
+  end
+  return c
 end
 
 local try_self_cast   -- fwd decl: try_cast_heal falls through to it when no minion needs a heal
@@ -692,8 +766,8 @@ local try_self_cast   -- fwd decl: try_cast_heal falls through to it when no min
 -- Try to cast one heal at the most-hurt skeletal minion. No-op when not recovering, a cast is already
 -- out, casting is blocked (busy action / asleep), or nothing needs healing. When no minion needs a heal
 -- it falls through to try_self_cast (spend surplus mana on your own vitals). Exposed via _AA_TEST.
-local function try_cast_heal()
-  if not state.recover or minion_heal.casting then return end
+try_cast_heal = function()
+  if not state.recover or heal_inflight then return end
   if (state.action or 0) >= 50 then return end          -- a busy action prevents spellcasting
   if state.position == "sleeping" then return end        -- can't cast asleep (posture logic avoids this)
   -- Single-stat recovery (recover hp/stamina) is player-only — it never heals minions; skip straight to
@@ -719,10 +793,9 @@ local function try_cast_heal()
     target = ord .. "." .. word
   end
   local spell = (f < BOLSTER_BELOW) and "bolster" or "soothe"
-  minion_heal.last = { word = word, ord = ord, K = K, kind = "minion", name = m.name }
-  minion_heal.casting = true
-  send("c " .. spell .. " " .. target)
-  arm_cast_backstop()
+  cast(spell) : at(target)
+              : records{ word = word, ord = ord, K = K, kind = "minion", name = m.name }
+              : go()
 end
 
 -- Spend surplus mana on YOUR own lagging vitals — one cast, paced like the minion driver. hp is tried
@@ -772,10 +845,7 @@ try_self_cast = function()
   narrate("cast", pick.stat, string.format("casting %s%s — %s %d%% is ~%d ticks of regen away; mana to spare",
     pick.spell, (pick.stat == "hp") and " on yourself" or "", pick.label,
     math.floor(pick.pctv * 100 + 0.5), math.ceil(pick.ticks)))
-  minion_heal.last = { kind = pick.kind }
-  minion_heal.casting = true
-  send("c " .. pick.spell .. (pick.target and (" " .. pick.target) or ""))
-  arm_cast_backstop()
+  cast(pick.spell) : at(pick.target) : records{ kind = pick.kind } : go()
 end
 
 -- Settle the outstanding cast on one of the game's reply lines, then decide the next move.
@@ -783,10 +853,9 @@ end
 --   fail         -> spell fizzled; retry the same target immediately
 --   full/notgt   -> this slot is topped (or wrong target); advance the sweep and try the next ordinal
 local MINION_REFUSE_CAP = 3   -- consecutive refuses per keyword beyond K before we give up on it
-local function minion_cast_settled(kind)
-  if not minion_heal.casting then return end
-  minion_heal.casting = false
-  minion_heal.token = minion_heal.token + 1     -- a reply beat the timeout; invalidate it
+-- Route a SETTLED cast to the next move (advance the sweep / retry / block), then re-drive. Runs inside the
+-- cast-step's resolution (the reply stream resolved it) — NOT called directly by a reply line.
+advance_after_reply = function(kind)
   local last = minion_heal.last
   -- Self-cast (refresh / bolster / soothe on yourself): no ordinal sweep. ok/fail just re-drive; a refuse
   -- ("don't need that much healing" / "must use your name") means this vital won't take the spell right
@@ -823,6 +892,14 @@ local function minion_cast_settled(kind)
     minion_heal.refuse_streak = 0
   end
   try_cast_heal()
+end
+
+-- SEAM: a reply line settles the outstanding cast — push its outcome onto the reactive stream the
+-- in-flight cast-step awaits (which then routes it via advance_after_reply). No-op with nothing in flight
+-- (a stray reply — e.g. a mis-targeted combat spell — has no cast-step subscriber).
+local function minion_cast_settled(kind)
+  if not heal_inflight then return end
+  if castReplyS then castReplyS:onNext(kind) end
 end
 
 -- (Re)start the driver — called when a recovery begins and on every fresh group roster.
@@ -888,40 +965,45 @@ trigger([[^Your mana is already almost full\.]], function()
   state.lifetapping, state.lifetap_send_at, state.lifetap_manafull = false, 0, true
 end)
 
--- Recovery-cast pacing: settle the outstanding cast on the game's own reply lines (see the recovery
--- block above). Anchored so another player's speech can't spoof them. The construct wording ("repair the
--- damage to X's body") is minion-only; the "feel ..." lines are self-casts; fail/refuse route by
--- last.kind inside minion_cast_settled (bolster/soothe are shared between self and minions).
--- Each reply line -> the settle outcome it signals. minion_cast_settled routes fail/refuse by last.kind
--- (self vs minion), so one flat table covers both. "ok" for the construct-repair (minion) AND the self
--- "feel ..." lines; "full"/"notgt" advance the ordinal sweep.
-local CAST_REPLIES = {
-  { [[^You repair the damage to .+'s body\.$]],                          "ok" },     -- minion heal landed
-  { [[^You feel less tired\.$]],                                         "ok" },     -- refresh, self
-  { [[^You feel a little better\.$]],                                    "ok" },     -- soothe, self
-  { [[^You will your injuries to heal and your soul to take courage\.$]], "ok" },    -- bolster, self
-  { [[^You fail to cast the spell '(soothe wounds|bolster|refresh)'\.$]], "fail" },  -- fizzle -> retry
-  { [[^.+ doesn't need that much healing right now\.$]],                  "full" },  -- too full / wrong ordinal
-  { [[^If you really want to cast that on yourself, you must use your name\.$]], "notgt" },
-}
-for _, r in ipairs(CAST_REPLIES) do
-  local kind = r[2]
-  trigger(r[1], function() minion_cast_settled(kind) end)
+-- ---- live wire → cast-reply streams -------------------------------------------------------------
+-- The game's own reply lines are HOT STREAMS now (rx.fromTrigger), feeding the settle SEAMS that push onto
+-- the internal cast streams the in-flight cast-step awaits — the single path (the _AA_TEST specs call the
+-- same seams; there's no second reply matcher to drift). Anchored so another player's speech can't spoof
+-- them: the construct "repair the damage to X's body" is minion-only, the "feel ..." lines are self-casts,
+-- fail/refuse route by last.kind inside advance_after_reply (bolster/soothe are shared self/minion). Trigger
+-- REGEXES run in Swift (not unit-tested); the patterns are byte-identical to the old router. Guarded on rx.
+if rx then
+  local T = rx.fromTrigger
+  local function on_reply(pat, kind) T(pat):subscribe(function() minion_cast_settled(kind) end) end
+  on_reply([[^You repair the damage to .+'s body\.$]],                           "ok")   -- minion heal landed
+  on_reply([[^You feel less tired\.$]],                                          "ok")   -- refresh, self
+  on_reply([[^You feel a little better\.$]],                                     "ok")   -- soothe, self
+  on_reply([[^You will your injuries to heal and your soul to take courage\.$]], "ok")   -- bolster, self
+  on_reply([[^You fail to cast the spell '(soothe wounds|bolster|refresh)'\.$]], "fail") -- fizzle → retry
+  on_reply([[^.+ doesn't need that much healing right now\.$]],                  "full") -- too full / wrong ordinal
+  on_reply([[^If you really want to cast that on yourself, you must use your name\.$]],   "notgt")
+  -- The game refuses a heal whose TARGET KEYWORD names nothing ("Sorry, 'man' isn't a valid target ..." —
+  -- a "clay man" answers to 'clay', not 'man'): route it to the keyword-retry seam.
+  T([[^Sorry, '([^']+)' isn't a valid target for the spell '[^']+'\.$]])
+    :subscribe(function(c) minion_target_invalid(c[1]) end)
 end
 
--- The game refuses a heal whose TARGET KEYWORD names nothing here — "Sorry, 'man' isn't a valid target
--- for the spell 'soothe wounds'." (a "clay man" answers to 'clay', not 'man'). CAST_REPLIES never matched
--- this, so the cast hung on its 3s backstop and re-fired the SAME dead keyword forever. Recover by trying
--- the minion's other name-words in turn (next_untried_word); once every keyword has been refused, give up
--- on healing THAT minion for this recovery and skip it (word_blocked) — narrating both steps. Recovery
--- itself keeps going (the driver rolls to the next minion / self-cast). Guarded to our own minion cast:
--- the same line during combat (a mis-targeted attack spell) leaves minion_heal.casting false and is ignored.
-local function minion_target_invalid(word)
-  if not minion_heal.casting then return end
+-- SEAM: an invalid-target reply — push the bad keyword onto the invalid stream (the in-flight cast-step
+-- routes it via handle_invalid_target). Guarded to our own minion cast: a mis-targeted combat spell leaves
+-- either nothing in flight or a non-minion last, so the line no-ops (the cast-step keeps waiting).
+minion_target_invalid = function(word)
+  if not heal_inflight then return end
   local last = minion_heal.last
-  if not (last and last.kind == "minion" and last.name) then return end   -- not our minion cast; let the backstop handle it
-  minion_heal.casting = false
-  minion_heal.token = minion_heal.token + 1        -- a reply beat the timeout; invalidate it
+  if not (last and last.kind == "minion" and last.name) then return end
+  if castInvalidS then castInvalidS:onNext(word) end
+end
+
+-- Route an invalid-target reply: record the refused keyword, try the minion's next name-word, else give up
+-- on healing THAT minion this recovery (word_blocked) — narrating both. Recovery keeps going (the driver
+-- rolls to the next minion / self-cast). Runs inside the cast-step's resolution, like advance_after_reply.
+handle_invalid_target = function(word)
+  local last = minion_heal.last
+  if not (last and last.kind == "minion" and last.name) then return end
   local name = last.name
   local bad = last.word or word
   minion_heal.tried[name] = minion_heal.tried[name] or {}
@@ -935,8 +1017,6 @@ local function minion_target_invalid(word)
   end
   try_cast_heal()
 end
-trigger([[^Sorry, '([^']+)' isn't a valid target for the spell '[^']+'\.$]],
-  function(_, word) minion_target_invalid(word) end)
 _AA_TEST.minion_target_invalid = minion_target_invalid
 
 -- `show regen` — regen per tick at the CURRENT posture, drives the recovery cast-vs-wait decision.
@@ -1149,36 +1229,53 @@ alias([[^recover off$]], function()
   end
 end)
 
--- ---- Protocol -> recovery hooks -----------------------------------------------------------------
--- AlterAeon.lua parses the kxwt fields into `state` and, once done, calls these so the recovery state
--- machine (all upvalues in THIS file) can react — keeping protocol parsing and recovery logic in
--- separate files without exposing the machinery. All `__`-prefixed (internal; doc-exempt) and guarded
--- at the call site, so a not-yet-loaded Recovery.lua is simply inert.
+-- ---- Protocol -> recovery event streams ---------------------------------------------------------
+-- AlterAeon.lua parses the kxwt fields into `state` and, once done, calls these hooks so the recovery
+-- machine (all upvalues in THIS file) can react — keeping protocol parsing and recovery logic in separate
+-- files without exposing the machinery. Rather than run the logic inline, each hook PUSHES onto an internal
+-- Subject; the master pipeline below subscribes the actual reactions. So the recovery machine literally
+-- reads as "vitals / position / group / spellup / spelldown are streams, and here's what each drives" —
+-- the same shape as AutoFight's wire→streams block. All `__`-prefixed (internal; doc-exempt) and guarded at
+-- the call site, so a not-yet-loaded Recovery.lua is inert.
+local vitalsS    = rx and rx.subject() or nil   -- kxwt_prompt: a vitals update
+local positionS  = rx and rx.subject() or nil   -- kxwt_position: emits { posn, changed }
+local groupS     = rx and rx.subject() or nil   -- kxwt_group_end: a fresh roster
+local spellupS   = rx and rx.subject() or nil   -- kxwt_spellup: a buff (re)landed; emits the spell
+local spelldownS = rx and rx.subject() or nil   -- kxwt_spelldown: a buff dropped; emits the spell
 
-function __recovery_on_vitals()          -- kxwt_prompt: complete recovery, then bleed surplus hp->mana
-  maybe_complete_recovery()
-  if state.recover then maybe_lifetap() end
+if rx then
+  -- VITALS ─ complete recovery (stand + resolve when the target's met), then bleed surplus hp→mana.
+  vitalsS:subscribe(function()
+    maybe_complete_recovery()
+    if state.recover then maybe_lifetap() end
+  end)
+  -- POSITION ─ re-issue the posture from standing, and refresh per-posture regen numbers on a real change.
+  positionS:subscribe(function(e)
+    if state.recover and recovery_depth(e.posn) == 0 then choose_recovery_position() end
+    if state.recover and e.changed and (not state.regen or state.regen.position ~= e.posn) then ensure_regen() end
+  end)
+  -- GROUP ─ a fresh roster (re)drives the next minion heal and re-checks completion.
+  groupS:subscribe(function()
+    heal_minions_kick(); maybe_complete_recovery()
+  end)
+  -- SPELLUP ─ the recast we woke for landed → release the "waiting for a recast" hold.
+  spellupS:subscribe(function(s)
+    if recovery and recovery.await_spell == s then recovery.await_spell, recovery.await_until = nil, nil end
+  end)
+  -- SPELLDOWN ─ a buff dropped mid-sleep → drop to rest so it can be recast (and hold awake for it).
+  spelldownS:subscribe(function(s)
+    if state.recover and state.position == "sleeping" and pct(state.mana, state.maxmana) > 0.3 then
+      send("rest"); state.position = "sitting"
+      if recovery then recovery.await_spell, recovery.await_until = s, os.time() + SPELLUP_WAIT end
+    end
+  end)
 end
 
-function __recovery_on_position(p, changed)   -- kxwt_position: re-issue posture / refresh per-posture regen
-  if state.recover and recovery_depth(p) == 0 then choose_recovery_position() end
-  if state.recover and changed and (not state.regen or state.regen.position ~= p) then ensure_regen() end
-end
-
-function __recovery_on_group()           -- kxwt_group_end: (re)pick the next minion heal + re-check done
-  heal_minions_kick(); maybe_complete_recovery()
-end
-
-function __recovery_on_spellup(s)        -- kxwt_spellup: the recast we woke for landed — release the hold
-  if recovery and recovery.await_spell == s then recovery.await_spell, recovery.await_until = nil, nil end
-end
-
-function __recovery_on_spelldown(s)      -- kxwt_spelldown: buff dropped mid-sleep — drop to rest for the recast
-  if state.recover and state.position == "sleeping" and pct(state.mana, state.maxmana) > 0.3 then
-    send("rest"); state.position = "sitting"
-    if recovery then recovery.await_spell, recovery.await_until = s, os.time() + SPELLUP_WAIT end
-  end
-end
+function __recovery_on_vitals()   if vitalsS   then vitalsS:onNext() end end
+function __recovery_on_position(p, changed) if positionS then positionS:onNext({ posn = p, changed = changed }) end end
+function __recovery_on_group()    if groupS    then groupS:onNext() end end
+function __recovery_on_spellup(s)   if spellupS   then spellupS:onNext(s) end end
+function __recovery_on_spelldown(s) if spelldownS then spelldownS:onNext(s) end end
 
 function __recovery_cancel(reason)       -- a move / a fight interrupts recovery (reject the promise)
   end_recovery(false, reason)
