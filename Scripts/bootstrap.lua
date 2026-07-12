@@ -475,6 +475,27 @@ doc("connect", { sig = "connect(host[, port])", group = "connection",
   text = "Open (or re-open) the connection. port defaults to 23.",
   example = "connect(\"alteraeon.com\", 3002)" })
 doc("disconnect", { sig = "disconnect()", group = "connection", text = "Close the current connection." })
+-- reconnect() — reopen whatever connect() last opened this session. We wrap connect()
+-- once (bootstrap runs before any script, and only once per session, so this wraps the
+-- host builtin exactly once and survives reload()) to remember its args, then replay them.
+do
+  local _connect = connect
+  local last_host, last_port
+  connect = function(host, port)
+    if host then last_host, last_port = host, port end
+    return _connect(host, port)
+  end
+  function reconnect()
+    if not last_host then
+      return echo("reconnect: nothing has connected yet this session", "yellow")
+    end
+    echo("reconnect: " .. last_host .. ":" .. tostring(last_port or 23))
+    return connect(last_host, last_port)
+  end
+end
+doc("reconnect", { sig = "reconnect()", group = "connection",
+  text = "Reopen the last connection connect() opened this session (host+port are remembered from the most recent connect() call). `#reconnect`.",
+  example = "#reconnect" })
 doc("is_connected", { sig = "is_connected() -> bool", group = "connection",
   text = "Whether the socket is currently connected." })
 doc("telnet_send", { sig = "telnet_send(option, payload)", group = "connection",

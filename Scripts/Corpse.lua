@@ -44,6 +44,9 @@ local on_all = __dsl.on_all
 pcall(require, "_rx")
 if not __rx then dofile("Scripts/_rx.lua") end
 local rx = __rx
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
 
 -- ---- learned per-KIND harvest memory (persisted) -------------------------------------------------
 -- We learn which mob KINDS yield no teeth / no spellcomps and skip that harvest command on the next
@@ -62,14 +65,12 @@ local function corpse_kind_key(name)
 end
 local CORPSE_HARVEST_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/corpse_harvest.lua"
 local function save_corpse_harvest()
-  local f = io.open(CORPSE_HARVEST_FILE, "w"); if not f then return end
   local function set_parts(t)
     local p = {}; for k in pairs(t) do p[#p + 1] = string.format("[%q]=true", k) end
     return table.concat(p, ",")
   end
-  f:write(string.format("return {no_teeth={%s},no_spellcomps={%s}}",
+  persist.write(CORPSE_HARVEST_FILE, string.format("return {no_teeth={%s},no_spellcomps={%s}}",
     set_parts(_CORPSE_HARVEST.no_teeth), set_parts(_CORPSE_HARVEST.no_spellcomps)))
-  f:close()
 end
 local corpse_save_timer
 local function schedule_corpse_save()   -- debounce a burst of learns into one write (like the winners file)
@@ -78,13 +79,10 @@ local function schedule_corpse_save()   -- debounce a burst of learns into one w
 end
 if not _CORPSE_HARVEST then             -- load ONCE per session (a live reload keeps the in-memory table)
   _CORPSE_HARVEST = { no_teeth = {}, no_spellcomps = {} }
-  local chunk = loadfile and loadfile(CORPSE_HARVEST_FILE)
-  if chunk then
-    local ok, t = pcall(chunk)
-    if ok and type(t) == "table" then
-      if type(t.no_teeth) == "table" then for k in pairs(t.no_teeth) do _CORPSE_HARVEST.no_teeth[k] = true end end
-      if type(t.no_spellcomps) == "table" then for k in pairs(t.no_spellcomps) do _CORPSE_HARVEST.no_spellcomps[k] = true end end
-    end
+  local t = persist.load(CORPSE_HARVEST_FILE)
+  if type(t) == "table" then
+    if type(t.no_teeth) == "table" then for k in pairs(t.no_teeth) do _CORPSE_HARVEST.no_teeth[k] = true end end
+    if type(t.no_spellcomps) == "table" then for k in pairs(t.no_spellcomps) do _CORPSE_HARVEST.no_spellcomps[k] = true end end
   end
 end
 local function learn_no_teeth(key)

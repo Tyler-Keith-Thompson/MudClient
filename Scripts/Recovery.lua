@@ -14,6 +14,9 @@ _AA_TEST = _AA_TEST or {}
 -- here the documented way (dofile fallback for the bare Lua test harness); __promise loads via the loader.
 pcall(require, "_rx")
 if not __rx then dofile("Scripts/_rx.lua") end
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
 
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
 -- "Ready" = recovered enough to keep exploring: every vital at least 90%. Drives the `recover` alias's
@@ -507,21 +510,17 @@ local function regen_fresh(entry)
 end
 
 local function save_regen_cache()
-  local f = io.open(REGEN_FILE, "w"); if not f then return end
   local parts = {}
   for k, v in pairs(regen_cache) do
     parts[#parts + 1] = string.format("[%q]={hp=%d,mana=%d,move=%d,at=%d,lvl=%d}",
       k, v.hp or 0, v.mana or 0, v.move or 0, v.at or 0, v.lvl or 0)
   end
-  f:write("return {" .. table.concat(parts, ",") .. "}")
-  f:close()
+  persist.write(REGEN_FILE, "return {" .. table.concat(parts, ",") .. "}")
 end
 local function load_regen_cache()
   regen_cache = {}
-  local chunk = loadfile and loadfile(REGEN_FILE)
-  if not chunk then return end
-  local ok, t = pcall(chunk)
-  if ok and type(t) == "table" then
+  local t = persist.load(REGEN_FILE)
+  if type(t) == "table" then
     for k, v in pairs(t) do
       if type(v) == "table" then regen_cache[k] = { hp = v.hp, mana = v.mana, move = v.move, at = v.at, lvl = v.lvl } end
     end

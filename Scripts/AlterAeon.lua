@@ -59,6 +59,10 @@ pcall(require, "_dsl")
 if not __dsl then dofile("Scripts/_dsl.lua") end
 local field, number, flag = __dsl.field, __dsl.number, __dsl.flag
 
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
+
 -- KXWT handshake: enable the protocol, hide the machinery lines.
 trigger([[^kxwt_supported$]], function() send("set kxwt") end)
 gag([[^kxwt_]])
@@ -147,15 +151,12 @@ state.classes = state.classes or {}
 -- starting point beats nothing. Small dedicated file — kept out of AIPilot's map save.
 local CLASSES_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/classes.lua"
 local function save_classes()
-  local f = io.open(CLASSES_FILE, "w")
-  if not f then return end
   local parts = {}
   for name, c in pairs(state.classes) do
     local micro = c.micro and string.format(",micro={done=%d,total=%d}", c.micro.done or 0, c.micro.total or 0) or ""
     parts[#parts + 1] = string.format("[%q]={level=%d,cost=%d%s}", name, c.level or 0, c.cost or 0, micro)
   end
-  f:write("return {" .. table.concat(parts, ",") .. "}")
-  f:close()
+  persist.write(CLASSES_FILE, "return {" .. table.concat(parts, ",") .. "}")
 end
 -- Debounce: coalesce a whole table's rows into one write. Each new row cancels the pending save and
 -- re-arms a fresh 2s timer, so exactly one write fires 2s after the LAST row (was a generation counter
@@ -167,8 +168,8 @@ local function schedule_classes_save()
 end
 -- Load once at startup (not on a live pilot.reload(), where state already holds the fresh table).
 if not next(state.classes) then
-  local chunk = loadfile(CLASSES_FILE)
-  if chunk then local ok, t = pcall(chunk); if ok and type(t) == "table" then state.classes = t end end
+  local t = persist.load(CLASSES_FILE)
+  if type(t) == "table" then state.classes = t end
 end
 
 trigger([[^Class +Level +.*Exp Cost]], function() state.classes = {} end)

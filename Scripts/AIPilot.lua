@@ -121,31 +121,22 @@ local function trim_transcript()
   while #P.transcript > cfg.transcript_lines do table.remove(P.transcript, 1) end
 end
 
--- ---- map persistence (Lua serialization; no JSON needed) -----------------------------------
-local function ser(v)
-  local t = type(v)
-  if t == "number" or t == "boolean" then return tostring(v) end
-  if t == "string" then return string.format("%q", v) end
-  if t == "table" then
-    local parts = {}
-    for k, val in pairs(v) do
-      local key = (type(k) == "number") and ("[" .. k .. "]") or ("[" .. string.format("%q", k) .. "]")
-      parts[#parts + 1] = key .. "=" .. ser(val)
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-  end
-  return "nil"
-end
+-- ---- map persistence (via the shared crash-safe persist module) ----------------------------
+-- Atomic writes, a shrink-proof `.bak`, and self-healing reads all live in _persist now; the map just
+-- hands it the table. This replaced a hand-rolled io.open("w") whose non-atomic truncate once wiped a
+-- 2500+ room map (an interrupted write left explored.lua empty; the next launch loaded nothing and saved
+-- over it). Same `return {rooms=...}` on-disk format, so existing explored.lua / .bak load unchanged.
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
+local function count_map(t) local n = 0; for _ in pairs(t or {}) do n = n + 1 end; return n end
 
 local save_timer
 local function save_map()
-  local f = io.open(cfg.map_file, "w")
-  if not f then return end
   -- Persist the parsed `waypoint` list + learned number<->room maps alongside the room map, so goto's
   -- waypoint routing survives reloads and relaunches (list once, keep working).
-  f:write("return " .. ser({ rooms = P.rooms, dir_deltas = P.dir_deltas, memories = P.memories,
-                             waypoints = P.waypoints, wp_room = P.wp_room, room_wp = P.room_wp }))
-  f:close()
+  persist.save(cfg.map_file, { rooms = P.rooms, dir_deltas = P.dir_deltas, memories = P.memories,
+                               waypoints = P.waypoints, wp_room = P.wp_room, room_wp = P.room_wp })
 end
 -- Debounce map writes: each edit cancels the pending save and re-arms a fresh 2s timer, so a burst of
 -- edits coalesces into one write 2s after the last. (Was a generation counter that neutered stale
@@ -155,12 +146,12 @@ local function schedule_save()
   save_timer = after(2, save_map)
 end
 local function load_map()
-  local chunk = loadfile(cfg.map_file)
-  if not chunk then return end
-  local ok, t = pcall(chunk)
-  if ok and type(t) == "table" then
+  local t = persist.load(cfg.map_file, function(m) if echo then echo(m, "yellow") end end)
+  if type(t) == "table" and t.rooms then
     P.rooms = t.rooms or {}; P.dir_deltas = t.dir_deltas or {}; P.memories = t.memories or {}
     P.waypoints = t.waypoints or {}; P.wp_room = t.wp_room or {}; P.room_wp = t.room_wp or {}
+    if echo then echo(string.format("[map] loaded %d rooms, %d waypoints from explored.lua.",
+                       count_map(P.rooms), count_map(P.waypoints)), "cyan") end
   end
 end
 
@@ -2691,6 +2682,7 @@ _AIP_TEST = {
   path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,
   best_explore_dir = best_explore_dir, block_last_move = block_last_move, noexit_command = noexit_command,
   arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
+  save_map = save_map, load_map = load_map,
   extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,
   plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
   HOP_COST = HOP_COST, RECALL_COST = RECALL_COST, BRIDGE_MIN_SAVINGS = BRIDGE_MIN_SAVINGS,

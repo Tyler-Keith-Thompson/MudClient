@@ -62,6 +62,10 @@ state = state or {}   -- defensive: this file may load before AlterAeon.lua unde
 pcall(require, "_rx")
 if not __rx then dofile("Scripts/_rx.lua") end
 
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
+
 local cfg = {
   -- PACING IS PURELY EVENT-DRIVEN, NEVER TIMED. After we send a cast we go `busy` and send NOTHING
   -- until we see that SPELL's own success line (it LANDED) or a failure line (retry). The enemy
@@ -175,16 +179,13 @@ local WINNERS_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/autofigh
 -- File format v2: { spells = "<sorted probe set>", winners = { [name] = spell } }. v1 was a flat
 -- { [name] = spell } (no `spells`); loaded transparently below.
 local function save_winners()
-  local f = io.open(WINNERS_FILE, "w")
-  if not f then return end
   local parts = {}
   -- Only persist CURRENT probe-spell entries — never write a retired spell back (belt against a stale
   -- in-memory entry from a live reload that predates a spell swap).
   for name, spell in pairs(_AUTOFIGHT.winners) do
     if is_probe_spell(spell) then parts[#parts + 1] = string.format("[%q]=%q", name, spell) end
   end
-  f:write(string.format("return {[%q]=%q,[%q]={%s}}", "spells", probe_spellset_key(), "winners", table.concat(parts, ",")))
-  f:close()
+  persist.write(WINNERS_FILE, string.format("return {[%q]=%q,[%q]={%s}}", "spells", probe_spellset_key(), "winners", table.concat(parts, ",")))
 end
 -- Debounce writes: coalesce a burst of updates into one save 2s after the last (same trick as classes).
 local winners_save_timer
@@ -199,26 +200,23 @@ end
 -- fresh on the next fight. Entries for a still-valid spell (e.g. "scorch") are trusted as-is.
 if not _AUTOFIGHT.winners then
   _AUTOFIGHT.winners = {}
-  local chunk = loadfile and loadfile(WINNERS_FILE)
-  if chunk then
-    local ok, t = pcall(chunk)
-    if ok and type(t) == "table" then
-      local raw = (type(t.winners) == "table") and t.winners or t   -- v2 has .winners; v1 was flat
-      local recorded = t.spells                                     -- nil for a v1 file
-      local dropped = 0
-      for name, spell in pairs(raw) do
-        if is_probe_spell(spell) then _AUTOFIGHT.winners[name] = spell
-        else dropped = dropped + 1 end                              -- retired spell (e.g. "shards") → re-probe
+  local t = persist.load(WINNERS_FILE)
+  if type(t) == "table" then
+    local raw = (type(t.winners) == "table") and t.winners or t   -- v2 has .winners; v1 was flat
+    local recorded = t.spells                                     -- nil for a v1 file
+    local dropped = 0
+    for name, spell in pairs(raw) do
+      if is_probe_spell(spell) then _AUTOFIGHT.winners[name] = spell
+      else dropped = dropped + 1 end                              -- retired spell (e.g. "shards") → re-probe
+    end
+    -- Re-save (in v2 form) if we migrated: a v1 file, a changed spell set, or anything dropped.
+    if recorded ~= probe_spellset_key() or dropped > 0 then
+      if dropped > 0 and echo then
+        echo(string.format("\27[1;35m[autofight]\27[0m spell set changed → kept %d learned winner(s), "
+          .. "re-probing %d target(s) whose old spell was retired.",
+          (function() local n = 0 for _ in pairs(_AUTOFIGHT.winners) do n = n + 1 end return n end)(), dropped))
       end
-      -- Re-save (in v2 form) if we migrated: a v1 file, a changed spell set, or anything dropped.
-      if recorded ~= probe_spellset_key() or dropped > 0 then
-        if dropped > 0 and echo then
-          echo(string.format("\27[1;35m[autofight]\27[0m spell set changed → kept %d learned winner(s), "
-            .. "re-probing %d target(s) whose old spell was retired.",
-            (function() local n = 0 for _ in pairs(_AUTOFIGHT.winners) do n = n + 1 end return n end)(), dropped))
-        end
-        if after then after(0, save_winners) end                   -- rewrite the file in v2/migrated form
-      end
+      if after then after(0, save_winners) end                   -- rewrite the file in v2/migrated form
     end
   end
 end

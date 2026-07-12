@@ -39,6 +39,9 @@
 -- fallback for the bare Lua test harness).
 pcall(require, "_rx")
 if not __rx then dofile("Scripts/_rx.lua") end
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
 
 local cfg = {
   enabled = true,          -- auto-answer by default (that's the whole point); `#trivia off` to disable
@@ -79,21 +82,14 @@ local function norm(s) return (trim(s or ""):lower():gsub("%s+", " "):gsub("%.%s
 local cache = {}   -- norm(question) -> norm(correct answer text)
 
 local function load_cache()
-  local chunk = loadfile(cfg.cache_file)
-  if chunk then local ok, t = pcall(chunk); if ok and type(t) == "table" then cache = t end end
+  local t = persist.load(cfg.cache_file)
+  if type(t) == "table" then cache = t end
   local n = 0; for _ in pairs(cache) do n = n + 1 end
   S.stats.learned = n
 end
 
 local function save_cache()
-  local f = io.open(cfg.cache_file, "w")
-  if not f then return end
-  f:write("return {\n")
-  for q, a in pairs(cache) do
-    f:write(string.format("  [%q] = %q,\n", q, a))
-  end
-  f:write("}\n")
-  f:close()
+  persist.save(cfg.cache_file, cache)
 end
 
 -- ---- parsing -------------------------------------------------------------------------------------

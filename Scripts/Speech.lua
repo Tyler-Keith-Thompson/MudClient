@@ -26,6 +26,10 @@
 -- voice.backend("kokoro"|"say") · voice.forget("name") · voice.reset() · voice.emotes("on"|"off") ·
 -- voice.mute(seconds); `help(voice)`. Hot-reloadable: edit + pilot.reload().
 
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
+
 local cfg = {
   enabled = false,           -- OFF by default (voice.on() to enable); TTS paused for now
   rate = nil,                -- words/min for `say` (nil = system default; ignored by kokoro)
@@ -98,27 +102,9 @@ local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "
 local function norm(s) return (trim(s):lower():gsub("%s+", " ")) end
 
 -- ============================ persistence ============================
-local function ser(v)
-  local t = type(v)
-  if t == "number" or t == "boolean" then return tostring(v) end
-  if t == "string" then return string.format("%q", v) end
-  if t == "table" then
-    local parts = {}
-    for k, val in pairs(v) do
-      local key = (type(k) == "number") and ("[" .. k .. "]") or ("[" .. string.format("%q", k) .. "]")
-      parts[#parts + 1] = key .. "=" .. ser(val)
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-  end
-  return "nil"
-end
-
 local save_timer
 local function save_now()
-  local f = io.open(cfg.save_file, "w")
-  if not f then return end
-  f:write("return " .. ser({ speakers = S.speakers, backend = S.backend }))
-  f:close()
+  persist.save(cfg.save_file, { speakers = S.speakers, backend = S.backend })
 end
 -- Debounce writes (a chat flood assigns many voices at once): each edit re-arms a single 2s timer.
 local function schedule_save()
@@ -128,10 +114,8 @@ end
 local function load_saved()
   if S.loaded then return end
   S.loaded = true
-  local chunk = loadfile(cfg.save_file)
-  if not chunk then return end
-  local ok, t = pcall(chunk)
-  if ok and type(t) == "table" and type(t.speakers) == "table" then
+  local t = persist.load(cfg.save_file)
+  if type(t) == "table" and type(t.speakers) == "table" then
     for k, v in pairs(t.speakers) do
       if S.speakers[k] == nil then
         -- Migrate the old flat format (key -> "Samantha") to the per-backend record. Old voices were
@@ -141,7 +125,7 @@ local function load_saved()
       end
     end
   end
-  if ok and type(t) == "table" and (t.backend == "say" or t.backend == "kokoro") then
+  if type(t) == "table" and (t.backend == "say" or t.backend == "kokoro") then
     S.backend = t.backend
   end
 end
@@ -941,7 +925,7 @@ _SPEECH_TEST = {
   ensure_pools = function() say_pool = nil; kokoro_pool = nil; ensure_pools() end,
   set_pool = function(p) say_pool = p end,                       -- back-compat: sets the say pool
   set_pools = function(s, k) say_pool = s; kokoro_pool = k end,   -- nil clears (rebuild on next use)
-  ser = ser,
+  ser = function(v) return (persist.serialize(v):gsub("^return ", "")) end,
   norm = norm,
   is_muted = is_muted,
   state = S,

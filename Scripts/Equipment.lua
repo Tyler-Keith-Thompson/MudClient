@@ -35,6 +35,9 @@ state = state or {}
 -- `_`-prefixed so load("Scripts") never auto-runs it — it's consumer-pulled here.
 pcall(require, "_rx")
 if not __rx then dofile("Scripts/_rx.lua") end
+pcall(require, "_persist")
+if not __persist then dofile("Scripts/_persist.lua") end
+local persist = __persist
 local rx = __rx
 
 local cfg = {
@@ -241,28 +244,10 @@ local function fingerprint(v)
   return table.concat(p, "|")
 end
 
--- ---- persistence (Lua serialization, like AIPilot's map) -----------------------------------------
-local function ser(x)
-  local t = type(x)
-  if t == "number" or t == "boolean" then return tostring(x) end
-  if t == "string" then return string.format("%q", x) end
-  if t == "table" then
-    local parts = {}
-    for k, val in pairs(x) do
-      local key = (type(k) == "number") and ("[" .. k .. "]") or ("[" .. string.format("%q", k) .. "]")
-      parts[#parts + 1] = key .. "=" .. ser(val)
-    end
-    return "{" .. table.concat(parts, ",") .. "}"
-  end
-  return "nil"
-end
-
+-- ---- persistence (via the shared crash-safe persist module) -----------------------------------------
 local save_timer
 local function save_items()
-  local f = io.open(cfg.cache_file, "w")
-  if not f then return end
-  f:write("return " .. ser(items))
-  f:close()
+  persist.save(cfg.cache_file, items)
 end
 -- Debounced write (cancellable-timer pattern, same as AlterAeon/AIPilot): a burst of identifies coalesces
 -- into one write 2s after the last.
@@ -271,10 +256,8 @@ local function schedule_save()
   if after then save_timer = after(2, save_items) else save_items() end
 end
 local function load_items()
-  local chunk = loadfile(cfg.cache_file)
-  if not chunk then return end
-  local ok, t = pcall(chunk)
-  if ok and type(t) == "table" then
+  local t = persist.load(cfg.cache_file)
+  if type(t) == "table" then
     for k in pairs(items) do items[k] = nil end
     for k, val in pairs(t) do items[k] = val end
   end
