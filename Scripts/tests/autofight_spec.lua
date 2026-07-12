@@ -498,6 +498,27 @@ test("latched soulsteal → winner nuke only: never casts soulsteal again this f
   expect(souls):eq(1)                       -- exactly the one pre-latch attempt, never again
 end)
 
+test("soulsteal on a NON-LIVING target ('You can only soulsteal from living things') keeps nuking — no stall", function()
+  -- Regression: this line had no terminator, so the soulsteal await hung and autofight went SILENT
+  -- mid-fight (a metataur — a construct — got soul-stolen and the pilot froze until the human stepped in).
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner lightning
+  AF.lightning(); AF.on_fight(8, ENEMY)    -- ≤15% → "c soulsteal"
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  AF.soul_unstealable()                     -- "You can only soulsteal from living things." → keep nuking
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)   -- it did NOT go silent — back to nuking at once
+  -- And it must not keep trying to soulsteal an unstealable target, even as it stays in finish range.
+  for _ = 1, 3 do
+    AF.near_death(ENEMY)
+    AF.lightning(); AF.on_fight(5, ENEMY)
+    expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  end
+  local souls = 0
+  for _, cmd in ipairs(seq()) do if cmd == "c soulsteal" then souls = souls + 1 end end
+  expect(souls):eq(1)                       -- exactly the one attempt that got rejected, never again
+end)
+
 -- ---- dormant shower (kept, not probed) -----------------------------------------------------------
 -- shower is no longer a probe (scorch replaced it) but is kept DORMANT — cfg.shower_cmd + hit_shower()
 -- + its landed trigger stay in the file so a future feature (mana-aware spell switching) doesn't have

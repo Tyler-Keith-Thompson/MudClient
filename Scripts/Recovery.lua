@@ -60,6 +60,8 @@ local pick_self_cast               -- () -> decision|nil: fwd decl (choose consu
 local lifetap_hold_rest            -- () -> bool: fwd decl — a worthwhile HP->mana bleed is available or in
                                    -- flight, so choose_recovery_position must force `rest` (sleep would
                                    -- bind the wound and cancel it). Defined in the lifetap block below.
+local minion_needs_spell_heal      -- (name) -> bool: skeletal/undead (no natural regen); defined below but
+                                   -- consulted by minion_ready_target above it (skeletons heal to FULL)
 local ticks_to_target             -- (cur,max,rate,frac) -> ticks of natural regen to target; fwd-declared so
                                    -- the lifetap block (above its definition) can ask "is mana far off?"
 
@@ -436,14 +438,17 @@ end
 -- a fixed ordinal. Instead we SWEEP: cycle the ordinal 1..K; the full ones refund harmlessly and the
 -- hurt one gets healed within K casts. A refusal advances the sweep past that slot.
 
--- How full a minion must be before recovery is satisfied with it — by HP POOL SIZE, not creature type.
--- Small pools (< 100 max hp: the skeletal spiders/mage at ~40-80) must be topped to FULL, since a few
--- missing points is a big fraction of them. Big pools (the flesh beast's ~485) just respect the recovery
--- threshold `frac` — waiting for a huge bar to regen its last point is pointless. `frac` defaults to the
--- active recovery target (recovery.pct), so `recover 80` holds the flesh beast to 80% but still fulls the
--- little ones.
+-- How full a minion must be before recovery is satisfied with it.
+--   * SKELETAL / undead (no natural regen) → always FULL. We're the ONLY source of their HP, so stopping
+--     at `frac` and expecting them to regen the rest is wrong — they never will (the skeletal knight, a
+--     big pool, was left short of 100% by the pool-size rule below). Cast them all the way up.
+--   * Small pools (< 100 max hp) → FULL: a few missing points is a big fraction of them, cheap to top.
+--   * Big self-regen pools (the flesh beast's ~485) → respect the recovery threshold `frac`; waiting on
+--     casts for a huge bar's last point is pointless when it regens on its own. `frac` defaults to the
+--     active recovery target (recovery.pct), so `recover 80` holds the flesh beast to 80%.
 local MINION_FULL_BELOW = 100
 local function minion_ready_target(m, frac)
+  if minion_needs_spell_heal(m.name) then return 1.0 end   -- skeletal: no self-regen → we must full it
   if (m.maxhp or 0) < MINION_FULL_BELOW then return 1.0 end
   return frac or (recovery and recovery.pct) or READY_PCT
 end
@@ -599,7 +604,7 @@ end
 
 -- Skeletal/undead constructs the player raises: no natural regen, must be spell-healed. Matched by name
 -- ("skeletal spider", "skeletal mage", "bone ..."). Everything else is assumed to self-regen.
-local function minion_needs_spell_heal(name)
+function minion_needs_spell_heal(name)   -- populates the forward-declared local (used by minion_ready_target above)
   local low = (name or ""):lower()
   return low:find("skelet", 1, true) ~= nil or low:find("bone ", 1, true) ~= nil
 end

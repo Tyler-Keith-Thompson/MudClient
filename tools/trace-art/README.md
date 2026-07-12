@@ -53,6 +53,42 @@ python3 generate.py --backfill      # one-time, resumable mine of the WHOLE hist
 python3 generate.py --backfill --max 30
 python3 generate.py --dry-run       # detect + rank + build prompt, no image
 python3 generate.py --smoke         # render best moment from the file TAIL (ignores cursor)
+python3 generate.py --pick-badass   # print the most "badass" of the last few images (iTerm2 wallpaper)
+python3 generate.py --pick-badass --last 8
+```
+
+## iTerm2 wallpaper (while the client runs)
+`just run` sets the iTerm2 terminal background to the most **badass** of the last few gallery
+images while MudClient is running, and clears it on exit (that's why `just run` runs the app as a
+child, not `exec` — so its EXIT trap fires). Two stages:
+
+1. **pick** — `generate.py --pick-badass`: the local LM Studio model (same `TRACE_ART_LLM_BASE` /
+   `TRACE_ART_MODEL` as everything here) judges the most epic moment from each image's **text**
+   metadata — no vision model needed — with a heuristic fallback (your own steals > higher `freak` >
+   higher level) when the model is down. Prints ONLY the chosen path to stdout (diagnostics → stderr).
+2. **prep** — `prep-bg.swift <src> <out>`: iTerm2's `SetBackgroundImageFile` escape can only set the
+   file, not the scaling mode or a blend, so we bake both into a copy. It sizes the output to **this
+   terminal's pixel aspect** (queried via the `CSI 14t` escape; falls back to the main display, then
+   the source size) and draws the square art aspect-**filled** — so it never stretches regardless of
+   iTerm2's image mode — then composites a **semi-transparent black overlay** so text stays readable.
+
+Tunables (env): `MUD_ART_BG_DIM` overlay blackness `0..1` (default `0.55`) · `MUD_ART_BG_FIT`
+`cover` (fill+crop, default) or `contain` (letterbox) · `MUD_ART_BG_MAXPX` output long-side cap
+(default `2560`) · `MUD_ART_BG_LAST` how many recent images the pick considers (default `5`).
+
+It's a **no-op** outside iTerm2 (`$TERM_PROGRAM != iTerm.app`), when the gallery has no images yet,
+or when `MUD_NO_ART_BG=1`; if `prep-bg.swift` fails for any reason it falls back to the raw square
+image so the wallpaper still shows. **iTerm2 asks you to confirm** the background change (a security
+measure baked into the `SetBackgroundImageFile` escape) — expect a prompt on set and on clear.
+Resizing the window after launch can reintroduce stretch (the pre-fit aspect no longer matches) —
+re-run `just run` to re-fit.
+
+Manual one-liner (pick + prep + set):
+```
+img=$(python3 tools/trace-art/generate.py --pick-badass) && \
+  out="${TMPDIR:-/tmp}/mudbg.png" && swift tools/trace-art/prep-bg.swift "$img" "$out" && \
+  printf '\033]1337;SetBackgroundImageFile=%s\a' "$(printf %s "$out" | base64 | tr -d '\n')"
+# clear:  printf '\033]1337;SetBackgroundImageFile=\a'
 ```
 `--backfill` is a separate two-stage pass (cheap heuristic pre-filter over 277 MB,
 then LLM ranks the top candidates and writes prompts). It does **not** touch the

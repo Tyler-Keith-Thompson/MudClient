@@ -140,20 +140,41 @@ test("all_minions_ready: SMALL pools must be full, BIG pools only need frac; pla
   end)
 end)
 
-test("the ready threshold is by POOL SIZE, not creature type", function()
-  -- A big-pool construct (200 max) only needs frac even though it's skeletal…
-  with_group({ me(), minion("a bone golem", 180, 200) }, {}, function()    -- 90% of a 200 pool
-    expect(AA.all_minions_ready(0.90)):truthy()
-  end)
-  with_group({ me(), minion("a bone golem", 179, 200) }, {}, function()    -- 89.5% → below frac
+test("skeletal minions heal to FULL regardless of pool size; self-regen minions by pool size", function()
+  -- A skeletal/undead construct has NO natural regen, so a big pool must STILL be topped all the way —
+  -- stopping at frac would leave it permanently short (the reported skeletal-knight bug).
+  with_group({ me(), minion("a bone golem", 198, 200) }, {}, function()    -- 99% of a 200 pool, still not full
     expect(AA.all_minions_ready(0.90)):falsy()
   end)
-  -- …and a small-pool natural creature (<100) must be topped to FULL even though it self-regens.
+  with_group({ me(), minion("a bone golem", 200, 200) }, {}, function()    -- full → ready
+    expect(AA.all_minions_ready(0.90)):truthy()
+  end)
+  -- A big-pool SELF-REGEN creature only needs frac — it'll regen the last points on its own.
+  with_group({ me(), minion("A flesh beast", 437, 485) }, {}, function()   -- ~90.1% big pool → ready at frac
+    expect(AA.all_minions_ready(0.90)):truthy()
+  end)
+  -- A small-pool self-regen creature (<100) is still topped to FULL (a few points is a big fraction).
   with_group({ me(), minion("a fire beetle", 89, 90) }, {}, function()     -- 98.9%, not full
     expect(AA.all_minions_ready(0.90)):falsy()
   end)
   with_group({ me(), minion("a fire beetle", 90, 90) }, {}, function()
     expect(AA.all_minions_ready(0.90)):truthy()
+  end)
+end)
+
+test("a big-pool skeletal minion (the knight) is cast on PAST frac, all the way to full", function()
+  -- Repro of the reported bug: the skeletal knight (a big pool) was left short of 100% because big pools
+  -- only got `frac`. Skeletons never self-regen, so it must keep getting cast on until it's actually full.
+  local function knight(hp, mhp) return minion("A spear wielding skeletal knight", hp, mhp) end
+  with_group({ me(), knight(280, 300) }, {}, function(sent)   -- 93% — ABOVE a 90% frac, but NOT full
+    expect(AA.all_minions_ready(0.90)):falsy()                -- recovery is not "done": a skeleton must be full
+    AA.try_cast_heal()
+    expect(sent[1]):eq("c soothe knight")                     -- still actively healing it (near full → soothe)
+  end)
+  with_group({ me(), knight(300, 300) }, {}, function(sent)   -- full → nothing left to do
+    expect(AA.all_minions_ready(0.90)):truthy()
+    AA.try_cast_heal()
+    expect(#sent):eq(0)
   end)
 end)
 

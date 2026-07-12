@@ -861,6 +861,16 @@ local function hit_soul_nolatch()
   if resistS then resistS:onNext() end
 end
 
+local function hit_soul_unstealable()
+  -- "You can only soulsteal from living things." — the target is undead / a construct / an already-dead
+  -- body, so soulsteal can NEVER land on it (but it's usually still alive and fighting). Resolve the
+  -- in-flight steal so the flow doesn't DEADLOCK (this is the missing terminator that stalled autofight),
+  -- then behave exactly like a dormant latch: F.soul_latched stops us re-casting soulsteal and the loop
+  -- keeps nuking the winner until it dies normally. A visible note so it never just looks stuck.
+  say("target can't be soul-stolen (not living) — nuking it down instead")
+  if soulLatchS then soulLatchS:onNext() end   -- same "latched" outcome → keep nuking, don't re-steal
+end
+
 local function hit_dead()
   if deadS then deadS:onNext() end    -- end the fight flow (takeUntil) — no more casts
   end_fight()
@@ -1036,6 +1046,11 @@ if rx then
   -- another "steal didn't land" outcome; route it like a resist (re-nuke the winner once, then retry).
   local soulNoLatch = T([[^Your spell fails to latch on to an individual soul!$]])
   soulNoLatch:subscribe(function() hit_soul_nolatch() end)
+  -- Soulsteal on a NON-LIVING target ("You can only soulsteal from living things.") — undead, constructs,
+  -- or an already-dead body. See hit_soul_unstealable: it resolves the in-flight steal (the terminator
+  -- that was MISSING — its absence deadlocked autofight and stopped it mid-fight) and keeps nuking.
+  local soulNotLiving = T([[^You can only soulsteal from living things\.$]])
+  soulNotLiving:subscribe(function() hit_soul_unstealable() end)
 
   -- PACING failures ─ a fizzle ("You fail to cast…") or a resist retries the SAME spell (soulsteal resist
   -- re-nukes once, then retries); out-of-mana marks the spell and WAITS (no retry, no spam).
@@ -1347,7 +1362,7 @@ _AF_TEST = {
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   target_missing = engage_target_missing,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
-  soul_nolatch  = hit_soul_nolatch,
+  soul_nolatch  = hit_soul_nolatch, soul_unstealable = hit_soul_unstealable,
   near_death    = function(name) note_near_death(name) end,
   winner_key    = winner_key,
   winners       = function() return _AUTOFIGHT.winners end,

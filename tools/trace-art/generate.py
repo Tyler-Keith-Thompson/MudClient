@@ -86,7 +86,9 @@ CLAUDE_VERSION = "2023-06-01"
 
 
 def log(msg):
-    print(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
+    # stderr, not stdout — so machine-readable subcommands (e.g. --pick-badass, which prints ONLY a
+    # chosen image path to stdout) stay parseable. The launchd job captures both streams to its logfile.
+    print(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +373,78 @@ def llm_available():
     except Exception as e:
         log(f"LM Studio not reachable at {LLM_BASE} ({e})")
         return False
+
+
+# ---------------------------------------------------------------------------
+# "Most badass" pick (drives the iTerm2 wallpaper — see `just run` / tools/trace-art README)
+# ---------------------------------------------------------------------------
+def _badass_heuristic_key(rec):
+    """Fallback ranking when the LLM is unavailable: your own steals > rarer freak > higher level."""
+    m = rec.get("meta") or {}
+    return (1 if m.get("mine") else 0, m.get("freak") or 0, m.get("level") or 0)
+
+
+def pick_badass(last_n=5):
+    """Of the last `last_n` gallery images that still exist on disk, return the path to the single most
+    'badass' one — judged by the local LM Studio model from each moment's text (no vision model needed),
+    with a heuristic fallback. Returns None if there are no usable images. Prints nothing (path is the
+    caller's to emit); all diagnostics go through log() → stderr."""
+    records = []
+    try:
+        with open(GALLERY_PATH) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                p = rec.get("image_path")
+                if p and os.path.exists(p):
+                    records.append(rec)
+    except FileNotFoundError:
+        log(f"no gallery at {GALLERY_PATH}")
+        return None
+    if not records:
+        log("no gallery images on disk yet")
+        return None
+
+    recent = records[-last_n:]
+    if len(recent) == 1:
+        return recent[0].get("image_path")
+
+    pick = None
+    if llm_available():
+        listing = "\n".join(
+            "{i}: [{ev}] {detail}  (yours={mine}, freak={freak}, level={level})".format(
+                i=i, ev=r.get("event_type", "?"), detail=(r.get("detail") or "").strip(),
+                mine=bool((r.get("meta") or {}).get("mine")),
+                freak=(r.get("meta") or {}).get("freak"),
+                level=(r.get("meta") or {}).get("level"))
+            for i, r in enumerate(recent))
+        messages = [
+            {"role": "system", "content":
+                "You curate a terminal wallpaper. Pick the single MOST badass, epic, dramatic moment — "
+                "brutal kills, rare soul steals (high freak), your own feats, narrow escapes. "
+                'Reply with ONLY compact JSON: {"pick": <index integer>}.'},
+            {"role": "user", "content": "Choose the most badass moment by index:\n" + listing},
+        ]
+        obj = _llm_json(messages, max_tokens=40)
+        if obj is not None:
+            try:
+                cand = int(obj.get("pick"))
+                if 0 <= cand < len(recent):
+                    pick = cand
+            except (TypeError, ValueError):
+                pass
+        if pick is None:
+            log("LLM pick unusable; falling back to heuristic")
+
+    if pick is None:
+        pick = max(range(len(recent)), key=lambda i: _badass_heuristic_key(recent[i]))
+    log(f"picked #{pick} of last {len(recent)}: {recent[pick].get('detail','')}")
+    return recent[pick].get("image_path")
 
 
 def llm_prompt(moment, state, snippet):
@@ -776,7 +850,19 @@ def main():
     ap.add_argument("--backfill", action="store_true", help="one-time resumable pass over the WHOLE file")
     ap.add_argument("--max", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--pick-badass", action="store_true",
+                    help="print the path to the most 'badass' of the last few gallery images and exit "
+                         "(drives the iTerm2 wallpaper). Prints ONLY the path to stdout; nothing if none.")
+    ap.add_argument("--last", type=int, default=5, help="how many recent images --pick-badass considers")
     args = ap.parse_args()
+
+    # Pick-only mode: read-only over the existing gallery, no traces/cursor/ComfyUI needed.
+    if args.pick_badass:
+        path = pick_badass(args.last)
+        if not path:
+            return 1
+        sys.stdout.write(path + "\n")
+        return 0
 
     os.makedirs(IMAGES_DIR, exist_ok=True)
 
