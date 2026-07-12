@@ -6,10 +6,11 @@
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
 --   0. OPENER:           bloodmist when HP is healthy (> cfg.bloodmist_hp_min — it costs hp to cast), else
 --                        the free tarrants. (A known-winner target skips straight past the probe below.)
---   1. PROBE:            on COMBAT START, cast c icebolt (once) then c scorch (once); compare how much each
---                        dropped the enemy's health %; the bigger drop WINS. (Coarse % heuristic — fine.)
---                        If NEITHER cleared cfg.probe_enough, also try c prism once, then pick among all
---                        three — prism is rarely best, so we only pay for it when the other two flopped.
+--   1. PROBE:            on COMBAT START, cast the PRIMARY probes lightning bolt (once) then scorch (once);
+--                        compare how much each dropped the enemy's health %; the bigger drop WINS. (Coarse %
+--                        heuristic — fine.) If NEITHER primary cleared cfg.probe_enough, also try the
+--                        FALLBACK probes icebolt then prism (once each), then pick among all four — icebolt/
+--                        prism are rarely best, so we only pay for them when both primaries flopped.
 --   2. NUKE:             keep casting the WINNER until the enemy is dead.
 --   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
 --                        RESISTED, nuke once more with the winner then retry soulsteal — repeat until it
@@ -83,12 +84,13 @@ local cfg = {
   bloodmist_cmd    = "c bloodmist",  -- summons a blood demon; used as the opener when HP is healthy — it
                                      -- COSTS hp to cast, so we only lead with it above bloodmist_hp_min
   bloodmist_hp_min = 0.5,            -- only open with bloodmist when HP is ABOVE this fraction of max
-  icebolt_cmd      = "c icebolt",    -- the COLD probe/nuke (replaced shards). See PROBE_SPELLS below.
-  scorch_cmd       = "c scorch",     -- the FIRE probe/nuke
-  prism_cmd        = "c prism",      -- the 3rd probe: only TRIED when icebolt/scorch both underwhelm
-  probe_enough     = 5,              -- % health a single icebolt/scorch hit must clear to SKIP the prism
-                                     -- probe (prism is rarely best, so don't bother trying it if one of the
-                                     -- other two already hits hard)
+  lightning_cmd    = "cast 'lightning bolt'",  -- LIGHTNING; a PRIMARY probe/nuke (tried every fight, with scorch)
+  icebolt_cmd      = "c icebolt",    -- COLD; a FALLBACK probe now — only tried if lightning+scorch underwhelm
+  scorch_cmd       = "c scorch",     -- the FIRE probe/nuke (PRIMARY, tried every fight)
+  prism_cmd        = "c prism",      -- LIGHT; a FALLBACK probe — only tried when lightning+scorch both underwhelm
+  probe_enough     = 5,              -- % health a single PRIMARY (lightning/scorch) hit must clear to SKIP the
+                                     -- icebolt/prism fallback probes (they're rarely best, so don't bother
+                                     -- trying them if a primary already hits hard)
   soulsteal_cmd    = "c soulsteal",
   aoe_cmd          = "c frostflower",-- room AOE, used instead of the single-target probe/nuke on a pack
   -- DORMANT: shower was the 2nd probe before scorch. Kept (with its landed trigger + hit_shower() below)
@@ -112,10 +114,12 @@ F.phase             = F.phase or "idle"   -- coarse label for status() only; the
 F.suspended         = F.suspended or false
 F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (echo/suspend disambiguation)
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
+F.lightning_drop    = F.lightning_drop or 0
 F.icebolt_drop      = F.icebolt_drop or 0
 F.scorch_drop       = F.scorch_drop or 0
 F.prism_drop        = F.prism_drop or 0
-F.prism_tried       = F.prism_tried or false   -- did we already try the prism probe this fight?
+F.fallback_tried    = F.fallback_tried or false   -- did we already run the icebolt/prism fallback probes this fight?
+F.finish_ready      = F.finish_ready or false     -- authoritative "target near death" latch: switch to soulsteal
 -- engage() state: initiating a fight from out of combat by casting the opener (`target x` alone doesn't
 -- aggro). `engaging` is true from the first opener cast until combat actually starts; `opener_primed`
 -- tells start_fight the tarrants opener was already thrown so it skips straight to the probe.
@@ -171,7 +175,7 @@ end
 -- THE two probe spells the routine compares (cold vs fire). Single source of truth: change these and
 -- the persisted winners file MIGRATES on next load (see load below) instead of being wiped. To swap a
 -- spell later (e.g. icebolt -> some newer cold spell), edit this + its _cmd + its landed trigger.
-local PROBE_SPELLS = { "icebolt", "scorch", "prism" }
+local PROBE_SPELLS = { "lightning", "icebolt", "scorch", "prism" }
 local function is_probe_spell(s) for _, v in ipairs(PROBE_SPELLS) do if v == s then return true end end return false end
 local function probe_spellset_key() local t = {}; for _, v in ipairs(PROBE_SPELLS) do t[#t + 1] = v end; table.sort(t); return table.concat(t, ",") end
 
@@ -257,14 +261,16 @@ local NIL = {}
 local FIGHT_RESET = {
   busy          = false,
   busy_spell    = NIL,
+  lightning_drop = 0,
   icebolt_drop  = 0,
   scorch_drop   = 0,
   prism_drop    = 0,
-  prism_tried   = false,
+  fallback_tried = false,
   last_damage_spell = NIL,
   soul_latched  = false,
+  finish_ready  = false,    -- reset the near-death latch each fight
   renuke_pending = false,   -- a soulsteal resist forces exactly ONE winner-nuke before retrying it
-  probe_ptr     = NIL,      -- the fight flow's probe pointer (icebolt → scorch → decide); flow owns it
+  probe_ptr     = NIL,      -- the fight flow's probe pointer (lightning → scorch → decide, + icebolt/prism fallback); flow owns it
   suspended     = false,
   no_mana       = function() return {} end,   -- fresh per fight
   self_sent     = function() return {} end,   -- fresh per fight
@@ -393,6 +399,13 @@ local soulLatchS= safe_subject()   -- soulsteal LATCHED (dormant; keep nuking); 
 local deadS     = safe_subject()   -- the enemy is DEAD / combat ended; ends the fight flow
 local resumeS   = safe_subject()   -- the manual-input suspend window elapsed; emits ()
 local combatStartS = safe_subject() -- a fresh fight / rollover begins; emits the target start
+-- The health-bar boundary: a wire round is [spell lands][near-death line?] GA, then NEXT frame
+-- [kxwt_prompt][kxwt_fighting <newpct>] GA — the fresh % (and any near-death line that preceded it)
+-- lags the action into the FOLLOWING frame. So the fight loop decides (nuke-winner vs soulsteal) on
+-- THIS boundary, not the GA: by the time on_fight fires, both F.pct AND F.finish_ready (set by the
+-- near-death trigger, which arrives before the bar update) are settled. LOCAL + reload-safe like
+-- landedS (on_fight itself is redefined each reload, so no global wrapping is needed).
+local barS = safe_subject()
 
 -- A flow promise: __promise but STARTED synchronously at construction (in this flow, a stage is built
 -- exactly at the moment it should run — inside the previous stage's andThen — so construct == execute)
@@ -486,6 +499,18 @@ local function soulstealStep()
   end)
 end
 
+-- Resolve on the NEXT health-bar boundary (on_fight). takeUntil(deadS) so a kill mid-wait just stops (the
+-- outer takeUntil(deadS) tears the chain down — matches castStep's teardown contract).
+local function nextBar()
+  return P(function(resolve)
+    local sub
+    sub = barS:takeUntil(deadS):subscribe(function()
+      if sub then sub:unsubscribe(); sub = nil end
+      resolve()
+    end)
+  end)
+end
+
 -- STAGE 1 — the OPENER. Resolves when it LANDS (or is given up after max_tries). Skipped (resolves at
 -- once) when an engage already threw it (opener_primed) or we're AOEing a pack from the off.
 local function opener()
@@ -495,13 +520,15 @@ local function opener()
   return castStep(cmd, nil, openerS)                  -- any opener landed = success
 end
 
--- STAGE 2 — the PROBE. Resolves WITH the winning spell name. Walks a pointer icebolt → scorch → decide
--- (+ a conditional prism), crediting each spell's %-drop (via on_fight/last_damage_spell) and picking
--- the biggest. AOE, while active, overrides the actual cast with frostflower WITHOUT advancing the
--- pointer — so when the pack thins the probe resumes exactly where it paused.
+-- STAGE 2 — the PROBE. Resolves WITH the winning spell name. Walks a pointer through the PRIMARY probes
+-- lightning → scorch → decide, and — only when NEITHER primary hit hard enough — a FALLBACK tier
+-- icebolt → prism → decide, crediting each spell's %-drop (via on_fight/last_damage_spell) and picking the
+-- biggest. AOE, while active, overrides the actual cast with frostflower WITHOUT advancing the pointer — so
+-- when the pack thins the probe resumes exactly where it paused.
+local PROBE_NEXT = { lightning = "scorch", scorch = "decide", icebolt = "prism", prism = "decide" }
 local function probe()
   F.phase = "probe"
-  F.probe_ptr = "icebolt"
+  F.probe_ptr = "lightning"
   local step
   step = function()
     if aoe_active() then                              -- override cast; pointer untouched
@@ -514,21 +541,25 @@ local function probe()
     end
     local ptr = F.probe_ptr
     if ptr == "decide" then
-      -- prism gate: only bother with the 3rd probe when NEITHER icebolt nor scorch hit hard enough.
-      if not F.prism_tried and math.max(F.icebolt_drop, F.scorch_drop) < cfg.probe_enough then
-        F.prism_tried, F.probe_ptr = true, "prism"
+      -- fallback gate: only run the icebolt/prism probes when NEITHER primary (lightning, scorch) hit hard
+      -- enough — they're rarely best, so skip them when a primary already landed big.
+      if not F.fallback_tried and math.max(F.lightning_drop, F.scorch_drop) < cfg.probe_enough then
+        F.fallback_tried, F.probe_ptr = true, "icebolt"
         return step()
       end
-      -- coarse winner pick: biggest drop; ties prefer icebolt, then scorch (prism must win outright).
-      local id, sd, pd = F.icebolt_drop, F.scorch_drop, F.prism_drop or 0
-      local winner = (id >= sd and id >= pd) and "icebolt" or (sd >= pd) and "scorch" or "prism"
+      -- coarse winner pick: biggest drop; ties prefer lightning > scorch > icebolt (prism must win outright).
+      local ld, sd, id, pd = F.lightning_drop, F.scorch_drop, F.icebolt_drop, F.prism_drop or 0
+      local winner, best = "lightning", ld
+      if sd > best then winner, best = "scorch", sd end
+      if id > best then winner, best = "icebolt", id end
+      if pd > best then winner, best = "prism", pd end
       remember_winner(F.name, winner)                 -- learn it so the next fight skips the probe
       return resolved(winner)                          -- ← the probe verdict flows on as the resolve value
     end
     F.last_damage_spell = ptr
     return castStep(cfg[ptr .. "_cmd"], ptr):andThen(function(o)
       if o == "mana" then return never_p() end
-      F.probe_ptr = (ptr == "icebolt") and "scorch" or "decide"   -- landed OR gaveup advances the pointer
+      F.probe_ptr = PROBE_NEXT[ptr] or "decide"        -- landed OR gaveup advances the pointer
       return step()
     end)
   end
@@ -550,7 +581,8 @@ local function fightLoop(winner)
       end)
     end
     -- finish range → soulsteal, UNLESS a dormant steal is latched or a post-resist re-nuke is owed.
-    if winner and F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct
+    -- The near-death LATCH (F.finish_ready) is authoritative alongside the numeric pct gate.
+    if winner and (F.finish_ready or (F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct))
        and not F.soul_latched and not F.renuke_pending then
       F.phase = "soulsteal"
       return soulstealStep():andThen(function(r)
@@ -562,11 +594,11 @@ local function fightLoop(winner)
       end)
     end
     F.renuke_pending = false
-    local w = winner or "icebolt"                     -- edge: AOE cleared before any winner was learned
+    local w = winner or "lightning"                   -- edge: AOE cleared before any winner was learned
     F.last_damage_spell = w; F.phase = "nuke"
     return castStep(cfg[w .. "_cmd"], w):andThen(function(o)
       if o == "mana" then return never_p() end
-      return step()
+      return nextBar():andThen(step)   -- decide on the fresh-pct bar boundary: F.pct / finish_ready settled
     end)
   end
   return step()
@@ -712,6 +744,7 @@ local function on_fight(pct, name)
   if not F.on then return end
   local was, prev, prevname = F.fighting, F.pct, F.name
   F.pct, F.name = pct, name
+  if barS then barS:onNext() end   -- the fresh-pct boundary: fightLoop's deferred nuke decision fires here
   if not was then start_fight(pct, name); return end   -- fresh engagement (pack persists if a look set it)
   -- Target changed mid-combat WITHOUT a kxwt_fighting -1: a mob died and we rolled straight onto the
   -- next, or an add grabbed us — the server never said "not fighting", so `was` is still true, but this
@@ -730,7 +763,8 @@ local function on_fight(pct, name)
   end
   if prev and pct < prev then
     local d = prev - pct
-    if     F.last_damage_spell == "icebolt" then F.icebolt_drop = F.icebolt_drop + d
+    if     F.last_damage_spell == "lightning" then F.lightning_drop = F.lightning_drop + d
+    elseif F.last_damage_spell == "icebolt" then F.icebolt_drop = F.icebolt_drop + d
     elseif F.last_damage_spell == "scorch"  then F.scorch_drop  = F.scorch_drop + d
     elseif F.last_damage_spell == "prism"   then F.prism_drop   = F.prism_drop + d end
   end
@@ -762,6 +796,7 @@ end
 -- share one implementation. Each pushes onto the internal stream the fight FLOW subscribes to — there is
 -- no phase machine to poke; the in-flight stage's subscription (if any) reacts, and when no stage is
 -- awaiting a given event the push is simply dropped (that's the pacing guarantee).
+local function hit_lightning()   if landedS then landedS:onNext("lightning")   end end
 local function hit_icebolt()     if landedS then landedS:onNext("icebolt")     end end
 local function hit_scorch()      if landedS then landedS:onNext("scorch")      end end
 local function hit_prism()       if landedS then landedS:onNext("prism")       end end
@@ -812,6 +847,17 @@ end
 local function hit_dead()
   if deadS then deadS:onNext() end    -- end the fight flow (takeUntil) — no more casts
   end_fight()
+end
+
+-- Authoritative "soulsteal-viable now" signal: the game says OUR TARGET is near death / mortally wounded.
+-- Latch it; the fightLoop switches to soulsteal at the next frame boundary. Target-matched so another
+-- creature's near-death doesn't mis-latch (a wrong latch → a wasted, resisted soulsteal).
+local function note_near_death(name)
+  if F.fighting and F.name and name then
+    local a = (name:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+    local b = (F.name:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+    if a == b then F.finish_ready = true end
+  end
 end
 
 -- ---- manual-input suspend (step 6) ---------------------------------------------------------------
@@ -946,6 +992,7 @@ if rx then
   -- stage ever awaits "shower" — the push has no subscriber and is dropped; kept only so its wire string
   -- stays live for a future mana-aware feature.
   local spellLanded = rx.merge(
+    tag([[^A .* bolt of lightning leaps from you to ]], "lightning"),
     tag([[^You create and magically throw bolts of ice at ]], "icebolt"),
     tag([[^You throw an intense burst of .* flames at ]], "scorch"),
     tag([[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]], "prism"),
@@ -987,6 +1034,11 @@ if rx then
   combatBar:subscribe(function(c) on_fight(tonumber(c[1]), c[2]) end)
   combatEnd:subscribe(function()  on_fight_end() end)
   enemyDead:subscribe(function()  hit_dead() end)
+
+  -- Near-death latch: the game tells us OUR TARGET is nearly dead → switch to soulsteal at the next frame
+  -- boundary. Target-matched (note_near_death) so a NEARBY creature's near-death can't mis-latch.
+  trigger([[^(.+) is near death!$]], function(n) note_near_death(n) end)
+  trigger([[^(.+) is mortally wounded, and will die soon]], function(n) note_near_death(n) end)
 
   -- ENGAGE guard ─ the target simply isn't here ("Target who?") → give up initiating (retrying the opener
   -- is pointless with nothing to aggro).
@@ -1056,7 +1108,7 @@ doc(autofight.tank, { name = "autofight.tank", sig = "autofight.tank(['on'|'off'
 
 function autofight.on()
   F.on = true
-  say("armed — tarrants → icebolt/scorch probe → nuke winner → soulsteal")
+  say("armed — tarrants → lightning/scorch probe → nuke winner → soulsteal")
   -- Armed mid-fight (e.g. after a manual off): (re)start the reactive flow on the current enemy.
   if F.fighting and combatStartS then combatStartS:onNext(true) end
 end
@@ -1259,7 +1311,8 @@ _AF_TEST = {
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
-  icebolt       = hit_icebolt,     scorch       = hit_scorch,      tarrants  = hit_tarrants,
+  lightning     = hit_lightning,   icebolt      = hit_icebolt,     scorch    = hit_scorch,
+  tarrants      = hit_tarrants,
   prism         = hit_prism,       bloodmist    = hit_bloodmist,   opener_cmd = opener_cmd,
   is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS,    save_winners = save_winners,
   frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
@@ -1273,6 +1326,7 @@ _AF_TEST = {
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   target_missing = engage_target_missing,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
+  near_death    = function(name) note_near_death(name) end,
   winner_key    = winner_key,
   winners       = function() return _AUTOFIGHT.winners end,
   remember      = remember_winner,

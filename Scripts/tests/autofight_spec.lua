@@ -33,35 +33,41 @@ end
 
 -- Land the currently-in-flight spell by name (drives the resolution handler the trigger would call).
 local LAND = {
-  icebolt = AF.icebolt, scorch = AF.scorch, prism = AF.prism,
+  lightning = AF.lightning, icebolt = AF.icebolt, scorch = AF.scorch, prism = AF.prism,
   tarrants = AF.tarrants, bloodmist = AF.bloodmist, frostflower = AF.frostflower,
+}
+-- Spell → the exact wire command it casts (lightning's isn't "c lightning").
+local CMD = {
+  lightning = "cast 'lightning bolt'", icebolt = "c icebolt", scorch = "c scorch", prism = "c prism",
 }
 -- Land whichever opener a fresh fight cast (tarrants or the HP-gated bloodmist).
 local OPENER_LAND = { ["c tarrants"] = AF.tarrants, ["c bloodmist"] = AF.bloodmist }
 local function land_opener() OPENER_LAND[AF.sent[#AF.sent]]() end
 
--- Get to "c icebolt in flight": start the fight (casts the tarrants opener), land tarrants → icebolt.
-local function to_icebolt()
+-- Get to "the first (lightning) probe in flight": start the fight (casts the tarrants opener), land
+-- tarrants → the first PRIMARY probe "cast 'lightning bolt'".
+local function to_lightning()
   AF.reset()
   AF.on_fight(90, ENEMY)   -- combat start → "c tarrants"
-  AF.tarrants()            -- tarrants LANDED → "c icebolt"
+  AF.tarrants()            -- tarrants LANDED → "cast 'lightning bolt'"
 end
 
 -- Behaviour probes for learned-winner PERSISTENCE (all observable, no internal reads): start a FRESH
 -- fight vs `name` (assumes we're not currently fighting) and watch what it casts.
---   fight_probes(name)     → true if it PROBES: opener, then "c icebolt", then (on the icebolt landing)
---                            "c scorch" — the two-spell probe, i.e. no learned winner.
+--   fight_probes(name)     → true if it PROBES: opener, then the first primary "cast 'lightning bolt'",
+--                            then (on the lightning landing) "c scorch" — the two-primary probe, i.e. no
+--                            learned winner.
 --   fight_nukes(name,spell)→ true if it SKIPS the probe and NUKES `spell` off the opener: opener, then
---                            "c <spell>", and (on that landing) "c <spell>" again — a repeat nuke, which
---                            a one-shot probe cast would never do.
+--                            `spell`'s cast command, and (on that landing) the same again — a repeat nuke,
+--                            which a one-shot probe cast would never do.
 local function fight_probes(name)
   AF.on_fight(90, name); land_opener()
-  if AF.sent[#AF.sent] ~= "c icebolt" then return false end
-  AF.icebolt()
+  if AF.sent[#AF.sent] ~= CMD.lightning then return false end
+  AF.lightning()
   return AF.sent[#AF.sent] == "c scorch"
 end
 local function fight_nukes(name, spell)
-  local cmd = "c " .. spell
+  local cmd = CMD[spell]
   AF.on_fight(90, name); land_opener()
   if AF.sent[#AF.sent] ~= cmd then return false end
   LAND[spell]()
@@ -81,59 +87,67 @@ local function capture_echo(fn)
 end
 
 -- ---- (a) full fight command sequence -------------------------------------------------------------
-test("full fight: tarrants → icebolt/scorch probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
-  to_icebolt()                        -- sent: c tarrants, c icebolt
-  AF.on_fight(70, ENEMY)             -- icebolt Δ20 — a % change NEVER casts
-  AF.icebolt()                        -- icebolt LANDED → "c scorch"
+test("full fight: tarrants → lightning/scorch probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
+  to_lightning()                      -- sent: c tarrants, cast 'lightning bolt'
+  AF.on_fight(70, ENEMY)             -- lightning Δ20 — a % change NEVER casts
+  AF.lightning()                      -- lightning LANDED → "c scorch" (probe advances immediately)
   AF.on_fight(65, ENEMY)             -- scorch Δ5
-  AF.scorch()                        -- scorch LANDED → decide (icebolt wins) → nuke "c icebolt"
-  AF.on_fight(50, ENEMY); AF.icebolt()  -- landed → "c icebolt"
-  AF.on_fight(35, ENEMY); AF.icebolt()  -- landed → "c icebolt"
-  AF.on_fight(20, ENEMY); AF.icebolt()  -- landed → "c icebolt"
-  AF.on_fight(10, ENEMY); AF.icebolt()  -- landed, now ≤15% → "c soulsteal"
-  AF.resist()                        -- soulsteal RESISTED → re-nuke → "c icebolt"
-  AF.icebolt()                        -- re-nuke landed → "c soulsteal"
+  AF.scorch()                        -- scorch LANDED → decide (lightning wins, primary cleared bar) → nuke lightning
+  -- each winner-nuke now decides on the BAR boundary: land, THEN the fresh kxwt_fighting % (on_fight IS
+  -- the boundary — it fires barS itself, no separate seam needed).
+  AF.lightning(); AF.on_fight(50, ENEMY)  -- landed → bar → "cast 'lightning bolt'"
+  AF.lightning(); AF.on_fight(35, ENEMY)  -- landed → bar → "cast 'lightning bolt'"
+  AF.lightning(); AF.on_fight(20, ENEMY)  -- landed → bar → "cast 'lightning bolt'"
+  AF.lightning(); AF.on_fight(10, ENEMY)  -- landed, now ≤15% at the bar → "c soulsteal"
+  AF.resist()                        -- soulsteal RESISTED → re-nuke → "cast 'lightning bolt'"
+  AF.lightning(); AF.on_fight(10, ENEMY)   -- re-nuke landed → bar → retry "c soulsteal"
   AF.soulsteal_ok()                  -- landed → done (no further sends)
   AF.dead()                          -- enemy dead → fight ends
 
   expect_seq(seq(), {
     "c tarrants",
-    "c icebolt", "c scorch",                          -- probes
-    "c icebolt", "c icebolt", "c icebolt", "c icebolt",  -- winner nuked (65→50→35→20→10)
+    "cast 'lightning bolt'", "c scorch",              -- primary probes
+    "cast 'lightning bolt'", "cast 'lightning bolt'", "cast 'lightning bolt'", "cast 'lightning bolt'",  -- winner nuked (65→50→35→20→10)
     "c soulsteal",                                   -- finish attempt
-    "c icebolt",                                      -- re-nuke after the resist
+    "cast 'lightning bolt'",                          -- re-nuke after the resist
     "c soulsteal",                                   -- retry — lands
   })
-  -- icebolt was learned as the winner: the NEXT fight vs the same name skips the probe and nukes icebolt.
-  expect(fight_nukes(ENEMY, "icebolt")):eq(true)
+  -- lightning was learned as the winner: the NEXT fight vs the same name skips the probe and nukes lightning.
+  expect(fight_nukes(ENEMY, "lightning")):eq(true)
 end)
 
--- ---- prism: the conditional third probe (only when icebolt/scorch underwhelm) --------------------
+-- ---- the FALLBACK tier: icebolt → prism, probed only when BOTH primaries (lightning/scorch) underwhelm
 
-test("prism is SKIPPED when icebolt or scorch already clears the threshold", function()
-  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → icebolt
-  AF.on_fight(70, ENEMY); AF.icebolt()                -- icebolt Δ20 (>= probe_enough) → scorch
-  AF.on_fight(68, ENEMY); AF.scorch()                 -- scorch Δ2 → decide: 20 clears the bar → nuke, no prism
-  expect(AF.sent[#AF.sent]):eq("c icebolt")           -- decided → nuking icebolt, never probed prism
-  for _, c in ipairs(seq()) do expect(c:find("prism", 1, true) == nil):eq(true) end
+test("the fallback tier is SKIPPED when a primary (lightning or scorch) already clears the threshold", function()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → lightning
+  AF.on_fight(70, ENEMY); AF.lightning()              -- lightning Δ20 (>= probe_enough) → scorch
+  AF.on_fight(68, ENEMY); AF.scorch()                 -- scorch Δ2 → decide: 20 clears the bar → nuke, no fallback
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)         -- decided → nuking lightning, never probed icebolt/prism
+  for _, c in ipairs(seq()) do
+    expect(c:find("prism", 1, true) == nil):eq(true)
+    expect(c ~= "c icebolt"):eq(true)
+  end
 end)
 
-test("prism IS probed when both icebolt and scorch underwhelm, and can win", function()
-  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → icebolt
-  AF.on_fight(87, ENEMY); AF.icebolt()                -- icebolt Δ3 (< 5) → scorch
-  AF.on_fight(85, ENEMY); AF.scorch()                 -- scorch Δ2 (< 5) → decide: both weak → probe prism
+test("the fallback tier IS probed when both primaries underwhelm: icebolt then prism, and prism can win", function()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → lightning
+  AF.on_fight(87, ENEMY); AF.lightning()              -- lightning Δ3 (< 5) → scorch
+  AF.on_fight(85, ENEMY); AF.scorch()                 -- scorch Δ2 (< 5) → decide: both weak → fallback icebolt
+  expect(seq()[#seq()]):eq("c icebolt")               -- first fallback probe went out
+  AF.on_fight(84, ENEMY); AF.icebolt()                -- icebolt Δ1 → second fallback prism
   expect(seq()[#seq()]):eq("c prism")                 -- the prism probe went out
-  AF.on_fight(63, ENEMY); AF.prism()                  -- prism Δ22 → decide: prism wins → nuke
+  AF.on_fight(63, ENEMY); AF.prism()                  -- prism Δ21 → decide: prism wins → nuke
   expect(AF.sent[#AF.sent]):eq("c prism")             -- nuking with the prism winner
   AF.prism()                                          -- nuke repeats prism (a probe would not) → winner=prism
   expect(AF.sent[#AF.sent]):eq("c prism")
 end)
 
-test("prism loses ties: a weak-but-tied icebolt still beats prism after the probe", function()
+test("prism loses ties: a weak-but-tied icebolt (fallback) still beats prism after the probe", function()
   AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()
-  AF.on_fight(86, ENEMY); AF.icebolt()                -- icebolt Δ4
-  AF.on_fight(85, ENEMY); AF.scorch()                 -- scorch Δ1 → probe prism (max 4 < 5)
-  AF.on_fight(81, ENEMY); AF.prism()                  -- prism Δ4 — ties icebolt → icebolt keeps it → nuke icebolt
+  AF.on_fight(88, ENEMY); AF.lightning()              -- lightning Δ2 (< 5) → scorch
+  AF.on_fight(87, ENEMY); AF.scorch()                 -- scorch Δ1 (< 5) → fallback icebolt
+  AF.on_fight(83, ENEMY); AF.icebolt()                -- icebolt Δ4 → prism
+  AF.on_fight(79, ENEMY); AF.prism()                  -- prism Δ4 — ties icebolt → icebolt keeps it → nuke icebolt
   expect(AF.sent[#AF.sent]):eq("c icebolt")
   AF.icebolt()                                        -- nuke repeats icebolt (not prism)
   expect(AF.sent[#AF.sent]):eq("c icebolt")
@@ -143,7 +157,7 @@ test("a known prism winner skips the probe and nukes prism straight away", funct
   AF.reset()
   AF.remember("a Gnomian guard", "prism")             -- learned from a prior fight (prism is a valid winner now)
   expect(fight_nukes(ENEMY, "prism")):eq(true)        -- opener → known winner → nuke prism, no probe
-  for _, cmd in ipairs(seq()) do expect(cmd == "c icebolt"):eq(false) end
+  for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end   -- the first probe cast never appears
 end)
 
 -- ---- bloodmist opener (only when HP can spare it) ------------------------------------------------
@@ -169,48 +183,48 @@ test("the fight opens with bloodmist when HP is healthy, then hands off to the p
   state.hp, state.maxhp = 80, 100
   AF.reset(); AF.on_fight(90, ENEMY)                  -- opener chosen by HP → bloodmist
   expect(seq()[#seq()]):eq("c bloodmist")
-  AF.bloodmist()                                      -- opener LANDED → icebolt probe
-  expect(seq()[#seq()]):eq("c icebolt")
+  AF.bloodmist()                                      -- opener LANDED → lightning probe
+  expect(seq()[#seq()]):eq(CMD.lightning)
   state.hp, state.maxhp = sh, smh
 end)
 
 -- ---- (b) THE SPAM GUARD: a flood of health-% updates while busy sends nothing --------------------
 test("spam guard: a burst of health-% updates in flight sends ZERO commands", function()
-  to_icebolt()                        -- "c icebolt" in flight (busy)
+  to_lightning()                      -- "cast 'lightning bolt'" in flight (busy)
   local n = #AF.sent
   -- the real health bar from the spam log: many kxwt_fighting ticks per second.
   for _, p in ipairs({ 88, 72, 71, 68, 67, 58, 57, 46, 45, 35, 24, 15, 8, 5, 3 }) do
     AF.on_fight(p, ENEMY)
   end
   expect(#AF.sent):eq(n)             -- NOT ONE extra command — this was the bug
-  AF.icebolt()                        -- only the actual LANDED line releases the next cast
+  AF.lightning()                      -- only the actual LANDED line releases the next cast
   expect(#AF.sent):eq(n + 1)
   expect(AF.sent[n + 1]):eq("c scorch")
 end)
 
 -- ---- (c) pacing + retry --------------------------------------------------------------------------
 test("pacing: a non-resolution line sends nothing; the landed line advances", function()
-  to_icebolt()
+  to_lightning()
   local n = #AF.sent
   AF.on_fight(80, ENEMY)             -- a % tick: nothing
   expect(#AF.sent):eq(n)
-  AF.icebolt()                        -- icebolt landed → next cast
+  AF.lightning()                      -- lightning landed → next cast
   expect(#AF.sent):eq(n + 1)
   expect(AF.sent[n + 1]):eq("c scorch")
 end)
 
 test("a FAILED cast retries the SAME spell (not the next)", function()
-  to_icebolt()                        -- "c icebolt" in flight
+  to_lightning()                      -- "cast 'lightning bolt'" in flight
   local n = #AF.sent
-  AF.fail()                          -- "You fail to cast the spell 'icebolt'." → retry
+  AF.fail()                          -- a cast-fail line → retry
   expect(#AF.sent):eq(n + 1)
-  expect(AF.sent[n + 1]):eq("c icebolt")   -- same spell
+  expect(AF.sent[n + 1]):eq(CMD.lightning)   -- same spell
 end)
 
 test("an opener that keeps failing is given up after max_tries — never stalls", function()
   AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants"
   for _ = 1, AF.cfg.max_tries do AF.fail() end   -- fizzles max_tries times (each after a fail line)
-  expect(AF.sent[#AF.sent]):eq("c icebolt")       -- gave up on tarrants, moved on
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)     -- gave up on tarrants, moved on to the first probe
 end)
 
 -- ---- (d) manual-input suspend --------------------------------------------------------------------
@@ -218,41 +232,41 @@ test("suspend: a user-typed command halts sends until the resume window", functi
   AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants" (busy)
   expect(#AF.sent):eq(1)
   AF.on_input("kick guard")                -- the USER intervenes → suspends
-  AF.tarrants()                            -- tarrants lands, but suspended → no "c icebolt"
+  AF.tarrants()                            -- tarrants lands, but suspended → no probe cast
   expect(#AF.sent):eq(1)
   AF.expire_resume()                       -- resume window elapses → routine resumes
   expect(#AF.sent):eq(2)
-  expect(AF.sent[2]):eq("c icebolt")
+  expect(AF.sent[2]):eq(CMD.lightning)
 end)
 
 test("suspend: our OWN sends echoing back do NOT suspend", function()
   AF.reset(); AF.on_fight(90, ENEMY)       -- we send "c tarrants"
   AF.on_input("c tarrants")                -- its echo returns through the input observer
-  AF.tarrants()                            -- opener lands → NOT suspended → advances to "c icebolt"
+  AF.tarrants()                            -- opener lands → NOT suspended → advances to the probe
   expect(#AF.sent):eq(2)
-  expect(AF.sent[2]):eq("c icebolt")
+  expect(AF.sent[2]):eq(CMD.lightning)
 end)
 
 -- ---- (e) winner pick: bigger %-drop wins ---------------------------------------------------------
-test("winner pick: icebolt drops more than scorch → nuke with icebolt", function()
-  to_icebolt()
-  AF.on_fight(70, ENEMY); AF.icebolt()      -- icebolt Δ20 → "c scorch"
+test("winner pick: lightning drops more than scorch → nuke with lightning", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()    -- lightning Δ20 → "c scorch"
   AF.on_fight(65, ENEMY); AF.scorch()      -- scorch Δ5  → decide → nuke
-  expect(AF.sent[#AF.sent]):eq("c icebolt")
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
 end)
 
-test("winner pick: scorch drops more than icebolt → nuke with scorch", function()
-  to_icebolt()
-  AF.on_fight(85, ENEMY); AF.icebolt()      -- icebolt Δ5  → "c scorch"
+test("winner pick: scorch drops more than lightning → nuke with scorch", function()
+  to_lightning()
+  AF.on_fight(85, ENEMY); AF.lightning()    -- lightning Δ5  → "c scorch"
   AF.on_fight(60, ENEMY); AF.scorch()      -- scorch Δ25 → decide → nuke
   expect(AF.sent[#AF.sent]):eq("c scorch")
 end)
 
 -- ---- (f) robustness ------------------------------------------------------------------------------
 test("out-of-mana stops that spell (no spam) and waits", function()
-  to_icebolt()
-  AF.on_fight(70, ENEMY); AF.icebolt()      -- → "c scorch"
-  AF.on_fight(60, ENEMY); AF.scorch()      -- → winner icebolt → nuke "c icebolt"
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()    -- → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- → winner lightning → nuke
   local n = #AF.sent
   AF.mana()                                -- "You don't have enough mana." → no retry, no spam
   expect(#AF.sent):eq(n)                   -- nothing more sent
@@ -261,10 +275,10 @@ test("out-of-mana stops that spell (no spam) and waits", function()
 end)
 
 test("soulsteal success line ends the routine cleanly", function()
-  to_icebolt()
-  AF.on_fight(70, ENEMY); AF.icebolt()
-  AF.on_fight(60, ENEMY); AF.scorch()      -- winner icebolt → nuke
-  AF.on_fight(8, ENEMY);  AF.icebolt()      -- landed, ≤15% → "c soulsteal"
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner lightning → nuke
+  AF.lightning(); AF.on_fight(8, ENEMY)    -- landed → bar drops to ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   local n = #AF.sent
   AF.soulsteal_ok()
@@ -292,8 +306,8 @@ test("engage: target + opener, retry opener on fail, then hand off to the probe 
   expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
   AF.tarrants()                                        -- opener LANDED → wait for combat to start (no send)
   expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
-  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → "c icebolt"
-  expect(AF.sent[#AF.sent]):eq("c icebolt")
+  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → first probe
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
   AF.on_fight_end()                                    -- fight over → on_dead fires once
   expect(dead):eq(true)
   expect(failed):eq(nil)
@@ -364,16 +378,16 @@ end)
 -- casting we'd stall. So we keep nuking the winner (never re-casting soulsteal) until the latch fires.
 
 test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it fires", function()
-  to_icebolt()
-  AF.on_fight(70, ENEMY); AF.icebolt()      -- → "c scorch"
-  AF.on_fight(60, ENEMY); AF.scorch()      -- winner icebolt → nuke "c icebolt"
-  AF.on_fight(8, ENEMY);  AF.icebolt()      -- landed, ≤15% → "c soulsteal"
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()    -- → "c scorch"
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner lightning → nuke
+  AF.lightning(); AF.on_fight(8, ENEMY)    -- landed → bar drops to ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
   AF.soul_latched()                        -- LATCHED (not stolen) → resume nuking the winner
-  expect(AF.sent[#AF.sent]):eq("c icebolt") -- nuked again, NOT soulsteal
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning) -- nuked again, NOT soulsteal
   -- Still ≤15%, but the latch guard keeps us nuking — never flips back to soulsteal.
-  AF.on_fight(5, ENEMY); AF.icebolt()
-  expect(AF.sent[#AF.sent]):eq("c icebolt")
+  AF.lightning(); AF.on_fight(5, ENEMY)
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
   -- The latch finally activates: the steal success line, then DEAD, ends the fight cleanly.
   AF.soulsteal_ok()
   local n = #AF.sent
@@ -382,17 +396,80 @@ test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it
 end)
 
 test("a fresh fight clears the soul_latched flag", function()
-  to_icebolt()
-  AF.on_fight(70, ENEMY); AF.icebolt()       -- → scorch
-  AF.on_fight(60, ENEMY); AF.scorch()       -- decide → winner icebolt → nuke
-  AF.on_fight(8, ENEMY);  AF.icebolt()       -- ≤15% → soulsteal
-  AF.soul_latched()                          -- latched → back to nuking icebolt
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()     -- → scorch
+  AF.on_fight(60, ENEMY); AF.scorch()       -- decide → winner lightning → nuke
+  AF.lightning(); AF.on_fight(8, ENEMY)     -- landed → bar drops to ≤15% → soulsteal
+  AF.soul_latched()                          -- latched → back to nuking lightning
   AF.dead()                                  -- fight ends
-  -- NEW fight vs the same name (winner icebolt is now known): reaching ≤15% must SOULSTEAL again — a
+  -- NEW fight vs the same name (winner lightning is now known): reaching ≤15% must SOULSTEAL again — a
   -- latch left set would keep nuking and never cast it, so the soulsteal send proves the flag cleared.
-  AF.on_fight(90, ENEMY); AF.tarrants()      -- known winner → nuke "c icebolt"
-  AF.on_fight(8, ENEMY);  AF.icebolt()       -- ≤15% → "c soulsteal"
+  AF.on_fight(90, ENEMY); AF.tarrants()      -- known winner → nuke lightning
+  AF.lightning(); AF.on_fight(8, ENEMY)      -- landed → bar drops to ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
+end)
+
+-- ---- finish timing: decide on the BAR boundary, not mid-frame (the off-by-one soulsteal fix) --------
+-- The wire ordering is [spell lands][near-death line?] GA, THEN the next frame [kxwt_prompt]
+-- [kxwt_fighting <newpct>] GA — the fresh % (and any near-death line ahead of it) lags the action into
+-- the FOLLOWING frame. So the finish decision (nuke-winner vs switch-to-soulsteal) must run on THAT
+-- kxwt_fighting update (on_fight — which IS the boundary, via barS), not synchronously on the raw landed
+-- line (which read F.pct one hit stale → fired ONE extra winner-nuke before switching). An authoritative
+-- near-death latch (F.finish_ready) switches even before the numeric pct crosses.
+
+test("finish timing: a bar crossing ≤ soulsteal_pct on the FRESH pct switches to soulsteal — no extra nuke", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()    -- probe → c scorch
+  AF.on_fight(60, ENEMY); AF.scorch()      -- decide → winner lightning → nuke#1 (pct still 60)
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  -- The winning hit LANDS; the fresh kxwt_fighting % arrives in the FOLLOWING frame, crossing the
+  -- threshold. Historically the decision ran on the landed line itself (stale pct) → one extra winner-nuke.
+  AF.lightning()                            -- nuke#1 lands (decision is deferred to the bar update)
+  local n = #AF.sent
+  AF.on_fight(12, ENEMY)                    -- the fresh % arrives → crosses ≤ soulsteal_pct → decide now
+  expect(#AF.sent):eq(n + 1)                -- exactly ONE cast, not an extra winner-nuke first
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+end)
+
+test("finish timing: an authoritative near-death latch switches to soulsteal even while pct is still > threshold", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- decide → winner lightning → nuke#1
+  AF.lightning()                            -- nuke#1 lands (decision deferred)
+  AF.near_death(ENEMY)                      -- the near-death line precedes the bar update, per the wire order
+  local n = #AF.sent
+  AF.on_fight(40, ENEMY)                    -- fresh pct still WELL above soulsteal_pct (15) — the boundary
+  expect(#AF.sent):eq(n + 1)                -- the latch is authoritative → soulsteal despite pct 40
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+end)
+
+test("near-death from ANOTHER creature does not mis-latch (target-matched)", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner lightning → nuke#1
+  AF.lightning()                            -- nuke#1 lands
+  AF.near_death("a passing bystander")     -- a DIFFERENT creature's near-death → must NOT latch
+  AF.on_fight(40, ENEMY)                    -- the boundary → still above threshold, still nuking
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+end)
+
+test("latched soulsteal → winner nuke only: never casts soulsteal again this fight, even if near-death re-fires", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner lightning → nuke#1
+  AF.lightning(); AF.on_fight(8, ENEMY)    -- landed → bar drops to ≤15% → "c soulsteal"
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  AF.soul_latched()                         -- LATCH → from here on it's winner-nuke ONLY
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  -- Re-asserting near death / finish-ready must NOT bring soulsteal back this fight.
+  for _ = 1, 3 do
+    AF.near_death(ENEMY)
+    AF.lightning(); AF.on_fight(5, ENEMY)
+    expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  end
+  local souls = 0
+  for _, cmd in ipairs(seq()) do if cmd == "c soulsteal" then souls = souls + 1 end end
+  expect(souls):eq(1)                       -- exactly the one pre-latch attempt, never again
 end)
 
 -- ---- dormant shower (kept, not probed) -----------------------------------------------------------
@@ -407,10 +484,10 @@ test("shower's command string is retained in cfg", function()
 end)
 
 test("shower is never cast during a fight (dormant, not in the routine)", function()
-  to_icebolt()
-  AF.on_fight(70, ENEMY); AF.icebolt()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
   AF.on_fight(60, ENEMY); AF.scorch()      -- decide → nuke
-  AF.on_fight(8, ENEMY);  AF.icebolt()      -- ≤15% → soulsteal
+  AF.lightning(); AF.on_fight(8, ENEMY)    -- landed → bar drops to ≤15% → soulsteal
   AF.soulsteal_ok(); AF.dead()
   for _, cmd in ipairs(seq()) do
     expect(cmd == AF.cfg.shower_cmd):eq(false)   -- "c shower" never appears
@@ -418,12 +495,12 @@ test("shower is never cast during a fight (dormant, not in the routine)", functi
 end)
 
 test("the dormant shower handler no-ops (a stray shower line can't advance the routine)", function()
-  to_icebolt()                              -- "c icebolt" in flight (busy on icebolt)
+  to_lightning()                            -- "cast 'lightning bolt'" in flight (busy on lightning)
   local n = #AF.sent
   AF.shower()                              -- the dead trigger fires → succeed('shower') → guard no-ops
   expect(#AF.sent):eq(n)                   -- nothing sent
-  -- The routine is still waiting on the REAL icebolt landed line — it alone advances to scorch.
-  AF.icebolt()
+  -- The routine is still waiting on the REAL lightning landed line — it alone advances to scorch.
+  AF.lightning()
   expect(#AF.sent):eq(n + 1)
   expect(AF.sent[n + 1]):eq("c scorch")
 end)
@@ -447,8 +524,8 @@ test("winner_key normalizes: lowercased, leading article stripped", function()
 end)
 
 test("a decided probe is remembered under the target's name", function()
-  to_icebolt()                              -- reset() clears the winners table (hermetic)
-  AF.on_fight(85, ENEMY); AF.icebolt()      -- icebolt Δ5  → scorch
+  to_lightning()                            -- reset() clears the winners table (hermetic)
+  AF.on_fight(85, ENEMY); AF.lightning()    -- lightning Δ5  → scorch
   AF.on_fight(60, ENEMY); AF.scorch()      -- scorch Δ25 → decide → scorch wins → learned + nuke scorch
   expect(AF.sent[#AF.sent]):eq("c scorch")
   AF.on_fight_end()
@@ -459,7 +536,7 @@ test("a known winner SKIPS the probe: opener → straight to the known nuke", fu
   AF.reset()                               -- clears memory…
   AF.winners()["gnomian guard"] = "scorch" -- …then seed a known winner (driving the scenario)
   expect(fight_nukes(ENEMY, "scorch")):eq(true)   -- opener → straight to the known nuke, no probe
-  for _, cmd in ipairs(seq()) do expect(cmd == "c icebolt"):eq(false) end   -- probe spells never appear
+  for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end   -- the first probe cast never appears
 end)
 
 test("engage() with a known winner goes opener → known nuke (no probe)", function()
@@ -493,16 +570,16 @@ end)
 -- holds ONLY the new fight: exactly the fresh opener. (#==1 distinguishes a real restart from "no
 -- restart, stale scorch still the last thing sent".)
 test("a NAME change mid-combat (no -1) starts the routine over on the new enemy", function()
-  to_icebolt(); AF.state().aoe_mode = "off"     -- c tarrants, c icebolt; probing ENEMY (single-target)
-  AF.on_fight(70, ENEMY); AF.icebolt()          -- → c scorch (mid-probe, scorch in flight)
+  to_lightning(); AF.state().aoe_mode = "off"   -- c tarrants, cast 'lightning bolt'; probing ENEMY (single-target)
+  AF.on_fight(70, ENEMY); AF.lightning()        -- → c scorch (mid-probe, scorch in flight)
   AF.on_fight(72, "a crimson topaz")           -- DIFFERENT target, no -1 → start over
   expect(AF.sent[1]):eq("c tarrants")          -- fresh opener on the new enemy
   expect(#AF.sent):eq(1)
 end)
 
 test("a health bar that jumps UP (same name, new instance) also starts over", function()
-  to_icebolt(); AF.state().aoe_mode = "off"     -- c tarrants, c icebolt
-  AF.on_fight(70, ENEMY); AF.icebolt()          -- c scorch
+  to_lightning(); AF.state().aoe_mode = "off"   -- c tarrants, cast 'lightning bolt'
+  AF.on_fight(70, ENEMY); AF.lightning()        -- c scorch
   AF.on_fight(6, ENEMY)                         -- previous ape nearly dead
   AF.on_fight(78, ENEMY)                        -- same name but 6→78 jump ⇒ new instance → start over
   expect(AF.sent[1]):eq("c tarrants")
@@ -510,7 +587,7 @@ test("a health bar that jumps UP (same name, new instance) also starts over", fu
 end)
 
 test("ordinary health drops (and a tiny up-bounce) never restart or cast", function()
-  to_icebolt()                                  -- c tarrants, c icebolt
+  to_lightning()                                -- c tarrants, cast 'lightning bolt'
   local before = #AF.sent
   AF.on_fight(70, ENEMY)                        -- drop
   AF.on_fight(50, ENEMY)                        -- drop
@@ -519,8 +596,8 @@ test("ordinary health drops (and a tiny up-bounce) never restart or cast", funct
 end)
 
 -- ---- AOE / frostflower (crowd handling) ----------------------------------------------------------
--- AOE is observed by what the routine casts: "c frostflower" (AOE) vs a single-target "c icebolt"/
--- "c scorch". The in-flight cast has to LAND before the next one goes out, so we land it to read the
+-- AOE is observed by what the routine casts: "c frostflower" (AOE) vs a single-target "cast 'lightning
+-- bolt'"/"c scorch". The in-flight cast has to LAND before the next one goes out, so we land it to read the
 -- routine's current choice.
 
 test("aoe 'on' frostflowers immediately — skips the single-target opener and probe", function()
@@ -533,7 +610,7 @@ end)
 
 test("aoe 'auto': a rollover ALONE does not AOE — AOE is driven by the crowd COUNT", function()
   AF.reset()                                   -- aoe_mode auto, no crowd counted
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → c icebolt
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fresh single: c tarrants → cast 'lightning bolt'
   AF.on_fight(72, "a crimson topaz")           -- rollover, no count set → still single-target
   expect(AF.sent[1]):eq("c tarrants")          -- fresh single-target opener on the new enemy (not frostflower)
   expect(#AF.sent):eq(1)
@@ -541,9 +618,9 @@ end)
 
 test("aoe 'auto': crowd whittled to the last one drops back to single target (the exit fix)", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → c icebolt in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → cast 'lightning bolt' in flight
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- look: 2 hostiles → AOE
-  AF.icebolt()                                 -- in-flight icebolt lands → next cast is AOE
+  AF.lightning()                               -- in-flight lightning lands → next cast is AOE
   expect(AF.sent[#AF.sent]):eq("c frostflower")
   AF.mdeath("A dire ape")                      -- one dies → estimate below pack size
   AF.frostflower()                             -- in-flight frostflower lands → back to single target
@@ -553,18 +630,18 @@ end)
 
 test("aoe 'off' never AOEs, even with a pack-sized crowd count", function()
   AF.reset(); AF.state().aoe_mode = "off"
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → c icebolt in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
-  AF.icebolt()                                 -- lands → single-target next (forced off regardless of count)
+  AF.lightning()                               -- lands → single-target next (forced off regardless of count)
   expect(AF.sent[#AF.sent]):eq("c scorch")
   for _, cmd in ipairs(seq()) do expect(cmd == "c frostflower"):eq(false) end
 end)
 
 test("crowd count + AOE reset when combat truly ends (kxwt -1)", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → c icebolt in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
-  AF.icebolt()                                 -- lands → AOE cast (confirms we're packed)
+  AF.lightning()                               -- lands → AOE cast (confirms we're packed)
   expect(AF.sent[#AF.sent]):eq("c frostflower")
   AF.on_fight_end()                            -- -1 → combat over → crowd estimate zeroed
   AF.on_fight(90, ENEMY)                       -- a NEW fight → single-target opener (pack was reset)
@@ -574,10 +651,10 @@ end)
 
 test("a hostile mdeath below the count doesn't go negative; our minion's death doesn't count", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → c icebolt in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
   state.name, state.group = "Vaelith", { { name = "A skeletal spider" } }
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- est 2 → AOE
-  AF.icebolt()                                 -- lands → frostflower
+  AF.lightning()                               -- lands → frostflower
   expect(AF.sent[#AF.sent]):eq("c frostflower")
   AF.mdeath("A skeletal spider")               -- our minion — NOT counted → still a pack
   AF.frostflower()                             -- lands → still AOE
@@ -590,9 +667,9 @@ end)
 
 test("aoe 'auto': a look showing multiple enemies fighting flips to AOE WITHOUT a kill", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- single-target: c tarrants → c icebolt in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- single-target: c tarrants → cast 'lightning bolt' in flight
   AF.room_fighter("A dire ape")                -- look: ONE engaged hostile — not a pack
-  AF.icebolt()                                 -- lands → single-target (one enemy isn't a pack)
+  AF.lightning()                               -- lands → single-target (one enemy isn't a pack)
   expect(AF.sent[#AF.sent]):eq("c scorch")
   AF.room_fighter("A dire ape")                -- a SECOND engaged hostile (own line) → pack!
   AF.scorch()                                  -- the in-flight scorch lands → next cast is AOE
@@ -601,12 +678,12 @@ end)
 
 test("room crowd-count ignores our own minions/self — only hostiles count", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → c icebolt in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
   state.name  = "Vaelith"
   state.group = { { name = "A skeletal spider" }, { name = "Vaelith" } }
   AF.room_fighter("A skeletal spider")         -- our minion fighting a mob — not an enemy
   AF.room_fighter("Vaelith")                   -- ourself — not an enemy
-  AF.icebolt()                                 -- lands → single-target (nothing hostile counted)
+  AF.lightning()                               -- lands → single-target (nothing hostile counted)
   expect(AF.sent[#AF.sent]):eq("c scorch")
   AF.room_fighter("A dire ape")                -- two real hostiles
   AF.room_fighter("A crimson topaz")
@@ -676,10 +753,13 @@ test("autofight.winner sets/overrides the learned attack for a target and persis
   AF.on_fight_end()
 end)
 
-test("autofight.winner rejects a spell that isn't icebolt/scorch (memory untouched)", function()
+test("autofight.winner rejects a spell that isn't lightning/icebolt/scorch/prism (memory untouched)", function()
   AF.reset()
-  autofight.winner("a rat", "frostflower")
+  autofight.winner("a rat", "frostflower")       -- not a probe spell → rejected
   expect(fight_probes("a rat")):eq(true)         -- rejected → still probes (nothing learned)
+  AF.on_fight_end()
+  autofight.winner("a rat", "lightning")         -- lightning IS a valid winner now → accepted
+  expect(fight_nukes("a rat", "lightning")):eq(true)
   AF.on_fight_end()
 end)
 
@@ -689,7 +769,7 @@ test("autofight.winner switches the CURRENT fight immediately (stops casting the
   autofight.winner("a wraith", "scorch")                 -- override mid-fight (before the probe)
   AF.tarrants()                                          -- opener lands → nukes the override, never probes
   expect(AF.sent[#AF.sent]):eq("c scorch")
-  for _, cmd in ipairs(seq()) do expect(cmd == "c icebolt"):eq(false) end   -- never probed icebolt
+  for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end   -- never probed
   AF.on_fight_end()
 end)
 
@@ -712,8 +792,8 @@ test("a RETIRED spell left in the winners table is ignored → the target re-pro
   AF.winners()["gnomian guard"] = "shards"          -- a pre-swap entry the migration would drop / ignore
   AF.on_fight(90, ENEMY)                             -- fresh fight vs "a Gnomian guard"
   AF.tarrants()                                      -- opener landed → 'shards' isn't current → PROBE, don't nuke
-  expect(AF.sent[#AF.sent]):eq("c icebolt")
-  AF.icebolt()                                       -- probe continues → scorch (confirms probing, not nuking)
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  AF.lightning()                                     -- probe continues → scorch (confirms probing, not nuking)
   expect(AF.sent[#AF.sent]):eq("c scorch")
   AF.on_fight_end()
 end)
@@ -724,9 +804,9 @@ test("a still-valid winner (scorch) is trusted after the swap — skips the prob
   AF.on_fight(90, ENEMY)
   AF.tarrants()                                      -- opener → straight to the known nuke, no probe
   expect(AF.sent[#AF.sent]):eq("c scorch")
-  AF.scorch()                                        -- nuke repeats scorch (a probe would go icebolt→scorch)
+  AF.scorch()                                        -- nuke repeats scorch (a probe would go lightning→scorch)
   expect(AF.sent[#AF.sent]):eq("c scorch")
-  for _, cmd in ipairs(seq()) do expect(cmd == "c icebolt"):eq(false) end
+  for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end
   AF.on_fight_end()
 end)
 
