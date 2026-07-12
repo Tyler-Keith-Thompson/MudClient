@@ -468,7 +468,11 @@ local function castStep(cmd, wantSpell, landStream)
 end
 
 -- soulstealStep() — cast soulsteal (suspend-gated) and await its distinct outcomes: "pulled" (soul taken,
--- enemy about to die), "latched" (dormant — keep nuking), "resisted" (re-nuke once then retry), "mana".
+-- enemy about to die), "latched" (dormant — keep nuking), "resisted" (re-nuke once then retry), "fizzled"
+-- (the CAST itself failed — re-cast the steal at once, no nuke), "mana". Awaiting failedS too is what
+-- stops a soulsteal fizzle ("You fail to cast the spell 'soulsteal'.") from DEADLOCKING the flow: without
+-- it the fizzle matched no outcome and this promise hung until the enemy happened to die — autofight went
+-- silent mid-fight (the "why'd it stop" bug).
 local function soulstealStep()
   return P(function(resolve, _, onCancel)
     local sub, rsub, cancelled = nil, nil, false
@@ -482,6 +486,7 @@ local function soulstealStep()
         soulPullS:map(function() return "pulled" end),
         soulLatchS:map(function() return "latched" end),
         resistS:map(function() return "resisted" end),
+        failedS:map(function() return "fizzled" end),
         manaS:map(function() return "mana" end)
       ):takeUntil(deadS):subscribe(function(ev) fin(ev) end)
       af_send(cfg.soulsteal_cmd)
@@ -589,6 +594,9 @@ local function fightLoop(winner)
         if r == "pulled"  then return resolved() end            -- soul taken → stop; DEAD ends the fight
         if r == "latched" then F.soul_latched = true; return step() end   -- keep nuking the winner
         if r == "resisted" then F.renuke_pending = true; return step() end -- one nuke, then retry steal
+        if r == "fizzled" then return step() end   -- the CAST fizzled (skill roll) → re-cast soulsteal at
+                                                   -- once; no interleaved nuke (don't waste the round and
+                                                   -- risk a minion killing it before the soul is grabbed)
         if r == "mana"    then return never_p() end
         return step()
       end)
@@ -844,6 +852,15 @@ local function hit_soul_latched()
   if soulLatchS then soulLatchS:onNext() end
 end
 
+local function hit_soul_nolatch()
+  -- Soulsteal cast, but the soul wouldn't individuate: "Your spell fails to latch on to an individual
+  -- soul!" — a distinct failure from a resist or a fizzle, but the steal DIDN'T land either way. Route it
+  -- through the SAME "resisted" outcome (re-nuke the winner once, then retry the steal). The interleaved
+  -- winner nukes guarantee the enemy still dies even if the soul never individuates, so there's no
+  -- no-damage spin. Soulsteal only runs in combat, so this always feeds the in-flight soulsteal await.
+  if resistS then resistS:onNext() end
+end
+
 local function hit_dead()
   if deadS then deadS:onNext() end    -- end the fight flow (takeUntil) — no more casts
   end_fight()
@@ -1015,6 +1032,10 @@ if rx then
   local soulLatched = T([[^You magically latch onto .+ soul and wait for .+ to weaken]])
   soulPulled:subscribe(function()  hit_soulsteal_ok() end)
   soulLatched:subscribe(function() hit_soul_latched() end)
+  -- Soulsteal that couldn't individuate a soul ("Your spell fails to latch on to an individual soul!") —
+  -- another "steal didn't land" outcome; route it like a resist (re-nuke the winner once, then retry).
+  local soulNoLatch = T([[^Your spell fails to latch on to an individual soul!$]])
+  soulNoLatch:subscribe(function() hit_soul_nolatch() end)
 
   -- PACING failures ─ a fizzle ("You fail to cast…") or a resist retries the SAME spell (soulsteal resist
   -- re-nukes once, then retries); out-of-mana marks the spell and WAITS (no retry, no spam).
@@ -1326,6 +1347,7 @@ _AF_TEST = {
   resist        = hit_resist,      mana         = hit_mana,        fail      = hit_fail,
   target_missing = engage_target_missing,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
+  soul_nolatch  = hit_soul_nolatch,
   near_death    = function(name) note_near_death(name) end,
   winner_key    = winner_key,
   winners       = function() return _AUTOFIGHT.winners end,

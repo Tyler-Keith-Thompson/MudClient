@@ -5,7 +5,12 @@
 // the game via `#claude <text>`) plus a path to a context bundle to this
 // server. The server, loaded by a running `claude` session as a channel,
 // PUSHES that feedback into the session as a channel notification so Claude
-// sees it and acts on it. One-way only (game -> Claude); no reply path.
+// sees it and acts on it.
+//
+// The reply leg (Claude -> game) is the `report_to_game` MCP tool: Claude calls
+// it when a dispatched task is done, and it writes a JSON reply file into
+// ~/Documents/MudClient/claude-inbox/ that the MudClient app watches and echoes
+// in-game as a `down-left claude` line. See writeReport / REPORT_TOOL below.
 //
 // stdout is the MCP stdio transport channel -- NEVER write logs to stdout.
 // All logging goes to stderr.
@@ -15,9 +20,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 
 const log = (...args) => console.error('[muddispatch]', ...args);
 
@@ -70,6 +80,12 @@ const INSTRUCTIONS = [
   'act on the feedback -- typically by spawning a subagent to implement or',
   'investigate the requested change in this repo. Treat the feedback as a task to',
   'work, not a message to reply to.',
+  '',
+  'When you finish acting on a muddispatch task (or reach a point the player should',
+  'know about), CALL the `report_to_game` tool with a one-line result and, if there',
+  'is a command the player should run next (e.g. `#reload`, `just run`, `just',
+  'build`), pass it as `action`. That reply is echoed back INTO the game as a',
+  '`↙ claude` line so the player sees the outcome without leaving the MUD.',
 ].join(' ');
 
 const mcp = new Server(
@@ -77,10 +93,83 @@ const mcp = new Server(
   {
     capabilities: {
       experimental: { 'claude/channel': {} },
+      tools: {},
     },
     instructions: INSTRUCTIONS,
   }
 );
+
+// ---- reply path: report_to_game tool -> file inbox ---------------------------
+//
+// The one-way channel above pushes game feedback INTO Claude. This is the return
+// leg: Claude calls `report_to_game`, we drop a small JSON file into the inbox
+// folder, and the MudClient app (watching that folder) echoes it in-game as a
+// `↙ claude` line, then archives the file so it renders once.
+
+function inboxDir() {
+  if (process.env.MUD_DISPATCH_INBOX) return process.env.MUD_DISPATCH_INBOX;
+  return path.join(os.homedir(), 'Documents', 'MudClient', 'claude-inbox');
+}
+
+// Write a reply file for the game to pick up. Returns the written path.
+export function writeReport({ message, action }) {
+  const dir = inboxDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { fs.chmodSync(dir, 0o700); } catch { /* best effort */ }
+  const ts = new Date().toISOString();
+  const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.json`;
+  const file = path.join(dir, name);
+  const body = JSON.stringify({ message: String(message), action: action ? String(action) : '', ts });
+  fs.writeFileSync(file, body, { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch { /* best effort */ }
+  return file;
+}
+
+const REPORT_TOOL = {
+  name: 'report_to_game',
+  description:
+    'Report a result BACK into the MudClient game after acting on a muddispatch task. ' +
+    'The message is echoed in-game as a `↙ claude` line; if `action` is set it is shown ' +
+    'as a suggested command for the player to run next (e.g. "#reload", "just run").',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      message: {
+        type: 'string',
+        description: 'The human-readable, one-line result/summary to show the player in-game.',
+      },
+      action: {
+        type: 'string',
+        description:
+          'Optional single command the player should run next, e.g. "#reload", "just run", "just build".',
+      },
+    },
+    required: ['message'],
+    additionalProperties: false,
+  },
+};
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [REPORT_TOOL] }));
+
+mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  if (req.params.name !== 'report_to_game') {
+    return { isError: true, content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }] };
+  }
+  const args = req.params.arguments || {};
+  const message = typeof args.message === 'string' ? args.message.trim() : '';
+  if (!message) {
+    return { isError: true, content: [{ type: 'text', text: 'report_to_game: `message` is required' }] };
+  }
+  const action = typeof args.action === 'string' ? args.action.trim() : '';
+  try {
+    const file = writeReport({ message, action });
+    log(`report_to_game wrote reply to ${file}` + (action ? ` (action: ${action})` : ''));
+    return { content: [{ type: 'text', text: `Reported to game. Reply written to ${file}` }] };
+  } catch (err) {
+    log('report_to_game failed:', err && err.message);
+    return { isError: true, content: [{ type: 'text', text: `report_to_game failed: ${err && err.message}` }] };
+  }
+});
 
 // Sanitize meta keys: string->string only, keys restricted to [A-Za-z0-9_].
 function cleanMeta(meta) {
@@ -209,14 +298,21 @@ async function main() {
   });
 }
 
-main().catch((err) => {
-  log('fatal:', err && err.stack ? err.stack : err);
-  process.exit(1);
-});
+// Only boot the server (bind HTTP, connect stdio transport) when run directly as
+// the entry script — importing this module (e.g. from report-to-game.test.mjs to
+// reuse writeReport) must NOT start listeners or hold the event loop open.
+const isMain = import.meta.url === pathToFileURL(process.argv[1] || '').href;
 
-process.on('uncaughtException', (err) => {
-  log('uncaughtException:', err && err.stack ? err.stack : err);
-});
-process.on('unhandledRejection', (err) => {
-  log('unhandledRejection:', err && (err.stack || err.message || err));
-});
+if (isMain) {
+  main().catch((err) => {
+    log('fatal:', err && err.stack ? err.stack : err);
+    process.exit(1);
+  });
+
+  process.on('uncaughtException', (err) => {
+    log('uncaughtException:', err && err.stack ? err.stack : err);
+  });
+  process.on('unhandledRejection', (err) => {
+    log('unhandledRejection:', err && (err.stack || err.message || err));
+  });
+}

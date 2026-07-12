@@ -6,7 +6,10 @@ a path to a context bundle to this server. The server, loaded by a running
 `claude` session as a channel, **pushes** that feedback into the session as a
 channel notification so Claude sees it and acts on it.
 
-One-way only: game → Claude. There is no reply path.
+The reply leg (Claude → game) rides a **file inbox**: after acting on a dispatch,
+Claude calls the `report_to_game` MCP tool, which drops a small JSON file the
+MudClient app watches and echoes in-game as a `↙ claude` line (mirroring the
+outbound `↗ claude`). See "Reply path" below.
 
 ## Launching
 
@@ -25,6 +28,47 @@ When a dispatch arrives Claude sees:
 
 ```
 <channel source="muddispatch" bundle="/path/to/dispatch.md" dir="/path">FEEDBACK</channel>
+```
+
+## Reply path (`report_to_game` → file inbox → game)
+
+Claude reports a result back INTO the game with the MCP tool `report_to_game`
+(exposed by this server over the same stdio connection):
+
+```
+report_to_game({ message: string, action?: string })
+```
+
+- `message` (required) — the human-readable, one-line result/summary to show the
+  player.
+- `action` (optional) — a single command the player should run next, e.g.
+  `#reload`, `just run`, `just build`.
+
+On call the server ensures the inbox dir exists (mode `0700`) and writes a file
+`<epoch-ms>-<rand>.json` (mode `0600`):
+
+```json
+{ "message": "reload done, corpse timing fixed", "action": "#reload", "ts": "2026-07-12T00:00:00.000Z" }
+```
+
+`action` is always present (empty string when none). `ts` is ISO-8601.
+
+Inbox path: `~/Documents/MudClient/claude-inbox/` (override with
+`MUD_DISPATCH_INBOX`). The MudClient app watches this folder, echoes each reply
+in-game as:
+
+```
+↙ claude  <message>
+          → run <action>      # only when action is non-empty
+```
+
+then moves the file into `claude-inbox/archive/` so it renders exactly once. All
+writes go to **stderr** logs only (never stdout — that's the MCP channel).
+
+Harness (no live MCP client needed):
+
+```
+node tools/dispatch/report-to-game.test.mjs   # asserts the reply file is written + parses
 ```
 
 ## Token
@@ -46,6 +90,7 @@ is the MCP stdio channel).
 | `MUD_DISPATCH_PORT`   | `8788`        | HTTP listener port               |
 | `MUD_DISPATCH_HOST`   | `127.0.0.1`   | Bind address (loopback only)     |
 | `MUD_DISPATCH_TOKEN`  | _(unset)_     | Override the token file          |
+| `MUD_DISPATCH_INBOX`  | `~/Documents/MudClient/claude-inbox` | Reply-file inbox dir |
 
 ## HTTP API
 

@@ -85,6 +85,91 @@ test("already sleeping: a deeper 'sleep' target never re-sends, but a 'rest' dec
   with_posture(90, 50, 90, "sleeping", function(sent) choose(); expect(sent[1]):eq("rest") end)
 end)
 
+-- ---- lag-tolerant posture debounce: never double-send a posture while it's unconfirmed -----------
+-- Regression for the reported "it sent sleep twice" bug. Under server command-lag the kxwt_position
+-- update can take SECONDS to report the new posture (a real trace showed ~4s to "sleeping"). The debounce
+-- must suppress a repeat of the SAME command until position reaches its target depth (confirmed) OR a
+-- generous self-heal window elapses — NOT a fixed 3s window that is shorter than real lag.
+local send_posture = _AA_TEST.send_posture
+local WAIT         = _AA_TEST.POSTURE_CONFIRM_WAIT
+
+-- Run body with os.time controllable and send captured. fn(sent, advance(dt), setpos(p)).
+local function with_clock(position, fn)
+  local saved_state, saved_send, saved_time = state, send, os.time
+  local sent, clock = {}, 1000
+  state = { position = position }
+  _G.send = function(c) sent[#sent + 1] = c end
+  os.time = function() return clock end
+  _AA_TEST.reset_posture()
+  local ok, err = pcall(function()
+    fn(sent, function(dt) clock = clock + dt end, function(p) state.position = p end)
+  end)
+  state, _G.send, os.time = saved_state, saved_send, saved_time
+  if not ok then error(err, 2) end
+end
+
+test("does NOT re-send `sleep` while position hasn't caught up, even past the old 3s window", function()
+  with_clock("standing", function(sent, advance)
+    send_posture("sleep")                 -- fires: still standing (unconfirmed)
+    expect(#sent):eq(1); expect(sent[1]):eq("sleep")
+    advance(4); send_posture("sleep")     -- ~4s later (past the old 3s), still not asleep → suppressed
+    expect(#sent):eq(1)                   -- the double-sleep bug: this used to fire a SECOND `sleep`
+  end)
+end)
+
+test("self-heals: resends the posture once the confirm window lapses with no confirmation", function()
+  with_clock("standing", function(sent, advance)
+    send_posture("sleep")
+    advance(WAIT + 1); send_posture("sleep")   -- window lapsed, still standing → resend (dropped command)
+    expect(#sent):eq(2)
+  end)
+end)
+
+test("posture_confirmed is true once position reaches the command's target depth", function()
+  with_clock("standing", function(sent, advance, setpos)
+    send_posture("sleep")
+    expect(_AA_TEST.posture_confirmed("sleep")):falsy()   -- still standing → unconfirmed
+    setpos("sleeping")
+    expect(_AA_TEST.posture_confirmed("sleep")):truthy()  -- depth 2 reached → confirmed
+    -- `stand` is only confirmed by actually standing (a deeper posture is NOT a stood-up state)
+    setpos("resting"); expect(_AA_TEST.posture_confirmed("stand")):falsy()
+    setpos("standing"); expect(_AA_TEST.posture_confirmed("stand")):truthy()
+  end)
+end)
+
+test("a DIFFERENT posture command always goes through immediately (escalate / downgrade)", function()
+  with_clock("standing", function(sent)
+    send_posture("rest"); send_posture("sleep")   -- different command → not debounced
+    expect(#sent):eq(2); expect(sent[2]):eq("sleep")
+  end)
+end)
+
+test("chooser under command-lag does not issue `sleep` twice (the reported double-sleep bug)", function()
+  local saved_state, saved_send, saved_time = state, send, os.time
+  local sent, clock = {}, 3000
+  state = { hp = 40, maxhp = 100, mana = 40, maxmana = 100, stam = 40, maxstam = 100, position = "standing" }
+  _G.send = function(c) sent[#sent + 1] = c end
+  os.time = function() return clock end
+  _AA_TEST.reset_posture()
+  _AA_TEST.choose_recovery_position()            -- everything low, standing → sends sleep
+  clock = clock + 4                              -- 4s of command lag (past the old 3s window)
+  _AA_TEST.choose_recovery_position()            -- position STILL "standing" → must NOT resend
+  state, _G.send, os.time = saved_state, saved_send, saved_time
+  expect(#sent):eq(1); expect(sent[1]):eq("sleep")
+end)
+
+test("note_already_posture corrects position + clears the debounce so the chooser stops re-issuing", function()
+  with_clock("standing", function(sent, advance)
+    send_posture("sleep")                          -- pretend we just (redundantly) commanded sleep
+    _AA_TEST.note_already_posture("sleeping")      -- game: "You are already sound asleep!"
+    expect(state.position):eq("sleeping")          -- position corrected authoritatively
+    expect(_AA_TEST.posture_confirmed("sleep")):truthy()   -- now confirmed → chooser won't re-issue
+    -- debounce cleared: a fresh sleep after correction is not eaten by the old command's timestamp
+    advance(1); send_posture("rest")
+    expect(sent[#sent]):eq("rest")
+  end)
+end)
+
 -- ---- awaiting a spellup: a buff that dropped while asleep holds us awake for the recast -----------
 
 test("a dropped buff (await_spell) holds recovery at rest instead of re-sleeping", function()

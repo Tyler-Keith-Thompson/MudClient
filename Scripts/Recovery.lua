@@ -88,18 +88,52 @@ end
 -- A posture command (rest/sleep/stand) takes a moment to reflect in state.position (the kxwt_position
 -- update lags the command by a round-trip). choose_recovery_position runs on EVERY prompt, so without a
 -- guard it re-sends the same command many times before position catches up — the "You are already
--- resting." spam. Debounce: never repeat the SAME posture command within this window; a DIFFERENT command
--- (escalating rest->sleep, or standing) always goes through immediately. Self-heals if a command didn't
--- take (after the window, it may resend).
-local POSTURE_REPEAT = 3
+-- resting." spam. Debounce: never repeat the SAME posture command while a prior one is still UNCONFIRMED
+-- (state.position hasn't reached the depth that command drives toward) and within a generous self-heal
+-- window. A DIFFERENT command (escalating rest->sleep, or standing) always goes through immediately.
+--
+-- Why confirmation-aware and not a fixed short window: the kxwt_position update can lag a posture command
+-- by SECONDS under server command-lag (a real trace showed ~4s to report "sleeping"). The old fixed 3s
+-- window was SHORTER than that lag, so a second `sleep` fired before the first was confirmed → the game
+-- replied "You are already sound asleep!". We now suppress the repeat until the position actually reaches
+-- the target depth (confirmed — at which point the chooser's own depth guards stop calling us anyway), OR
+-- POSTURE_CONFIRM_WAIT elapses so a genuinely dropped command still self-heals with a resend.
+local POSTURE_CONFIRM_WAIT = 8   -- self-heal window; comfortably exceeds real command lag (~4s observed)
+-- The recovery depth a posture command drives toward: `stand` -> standing (0), `rest` -> resting (1),
+-- `sleep` -> sleeping (2). A command is "confirmed" once state.position has reached that depth (>= for the
+-- recovery postures; == 0 for stand, since a deeper posture is NOT a confirmed stand).
+local POSTURE_TARGET_DEPTH = { stand = 0, rest = 1, sleep = 2 }
 local last_posture_cmd, last_posture_at = nil, 0
+local function posture_confirmed(cmd)
+  local target = POSTURE_TARGET_DEPTH[cmd]
+  if target == nil then return false end
+  local d = recovery_depth(state.position)
+  if target == 0 then return d == 0 end   -- `stand`: only standing counts (asleep/resting is not stood up)
+  return d >= target
+end
 local function send_posture(cmd)
   local now = os.time()
-  if cmd == last_posture_cmd and (now - last_posture_at) < POSTURE_REPEAT then return end
+  -- Suppress a repeat of the SAME command only while it's still unconfirmed AND within the self-heal
+  -- window. Once the server confirms the posture (position reached the target depth) the chooser stops
+  -- asking for it; once the window lapses we allow a resend so a dropped command self-heals.
+  if cmd == last_posture_cmd and not posture_confirmed(cmd)
+     and (now - last_posture_at) < POSTURE_CONFIRM_WAIT then
+    return
+  end
   last_posture_cmd, last_posture_at = cmd, now
   send(cmd)
 end
 local function reset_posture() last_posture_cmd, last_posture_at = nil, 0 end
+
+-- The game told us we're ALREADY in a posture we (redundantly) commanded ("You are already sound asleep!"
+-- / "You are already resting." / "You are already standing." — exact wire wordings verified against real
+-- player traces). Authoritatively correct state.position to what the game just told us, so the chooser's
+-- depth guards immediately stop re-issuing, and clear the debounce so the next genuinely-different posture
+-- goes straight through. Pure + exposed via _AA_TEST; the gag triggers below just call it and return false.
+local function note_already_posture(posn)
+  state.position = posn
+  last_posture_cmd, last_posture_at = nil, 0
+end
 
 -- Decision narration during recovery — the user asked to SEE what recover decided and why. Two
 -- independent DEDUPED channels (posture + cast): a decision announces once and stays quiet until it
@@ -931,7 +965,9 @@ for _k, _v in pairs({ ready = ready, pct = pct, READY_PCT = READY_PCT,
              minion_heal = minion_heal, try_cast_heal = try_cast_heal,
              MINION_HEAL_MANA_MIN = MINION_HEAL_MANA_MIN,
              minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal,
-             reset_posture = reset_posture,
+             reset_posture = reset_posture, send_posture = send_posture,
+             posture_confirmed = posture_confirmed, note_already_posture = note_already_posture,
+             POSTURE_CONFIRM_WAIT = POSTURE_CONFIRM_WAIT,
              ticks_to_target = ticks_to_target, cast_beats_waiting = cast_beats_waiting,
              self_cast_wanted = self_cast_wanted, try_self_cast = try_self_cast,
              lifetap_wanted = lifetap_wanted, lifetap_amount = lifetap_amount,
@@ -1051,6 +1087,25 @@ trigger([[^You find yourself feeling sharp and ready to take on anything!$]], fu
 end)
 trigger([[^You no longer feel sharp and at your best\.$]], function()
   state.sharp = false; if state.recover then ensure_regen() end
+end)
+
+-- Belt-and-suspenders for the posture debounce: if a rare command-lag race still slips a redundant
+-- posture command through, the game answers "You are already ...". GAG the line (return false) so the spam
+-- never reaches the user, and authoritatively correct state.position (note_already_posture) so the chooser
+-- stops re-issuing at once. Only while recovering — a manually-typed redundant posture outside recovery
+-- should still print normally. Exact wire wordings verified against ~/Documents/MudClient/human-traces.jsonl
+-- ("You are already resting." / "You are already standing." / "You are already sound asleep!").
+trigger([[^You are already sound asleep!$]], function()
+  if not state.recover then return end
+  note_already_posture("sleeping"); return false
+end)
+trigger([[^You are already resting\.$]], function()
+  if not state.recover then return end
+  note_already_posture("resting"); return false
+end)
+trigger([[^You are already standing\.$]], function()
+  if not state.recover then return end
+  note_already_posture("standing"); return false
 end)
 
 -- begin_recovery(frac) — start resting/sleeping toward the `frac` threshold. Shared by the typed

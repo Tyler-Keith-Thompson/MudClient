@@ -10,11 +10,17 @@ down server logs and exits non-fatally instead of crashing the cron.
 
 Stdlib only (urllib/json/re) so there is nothing to `pip install` at 4 AM.
 
+Selection + prompt-writing are done by a LOCAL LLM (LM Studio, OpenAI-compatible,
+no key) using the AlterAeon fine-tuned Qwen model; a heuristic is the fallback.
+The Qwen "thinking" mode is disabled (empty <think></think> assistant prefill +
+enable_thinking:false) because it empties structured output.
+
 Usage:
-    generate.py                      # normal incremental run
+    generate.py                      # normal incremental run (forward-only from cursor)
     generate.py --init               # (re)initialize cursor to current EOF, do nothing else
     generate.py --smoke              # ignore cursor; render the single best moment from the file TAIL
-    generate.py --max N              # cap images this run (default 3)
+    generate.py --backfill           # one-time, resumable pass over the WHOLE file to seed the gallery
+    generate.py --max N              # cap images this run (default 3 daily, 25 backfill)
     generate.py --dry-run            # detect + build prompt, but do NOT call ComfyUI
 """
 
@@ -62,8 +68,19 @@ WIDTH = 1024
 HEIGHT = 1024
 
 DEFAULT_MAX = 3
+BACKFILL_MAX = 25
+# Cap how many top heuristic candidates we hand the LLM to re-rank (bounds LLM cost).
+LLM_RANK_POOL = 60
 
-CLAUDE_MODEL = os.environ.get("TRACE_ART_MODEL", "claude-sonnet-5")
+# Character whose own brag-channel moments are weighted highest.
+PLAYER = os.environ.get("TRACE_ART_PLAYER", "Vaelith")
+
+# --- Local LLM (LM Studio, OpenAI-compatible) : PRIMARY selection + prompts ---
+LLM_BASE = os.environ.get("TRACE_ART_LLM_BASE", "http://localhost:1234/v1")
+LLM_MODEL = os.environ.get("TRACE_ART_MODEL", "qwen3.6-27b-alteraeon-mlx")
+
+# --- Anthropic (optional SECONDARY, only if ANTHROPIC_API_KEY is set) ---
+CLAUDE_MODEL = os.environ.get("TRACE_ART_ANTHROPIC_MODEL", "claude-sonnet-5")
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 CLAUDE_VERSION = "2023-06-01"
 
@@ -100,7 +117,20 @@ def init_cursor():
 # ---------------------------------------------------------------------------
 # Iconic-moment detection
 # ---------------------------------------------------------------------------
-# Higher score == more iconic. Regexes were confirmed against real trace lines.
+# High-value (notify) brag-channel events (regexes confirmed against real traces).
+#   (notify) <name> stole a level <N> soul from <mob> (freak <M>!)
+#   (notify) <name> landed a heinous backstab on <mob> for <N> damage, freak <M>!
+NOTIFY_SOULSTEAL = re.compile(
+    r"\(notify\)\s+(\w+)\s+stole a level\s+(\d+)\s+soul from\s+(.+?)\s+\(freak\s+(\d+)!?\)")
+NOTIFY_BACKSTAB = re.compile(
+    r"\(notify\)\s+(\w+)\s+landed a heinous backstab on\s+(.+?)\s+for\s+([\d,]+)\s+damage,\s+freak\s+(\d+)!?")
+NOTIFY_ANY = re.compile(r"\(notify\)\s+([^\n<]{4,140})")
+# First-person soulsteal captures (necromancer soul magic).
+FP_SOULSTEAL = re.compile(
+    r"separate soul from body,[^\n]*?pull\s+(.+?)'s essence into a\s+(\w+)\s+soulstone", re.I)
+FP_LATCH = re.compile(r"latch onto\s+(.+?)'s soul", re.I)
+
+# Higher priority == more iconic. Regexes confirmed against real trace lines.
 SIGNALS = [
     # (name, priority, regex)  -- regex captures optional context in group(1)
     ("player_death", 100, re.compile(r"You have been (?:killed|slain)|You are DEAD|You feel your spirit|Your soul (?:leaves|departs)|You have died at the hands", re.I)),
@@ -114,6 +144,47 @@ SIGNALS = [
 
 # Big-kill bonus: parse the experience reward so boss kills rank above trash.
 EXP_RE = re.compile(r"You (?:receive|gain)\s+([\d,]+)\s+experience")
+
+
+def detect_notify(out, text):
+    """Detect the high-value (notify)/soulsteal signals. Returns a moment dict or None.
+    (notify) lines are the global brag channel; the PLAYER's own soulsteals, ordered
+    by 'freak' rarity, are weighted highest."""
+    def is_me(name):
+        return name.lower() == PLAYER.lower()
+
+    m = NOTIFY_SOULSTEAL.search(out)
+    if m:
+        who, lvl, mob, freak = m.group(1), int(m.group(2)), m.group(3).strip(), int(m.group(4))
+        mine = is_me(who)
+        # Player's own: base 200 + freak (freak64 -> 264, dominates everything).
+        # Other players' brags still high but below the player's own.
+        score = (200 if mine else 120) + freak
+        return {"score": score, "event": "soulsteal", "detail": f"{who} stole a level {lvl} soul from {mob} (freak {freak}!)",
+                "meta": {"player": who, "mine": mine, "mob": mob, "level": lvl, "freak": freak}}
+
+    m = NOTIFY_BACKSTAB.search(out)
+    if m:
+        who, mob, dmg, freak = m.group(1), m.group(2).strip(), int(m.group(3).replace(",", "")), int(m.group(4))
+        mine = is_me(who)
+        score = (160 if mine else 110) + freak
+        return {"score": score, "event": "backstab", "detail": f"{who} landed a heinous backstab on {mob} for {dmg} damage (freak {freak}!)",
+                "meta": {"player": who, "mine": mine, "mob": mob, "damage": dmg, "freak": freak}}
+
+    m = FP_SOULSTEAL.search(out)
+    if m:
+        mob, color = m.group(1).strip(), m.group(2)
+        return {"score": 108, "event": "soulsteal", "detail": f"{PLAYER} tore {mob}'s soul into a {color} soulstone",
+                "meta": {"player": PLAYER, "mine": True, "mob": mob, "freak": 0}}
+
+    m = NOTIFY_ANY.search(out)
+    if m:
+        line = m.group(1).strip()
+        who = line.split()[0] if line.split() else ""
+        mine = is_me(who)
+        return {"score": (105 if mine else 100), "event": "notify", "detail": line[:120],
+                "meta": {"player": who, "mine": mine}}
+    return None
 
 
 def strip_ansi(s):
@@ -155,20 +226,24 @@ def parse_state(text):
 
 
 def score_moment(text):
-    """Return (score, event_type, detail) for the strongest signal, or None."""
+    """Return the strongest moment as a dict {score,event,detail,meta} or None."""
     out = strip_ansi(output_section(text))
-    best = None
+    # (notify)/soulsteal signals dominate and carry their own meta.
+    notify = detect_notify(out, text)
+    best = notify
     for name, prio, rx in SIGNALS:
         m = rx.search(out)
         if not m:
             continue
         score = prio
         detail = (m.group(1).strip() if m.groups() and m.group(1) else m.group(0).strip())
+        meta = {}
         if name == "kill":
             expm = EXP_RE.search(out)
             exp = int(expm.group(1).replace(",", "")) if expm else 0
             # scale big kills up; 5000xp -> +25, caps so it can't beat a death
             score = prio + min(exp / 200.0, 45)
+            meta = {"mob": detail, "exp": exp}
             detail = f"{detail} (+{exp} xp)" if exp else detail
         if name == "near_death_escape":
             hp = re.search(r"hp:\s*(\d+)\s*/\s*(\d+)", text)
@@ -176,8 +251,8 @@ def score_moment(text):
                 score = prio + 10  # true low-hp escape
             else:
                 score = 15         # routine flee, low signal
-        if best is None or score > best[0]:
-            best = (score, name, detail)
+        if best is None or score > best["score"]:
+            best = {"score": score, "event": name, "detail": detail, "meta": meta}
     return best
 
 
@@ -222,6 +297,120 @@ def template_prompt(event_type, detail, state, snippet):
     return f"{scene}. {STYLE}."
 
 
+# ---------------------------------------------------------------------------
+# Local LLM (LM Studio, OpenAI-compatible) -- PRIMARY selection + prompts.
+# Qwen3.6 "thinking" mode empties structured output; we disable it two ways:
+#   1. append an empty "<think></think>" assistant prefill (model continues after it)
+#   2. pass chat_template_kwargs.enable_thinking=false
+# and we VALIDATE returned JSON, retrying once on garbage.
+# ---------------------------------------------------------------------------
+def _llm_chat(messages, max_tokens=400, temperature=0.4):
+    """POST to LM Studio /chat/completions with thinking disabled. Returns content str or None."""
+    body = json.dumps({
+        "model": LLM_MODEL,
+        "messages": messages + [{"role": "assistant", "content": "<think></think>"}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }).encode()
+    req = urllib.request.Request(f"{LLM_BASE}/chat/completions", data=body, method="POST",
+                                 headers={"content-type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            data = json.load(r)
+        msg = data["choices"][0]["message"]
+        return (msg.get("content") or "").strip()
+    except Exception as e:
+        log(f"LLM call failed ({e})")
+        return None
+
+
+def _extract_json(text):
+    """Pull the first JSON object/array out of a model reply, or None."""
+    if not text:
+        return None
+    text = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.M).strip()
+    for open_c, close_c in (("{", "}"), ("[", "]")):
+        i = text.find(open_c)
+        j = text.rfind(close_c)
+        if i >= 0 and j > i:
+            try:
+                return json.loads(text[i:j + 1])
+            except ValueError:
+                continue
+    return None
+
+
+def _llm_json(messages, max_tokens=600):
+    """Call the LLM expecting JSON; validate + retry once on malformed output."""
+    for attempt in range(2):
+        content = _llm_chat(messages, max_tokens=max_tokens,
+                            temperature=0.0 if attempt else 0.2)
+        obj = _extract_json(content)
+        if obj is not None:
+            return obj
+        if attempt == 0:
+            log("LLM returned malformed JSON; retrying once")
+    return None
+
+
+def llm_available():
+    try:
+        urllib.request.urlopen(f"{LLM_BASE}/models", timeout=5).read()
+        return True
+    except Exception as e:
+        log(f"LM Studio not reachable at {LLM_BASE} ({e})")
+        return False
+
+
+def llm_prompt(moment, state, snippet):
+    """Ask the local fine-tuned model to write a cinematic Z-Image prompt. str or None."""
+    sys_prompt = (
+        "You write vivid image-generation prompts for a fantasy art model, and you "
+        "know the MUD Alter Aeon. Given an iconic moment, output ONE prompt of 40-70 "
+        "words describing it as an epic scene: subject, action, setting, mood, lighting. "
+        "End with a comma-separated style-tag list. No preamble, no quotes, no game "
+        "jargon or UI text. Reply with ONLY a JSON object: {\"prompt\": \"...\"}."
+    )
+    user_msg = (
+        f"Event: {moment['event']}\nWhat happened: {moment['detail']}\n"
+        f"Character: {state.get('name', PLAYER)} in {state.get('room','?')} "
+        f"({state.get('area','')})\nRaw game log:\n{snippet[-1000:]}"
+    )
+    obj = _llm_json([{"role": "system", "content": sys_prompt},
+                     {"role": "user", "content": user_msg}], max_tokens=400)
+    if isinstance(obj, dict) and isinstance(obj.get("prompt"), str) and len(obj["prompt"]) > 15:
+        return obj["prompt"].strip()
+    return None
+
+
+def llm_rank(candidates):
+    """Ask the LLM to score each candidate 0-100 by how iconic/cool it is.
+    Returns {index: score} or None. Player's own soulsteals should score highest."""
+    lines = []
+    for i, c in enumerate(candidates):
+        lines.append(f"{i}: [{c['event']}] {c['detail'][:120]}")
+    sys_prompt = (
+        f"You are curating an art gallery of the coolest moments from {PLAYER}'s Alter "
+        "Aeon adventures. Rate each moment 0-100 by how iconic, rare, and visually epic "
+        f"it is. Weight {PLAYER}'s OWN rare soulsteals (higher 'freak' = rarer) and "
+        "(notify) brag-channel feats highest; routine kills lowest. Reply with ONLY a "
+        "JSON object {\"scores\": [{\"i\": <index>, \"s\": <0-100>}, ...]} covering every index."
+    )
+    obj = _llm_json([{"role": "system", "content": sys_prompt},
+                     {"role": "user", "content": "\n".join(lines)}],
+                    max_tokens=min(4000, 40 + 20 * len(candidates)))
+    if not isinstance(obj, dict) or not isinstance(obj.get("scores"), list):
+        return None
+    out = {}
+    for item in obj["scores"]:
+        try:
+            out[int(item["i"])] = float(item["s"])
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out or None
+
+
 def claude_prompt(event_type, detail, state, snippet):
     """Use the Claude API to write a cinematic prompt. Returns str or None."""
     key = os.environ.get("ANTHROPIC_API_KEY")
@@ -260,11 +449,15 @@ def claude_prompt(event_type, detail, state, snippet):
         return None
 
 
-def build_prompt(event_type, detail, state, snippet):
-    p = claude_prompt(event_type, detail, state, snippet)
+def build_prompt(moment, state, snippet):
+    """LM Studio (primary) -> Claude (secondary, if key) -> heuristic template."""
+    p = llm_prompt(moment, state, snippet)
+    if p:
+        return p, "llm"
+    p = claude_prompt(moment["event"], moment["detail"], state, snippet)
     if p:
         return p, "claude"
-    return template_prompt(event_type, detail, state, snippet), "template"
+    return template_prompt(moment["event"], moment["detail"], state, snippet), "template"
 
 
 # ---------------------------------------------------------------------------
@@ -389,24 +582,89 @@ def slug(s):
     return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")[:40] or "moment"
 
 
+def moment_key(c):
+    """Stable identity for a moment so the SAME event (traces are sliding windows,
+    so one event recurs across many consecutive lines) generates exactly ONE image.
+    Used for dedup within a run and resumable skip across runs."""
+    e, meta = c["event"], c.get("meta", {})
+    if e in ("soulsteal", "backstab"):
+        return f"{e}:{meta.get('player','?').lower()}:{_clean(meta.get('mob','')).lower()}:freak{meta.get('freak',0)}:lvl{meta.get('level','')}"
+    if e == "kill":
+        return f"kill:{_clean(meta.get('mob','')).lower()}:xp{int(meta.get('exp',0))//1000}"
+    if e in ("level_up", "level_up2"):
+        return f"levelup:{re.sub(r'[^a-z0-9]+','',c['detail'].lower())[:40]}"
+    if e in ("achievement", "quest_complete"):
+        return f"{e}:{re.sub(r'[^a-z0-9]+','',c['detail'].lower())[:50]}"
+    if e == "notify":
+        return f"notify:{re.sub(r'[^a-z0-9]+','',c['detail'].lower())[:60]}"
+    return f"{e}:{re.sub(r'[^a-z0-9]+','',c['detail'].lower())[:50]}"
+
+
+def load_seen_keys():
+    """Return set of moment keys already in the manifest (for resumable dedup)."""
+    seen = set()
+    try:
+        with open(GALLERY_PATH) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("key"):
+                    seen.add(rec["key"])
+    except FileNotFoundError:
+        pass
+    return seen
+
+
 def append_gallery(rec):
     with open(GALLERY_PATH, "a") as f:
         f.write(json.dumps(rec) + "\n")
 
 
-def process_candidates(candidates, max_images, dry_run):
-    """candidates: list of dicts with score/event/detail/state/snippet/offset."""
+def dedup_candidates(candidates, seen_keys):
+    """Collapse window-duplicate moments to one per key; drop already-generated keys.
+    Keeps the highest-scoring instance of each unique moment."""
+    best = {}
+    for c in candidates:
+        k = moment_key(c)
+        if k in seen_keys:
+            continue
+        if k not in best or c["score"] > best[k]["score"]:
+            c["key"] = k
+            best[k] = c
+    return list(best.values())
+
+
+def process_candidates(candidates, max_images, dry_run, use_llm_rank=False):
+    """candidates: list of moment dicts (already deduped). Optionally LLM-rerank."""
+    # Heuristic order first (guarantees player soulsteals / high-freak float up even
+    # if the LLM ranker is unavailable or noisy).
     candidates.sort(key=lambda c: -c["score"])
+
+    if use_llm_rank and candidates and llm_available():
+        pool = candidates[:LLM_RANK_POOL]
+        scores = llm_rank(pool)
+        if scores:
+            for i, c in enumerate(pool):
+                # blend: heuristic dominates (keeps soulsteals on top), LLM refines
+                c["llm_score"] = scores.get(i, 0.0)
+                c["score"] = c["score"] + c["llm_score"]
+            log(f"LLM re-ranked top {len(pool)} candidates")
+            candidates.sort(key=lambda c: -c["score"])
+        else:
+            log("LLM ranking unavailable/malformed; using heuristic order")
+
     capped = len(candidates) > max_images
     picked = candidates[:max_images]
     if capped:
-        log(f"{len(candidates)} iconic moments found; capping to {max_images} this run "
-            f"(remaining moments are dropped, NOT deferred)")
+        log(f"{len(candidates)} unique moments; capping to {max_images} this run "
+            f"({len(candidates) - max_images} lower-ranked moments dropped, NOT deferred)")
     generated = 0
     for c in picked:
-        prompt, prompt_src = build_prompt(c["event"], c["detail"], c["state"], c["snippet"])
-        log(f"MOMENT score={c['score']:.0f} type={c['event']} detail={c['detail']!r} "
-            f"prompt_src={prompt_src}")
+        prompt, prompt_src = build_prompt(c, c["state"], c["snippet"])
+        log(f"MOMENT score={c['score']:.0f} type={c['event']} key={c.get('key')} "
+            f"detail={c['detail']!r} prompt_src={prompt_src}")
         log(f"PROMPT: {prompt}")
         if dry_run:
             continue
@@ -417,9 +675,11 @@ def process_candidates(candidates, max_images, dry_run):
         if comfy_generate(prompt, seed, out_path):
             append_gallery({
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "key": c.get("key"),
                 "trace_offset": c["offset"],
                 "event_type": c["event"],
                 "detail": c["detail"],
+                "meta": c.get("meta", {}),
                 "source_text": c["snippet"][-600:],
                 "prompt": prompt,
                 "prompt_source": prompt_src,
@@ -433,7 +693,7 @@ def process_candidates(candidates, max_images, dry_run):
 
 
 def scan_lines(lines):
-    """lines: iterable of (offset, line). Returns candidate list."""
+    """lines: iterable of (offset, line). Returns candidate moment dicts."""
     cands = []
     for offset, line in lines:
         line = line.strip()
@@ -443,17 +703,47 @@ def scan_lines(lines):
             d = json.loads(line)
         except ValueError:
             continue
-        msgs = d.get("messages", [])
-        text = user_text(msgs)
+        text = user_text(d.get("messages", []))
         if not text:
             continue
         m = score_moment(text)
         if not m:
             continue
-        score, event, detail = m
-        cands.append({"score": score, "event": event, "detail": detail,
-                      "state": parse_state(text), "snippet": moment_snippet(text),
-                      "offset": offset})
+        m.update({"state": parse_state(text), "snippet": moment_snippet(text),
+                  "offset": offset})
+        cands.append(m)
+    return cands
+
+
+def scan_whole_file():
+    """Stream the ENTIRE traces file (memory-light) for backfill. Returns candidates."""
+    cands = []
+    n = 0
+    with open(TRACES, "rb") as f:
+        pos = 0
+        for raw in f:
+            start = pos
+            pos += len(raw)
+            n += 1
+            if not raw.endswith(b"\n"):
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            text = user_text(d.get("messages", []))
+            if not text:
+                continue
+            m = score_moment(text)
+            if not m:
+                continue
+            m.update({"state": parse_state(text), "snippet": moment_snippet(text),
+                      "offset": start})
+            cands.append(m)
+    log(f"backfill: scanned {n} trace lines, {len(cands)} raw candidate moments")
     return cands
 
 
@@ -464,7 +754,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--init", action="store_true", help="set cursor to EOF and exit")
     ap.add_argument("--smoke", action="store_true", help="render best moment from file tail, ignore cursor")
-    ap.add_argument("--max", type=int, default=DEFAULT_MAX)
+    ap.add_argument("--backfill", action="store_true", help="one-time resumable pass over the WHOLE file")
+    ap.add_argument("--max", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -478,6 +769,32 @@ def main():
         init_cursor()
         return 0
 
+    if args.backfill:
+        # One-time, resumable seed of the gallery from the ENTIRE history.
+        # The daily cursor is untouched -> the 4 AM job stays forward-only.
+        max_images = args.max if args.max is not None else BACKFILL_MAX
+        log(f"BACKFILL: mining full history (max {max_images} images, player={PLAYER})")
+        raw = scan_whole_file()                       # stage 1: cheap heuristic pre-filter
+        seen = load_seen_keys()
+        cands = dedup_candidates(raw, seen)           # collapse window dups + skip already-made
+        log(f"backfill: {len(cands)} unique NEW moments after dedup "
+            f"({len(seen)} already in gallery, skipped)")
+        # surface the soulsteals we found so the operator can see freak values
+        ss = sorted([c for c in cands if c["event"] in ("soulsteal", "backstab")],
+                    key=lambda c: -c["meta"].get("freak", 0))
+        for c in ss[:12]:
+            mine = "MINE" if c["meta"].get("mine") else "other"
+            log(f"  soulsteal/{mine} freak={c['meta'].get('freak',0)}: {c['detail']}")
+        if not cands:
+            log("backfill: nothing new to generate")
+            return 0
+        if not args.dry_run and not comfy_up():
+            log("ComfyUI down; aborting backfill (rerun later, it resumes)")
+            return 0
+        n = process_candidates(cands, max_images, args.dry_run, use_llm_rank=True)
+        log(f"backfill done, generated {n} image(s)")
+        return 0
+
     if args.smoke:
         log("SMOKE TEST: scanning last ~4MB of traces, ignoring cursor")
         st = os.stat(TRACES)
@@ -488,14 +805,15 @@ def main():
             if start:
                 f.readline()
                 start = f.tell()
-        cands = scan_lines(iter_new_lines(start))
-        log(f"smoke: {len(cands)} candidate moments in tail")
+        raw = scan_lines(iter_new_lines(start))
+        cands = dedup_candidates(raw, load_seen_keys())
+        log(f"smoke: {len(cands)} unique candidate moments in tail")
         if not cands:
             log("smoke: no iconic moment found in tail")
             return 1
         if not comfy_up() and not args.dry_run:
             return 0
-        n = process_candidates(cands, 1, args.dry_run)
+        n = process_candidates(cands, args.max or 1, args.dry_run, use_llm_rank=True)
         log(f"smoke done, generated {n} image(s)")
         return 0 if (n or args.dry_run) else 1
 
@@ -526,14 +844,15 @@ def main():
     else:
         new_offset = offset
 
-    cands = scan_lines(lines)
-    log(f"found {len(cands)} iconic moment(s) in new data")
+    raw = scan_lines(lines)
+    cands = dedup_candidates(raw, load_seen_keys())
+    log(f"found {len(raw)} raw / {len(cands)} unique new iconic moment(s)")
 
     if cands and not args.dry_run and not comfy_up():
         log("ComfyUI down; NOT advancing cursor so moments retry next run")
         return 0
 
-    n = process_candidates(cands, args.max, args.dry_run)
+    n = process_candidates(cands, args.max or DEFAULT_MAX, args.dry_run, use_llm_rank=True)
 
     if not args.dry_run:
         st2 = os.stat(TRACES)

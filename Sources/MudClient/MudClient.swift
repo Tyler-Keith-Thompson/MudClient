@@ -35,6 +35,12 @@ struct Connect: ParsableCommand {
         // where rendering + input live, so it measures the loop the user actually feels stall.
         Container.lagMonitor().start()
 
+        // Watch the Claude reply inbox — the return leg of the `#claude`/`muddispatch` channel. When a
+        // dispatched Claude session finishes and calls the `report_to_game` MCP tool, it drops a JSON
+        // file the app echoes in-game as a `↙ claude` line. Runs on the main queue; independent of the
+        // input/telnet loops (see ClaudeInboxWatcher).
+        Container.claudeInboxWatcher().start()
+
         // Load the Scripts/ directory. This runs each script's top-level code, which is what wires
         // the client up: AlterAeon.lua opens the connection itself (a guarded top-level `connect()`),
         // so there is no hardcoded host/port here. The connection lifecycle lives in ConnectionManager
