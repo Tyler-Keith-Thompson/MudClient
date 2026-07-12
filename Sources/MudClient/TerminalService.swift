@@ -68,6 +68,14 @@ final class TerminalService {
     var visibleStartColumn = 0
     var commandHistory: [String] = []
     var currentCommandIndex: Int = 0
+    /// The text typed BEFORE the first UP of the current history search — the query subsequent UP/DOWN
+    /// filter against (zsh-history-substring-search style). nil = not currently searching; any edit
+    /// (`.text`/backspace/enter) clears it so the next UP starts a fresh search from the edited buffer.
+    private var historyAnchor: String?
+    /// Character offset + length of the anchor match inside the recalled `lineBuffer`, used to highlight
+    /// the matched span. nil = no highlight (empty anchor, or not searching).
+    private var historyMatchStart: Int?
+    private var historyMatchLength: Int?
 
     /// The band geometry (top panel : bottom panel heights) the scroll region is currently sized for.
     /// An empty string forces `setupScreen` to (re)establish the region on the next paint; it's the
@@ -563,38 +571,55 @@ final class TerminalService {
     func terminalColumns() -> Int { getTerminalWidth() ?? 80 }
     
     private func handleUpArrow() {
-        if currentCommandIndex > 0 {
-            currentCommandIndex -= 1
-            let previousCommand = commandHistory[currentCommandIndex]
-            lineBuffer = previousCommand
-            cursor.moveToEndOf(line: lineBuffer)
-            refreshDisplay(cursorColumn: cursor.column)
-        } else if currentCommandIndex == 0 && !commandHistory.isEmpty {
-            // Special case: When already at the first command
-            lineBuffer = commandHistory[currentCommandIndex]
-            cursor.moveToEndOf(line: lineBuffer)
-            refreshDisplay(cursorColumn: cursor.column)
-        }
+        guard !commandHistory.isEmpty else { return }
+        if historyAnchor == nil { historyAnchor = lineBuffer }   // start a search anchored on the typed text
+        let anchor = historyAnchor!
+        // Start scanning from one step OLDER than the current index (count == not-yet-searching).
+        let from = min(currentCommandIndex, commandHistory.count) - 1
+        guard let idx = TerminalService.nextHistoryMatch(commandHistory, query: anchor, from: from, direction: -1) else { return }
+        recallHistory(at: idx, anchor: anchor)
     }
-    
+
     private func handleDownArrow() {
-        if currentCommandIndex < commandHistory.count - 1 {
-            currentCommandIndex += 1
-            let nextCommand = commandHistory[currentCommandIndex]
-            lineBuffer = nextCommand
+        guard !commandHistory.isEmpty, let anchor = historyAnchor else { return }
+        let from = currentCommandIndex + 1
+        if let idx = TerminalService.nextHistoryMatch(commandHistory, query: anchor, from: from, direction: 1) {
+            recallHistory(at: idx, anchor: anchor)
+        } else {
+            // Past the newest match: restore the original typed anchor, back to editing (no highlight).
+            currentCommandIndex = commandHistory.count
+            lineBuffer = anchor
+            historyMatchStart = nil
+            historyMatchLength = nil
             cursor.moveToEndOf(line: lineBuffer)
-            refreshDisplay(cursorColumn: cursor.column)
-        } else if currentCommandIndex == commandHistory.count - 1 {
-            // Special case: When at the last command and pressing down
-            currentCommandIndex += 1
-            cursor.moveToStartOfLine()
-            lineBuffer = ""
-            visibleStartColumn = 0
             refreshDisplay(cursorColumn: cursor.column)
         }
     }
+
+    /// Place history entry `idx` in the buffer, highlight the anchor match, cursor to end, redraw.
+    private func recallHistory(at idx: Int, anchor: String) {
+        currentCommandIndex = idx
+        lineBuffer = commandHistory[idx]
+        if let match = TerminalService.firstMatch(of: anchor, in: lineBuffer) {
+            historyMatchStart = match.offset
+            historyMatchLength = match.length
+        } else {
+            historyMatchStart = nil
+            historyMatchLength = nil
+        }
+        cursor.moveToEndOf(line: lineBuffer)
+        refreshDisplay(cursorColumn: cursor.column)
+    }
     
+    /// Abandon any in-progress history search so the next UP starts fresh from the current buffer.
+    private func resetHistorySearch() {
+        historyAnchor = nil
+        historyMatchStart = nil
+        historyMatchLength = nil
+    }
+
     private func handleBackspace() {
+        resetHistorySearch()
         if cursor.column > 1 {
             let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
             lineBuffer.remove(at: index)
@@ -615,6 +640,7 @@ final class TerminalService {
     }
     
     private func handleEnter() {
+        resetHistorySearch()
         snapToLive()   // if you were reading history, sending a command jumps you back to the live tail
         // Typed text has already been inserted into `lineBuffer` as `.text` events by the time this
         // Enter event fires, so the buffer is the command to send — nothing to pull off `partialInput`.
@@ -640,6 +666,7 @@ final class TerminalService {
     /// Used for normal typing and for pasted content (both arrive as `.text`/paste, never as keys).
     private func insertText(_ text: String) {
         guard !text.isEmpty else { return }
+        resetHistorySearch()
         let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
         lineBuffer.insert(contentsOf: text, at: index)
         refreshDisplay(cursorColumn: cursor.column)
@@ -668,12 +695,11 @@ final class TerminalService {
         let start = min(visibleStartColumn, lineBuffer.count)
         let visibleStartIndex = lineBuffer.index(lineBuffer.startIndex, offsetBy: start)
         let length = min(terminalWidth - 1, lineBuffer.distance(from: visibleStartIndex, to: lineBuffer.endIndex))
-        let visibleEndIndex = lineBuffer.index(visibleStartIndex, offsetBy: max(0, length))
-        let visibleText = String(lineBuffer[visibleStartIndex..<visibleEndIndex])
-
         let cursorOffset = cursorColumn - visibleStartColumn
         var out = "\u{1B}[\(l.inputRow);1H\u{1B}[2K"        // to input row, clear it
-        out += visibleText
+        out += TerminalService.highlightedVisibleSlice(lineBuffer, visibleStart: start, visibleLength: max(0, length),
+                                                        matchStart: historyMatchStart, matchLength: historyMatchLength,
+                                                        highlight: "\u{1B}[45m")
         out += "\u{1B}[\(l.inputRow);\(cursorOffset)H"      // park cursor at the typing column
         writeToStandardOut(data: Data(out.utf8))
     }
@@ -785,6 +811,63 @@ final class TerminalService {
     /// the invariant `activeSGRState(carried + result) == carried` is unit-tested directly.
     static func echoBodyRestoringSGR(_ body: String, carried: String) -> String {
         carried.isEmpty ? body : body + carried
+    }
+
+    // MARK: - History-substring-search (zsh-history-substring-search style)
+
+    /// The first case-insensitive occurrence of `query` in `text`, as a (offset, length) span in
+    /// CHARACTERS. An empty query yields nil (nothing to highlight), matching the "empty = match-all,
+    /// no highlight" rule. nil when `query` doesn't occur in `text`.
+    static func firstMatch(of query: String, in text: String) -> (offset: Int, length: Int)? {
+        guard !query.isEmpty else { return nil }
+        let hayChars = Array(text)
+        let needleChars = Array(query)
+        let hay = hayChars.map { Character($0.lowercased()) }
+        let needle = needleChars.map { Character($0.lowercased()) }
+        guard needle.count <= hay.count else { return nil }
+        for start in 0...(hay.count - needle.count) {
+            if Array(hay[start..<start + needle.count]) == needle {
+                return (start, needle.count)
+            }
+        }
+        return nil
+    }
+
+    /// The index of the nearest history entry containing `query` (case-insensitive), scanning from
+    /// `from` stepping by `direction` (-1 = toward older, +1 = toward newer), bounded to
+    /// `0..<history.count`. An EMPTY query matches EVERY entry (reducing to plain index cycling).
+    /// nil when no matching entry exists in that direction (or `from` starts out of range).
+    static func nextHistoryMatch(_ history: [String], query: String, from: Int, direction: Int) -> Int? {
+        var i = from
+        while i >= 0 && i < history.count {
+            if query.isEmpty || firstMatch(of: query, in: history[i]) != nil {
+                return i
+            }
+            i += direction
+        }
+        return nil
+    }
+
+    /// The string to write after the row-clear: the visible slice
+    /// `[visibleStart, visibleStart + visibleLength)` of `lineBuffer` (CHARACTER indices), with
+    /// `highlight` (an SGR like "\u{1B}[45m") wrapping the portion of the match that falls inside the
+    /// window, closed by the background reset "\u{1B}[49m". Returns the plain slice when the match
+    /// offsets are nil or the match doesn't intersect the window.
+    static func highlightedVisibleSlice(_ lineBuffer: String, visibleStart: Int, visibleLength: Int,
+                                        matchStart: Int?, matchLength: Int?, highlight: String) -> String {
+        let chars = Array(lineBuffer)
+        let winStart = max(0, min(visibleStart, chars.count))
+        let winEnd = max(winStart, min(visibleStart + visibleLength, chars.count))
+        let slice = String(chars[winStart..<winEnd])
+        guard let ms = matchStart, let ml = matchLength, ml > 0 else { return slice }
+        let matchEnd = ms + ml
+        let visStart = max(ms, winStart)                       // intersection of match and window
+        let visEnd = min(matchEnd, winEnd)
+        guard visStart < visEnd else { return slice }
+        let pre = String(chars[winStart..<visStart])
+        let mid = String(chars[visStart..<visEnd])
+        let post = String(chars[visEnd..<winEnd])
+        return pre + highlight + mid + "\u{1B}[49m" + post
     }
 
     /// Wrap a sequence of logical lines into physical rows, each made SELF-CONTAINED by prefixing the

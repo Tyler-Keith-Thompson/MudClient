@@ -208,3 +208,67 @@ private typealias E = TerminalService.InputEvent
     #expect(ts.lineBuffer == "")                       // nothing inserted, nothing printed, no crash
   }
 }
+
+// MARK: - History-substring-search (zsh-history-substring-search style)
+//
+// UP/DOWN filter history to entries CONTAINING the anchor (the text typed before the first UP),
+// most-recent-first, highlighting the matched span. Empty anchor reduces to plain cycling with no
+// highlight. These exercise the three pure statics directly.
+
+@Test func firstMatchFindsCaseInsensitiveSpanOrNil() {
+  try withTestContainer {
+    #expect(TerminalService.firstMatch(of: "cast", in: "cast fireball")?.offset == 0)
+    #expect(TerminalService.firstMatch(of: "cast", in: "cast fireball")?.length == 4)
+    // Middle hit, case-insensitive.
+    let mid = TerminalService.firstMatch(of: "FIRE", in: "cast fireball")
+    #expect(mid?.offset == 5)
+    #expect(mid?.length == 4)
+    // No match / empty query → nil.
+    #expect(TerminalService.firstMatch(of: "zap", in: "cast fireball") == nil)
+    #expect(TerminalService.firstMatch(of: "", in: "cast fireball") == nil)
+    // Query longer than text → nil.
+    #expect(TerminalService.firstMatch(of: "longer", in: "hi") == nil)
+  }
+}
+
+@Test func nextHistoryMatchStepsOlderAndNewerSkippingNonMatches() {
+  try withTestContainer {
+    let history = ["cast heal", "look", "cast fireball", "north", "cast bless"]
+    // From newest (index 4) stepping older, matches skip "north"/"look".
+    #expect(TerminalService.nextHistoryMatch(history, query: "cast", from: 4, direction: -1) == 4)
+    #expect(TerminalService.nextHistoryMatch(history, query: "cast", from: 3, direction: -1) == 2)
+    #expect(TerminalService.nextHistoryMatch(history, query: "cast", from: 1, direction: -1) == 0)
+    // Older than the oldest → nil.
+    #expect(TerminalService.nextHistoryMatch(history, query: "cast", from: -1, direction: -1) == nil)
+    // Stepping newer.
+    #expect(TerminalService.nextHistoryMatch(history, query: "cast", from: 1, direction: 1) == 2)
+    // No matching entry at all → nil.
+    #expect(TerminalService.nextHistoryMatch(history, query: "zap", from: 4, direction: -1) == nil)
+    // Empty query matches EVERY entry (plain cycling).
+    #expect(TerminalService.nextHistoryMatch(history, query: "", from: 4, direction: -1) == 4)
+    #expect(TerminalService.nextHistoryMatch(history, query: "", from: 3, direction: -1) == 3)
+    #expect(TerminalService.nextHistoryMatch(history, query: "", from: 5, direction: 1) == nil)
+  }
+}
+
+@Test func highlightedVisibleSliceWrapsOnlyTheVisiblePartOfTheMatch() {
+  try withTestContainer {
+    let hl = "\u{1B}[45m"
+    let reset = "\u{1B}[49m"
+    let line = "cast fireball"
+    // Full window, match "fire" fully inside → wrapped.
+    let full = TerminalService.highlightedVisibleSlice(line, visibleStart: 0, visibleLength: 13,
+                                                       matchStart: 5, matchLength: 4, highlight: hl)
+    #expect(full == "cast \(hl)fire\(reset)ball")
+    // Window clips the match's left edge: window starts at 7, match [5,9) → only "re" visible.
+    let clipped = TerminalService.highlightedVisibleSlice(line, visibleStart: 7, visibleLength: 6,
+                                                          matchStart: 5, matchLength: 4, highlight: hl)
+    #expect(clipped == "\(hl)re\(reset)ball")
+    // nil offsets → plain slice.
+    #expect(TerminalService.highlightedVisibleSlice(line, visibleStart: 0, visibleLength: 4,
+                                                    matchStart: nil, matchLength: nil, highlight: hl) == "cast")
+    // Match entirely outside the window → plain slice.
+    #expect(TerminalService.highlightedVisibleSlice(line, visibleStart: 0, visibleLength: 4,
+                                                    matchStart: 5, matchLength: 4, highlight: hl) == "cast")
+  }
+}
