@@ -37,13 +37,18 @@ final class InputService: @unchecked Sendable {
         }
     }
     private let (stream, continuation) = AsyncThrowingStream<OutboundCommand, any Swift.Error>.makeStream()
-    private let parser = Many {
+
+    /// Split a command line on the top-level `;` separator, unescaping `\;` → `;` (any other `\x` is left
+    /// intact). Mirror of `pipeParser` below — `;` and `|` share ONE declarative escaping implementation
+    /// rather than two hand-rolled scanners that could drift. Used both for a plain `a; b` line (each an
+    /// independent command) AND for the commands inside a single `|` pipe step (see `semicolonSegments`).
+    private static let semicolonParser = Many {
         Many(into: "") { string, fragment in
             string.append(contentsOf: fragment)
         } element: {
             OneOf {
                 Prefix(1) { $0 != .init(ascii: ";") && $0 != .init(ascii: "\\") }.map(.string)
-                
+
                 Parse {
                     "\\".utf8
                     OneOf {
@@ -56,7 +61,14 @@ final class InputService: @unchecked Sendable {
     } separator: {
         ";".utf8
     }
-    
+
+    /// The `;`-separated commands of one line (or one pipe step). A line with no unescaped `;` yields a
+    /// single element (itself). Declarative so it shares `semicolonParser`'s escaping with the `;` split
+    /// in `parse(input:)`.
+    static func semicolonSegments(_ input: String) -> [String] {
+        (try? semicolonParser.parse(input)) ?? [input]
+    }
+
     private var subscriptions = Set<AnyCancellable>()
     
     var commandStream: AnyAsyncSequence<OutboundCommand> {
@@ -75,7 +87,17 @@ final class InputService: @unchecked Sendable {
     fileprivate init() { }
     
     func parse(input: String) throws {
-        for command in try parser.parse(input) {
+        // `|` (the promise pipe) binds LOOSER than `;` (independent commands): a line with a top-level
+        // pipe is ONE unit — the pipe machinery splits it on `|` and then splits each step on `;`, so
+        // `a | b; c | d` is `a` then `(b; c)` then `d`. We must NOT pre-split it on `;` here, or that
+        // `;` would cut it into `a | b` and `c | d` and break the grouping (the whole bug). Hand the
+        // pipe line downstream whole; a pipe-free line splits on `;` as before, each command flowing
+        // independently through the rest of the pipeline (aliases, on_send, transmit).
+        if InputService.pipeSegments(input).count > 1 {
+            continuation.yield(OutboundCommand(text: input, origin: .user))
+            return
+        }
+        for command in InputService.semicolonSegments(input) {
             continuation.yield(OutboundCommand(text: command, origin: .user))
         }
     }

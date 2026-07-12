@@ -16,6 +16,10 @@ pcall(require, "_rx")
 if not __rx then dofile("Scripts/_rx.lua") end
 pcall(require, "_persist")
 if not __persist then dofile("Scripts/_persist.lua") end
+-- The promise layer is needed at LOAD time (not just at recover() call time) for the reload re-adoption
+-- at the bottom of this file. It normally loads before us alphabetically; require it explicitly so the
+-- re-adoption is safe regardless of load order (idempotent — require caches).
+pcall(require, "Promise")
 local persist = __persist
 
 local function pct(cur, max) if not cur or not max or max == 0 then return 0 end return cur / max end
@@ -215,6 +219,7 @@ local function end_recovery(completed, reason)
   local s = recovery.settle
   recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
   recovery.await_spell, recovery.await_until = nil, nil   -- drop any "waiting for a recast" hold
+  state.recover_pct, state.recover_stat, state.recover_minions_only = nil, nil, nil   -- clear reload mirrors
   if s then if completed then s.resolve() else s.reject(reason or "recovery interrupted") end end
 end
 
@@ -1054,6 +1059,10 @@ end)
 local function begin_recovery(frac)
   recovery.pct = frac
   state.recover = true
+  -- Mirror the recovery parameters onto `state` (which survives a hot reload; the local `recovery` table
+  -- does not) so reload() can rebuild the recovery as a chainable promise while it's still in flight. The
+  -- callers set recovery.stat/minions_only before calling begin_recovery, so these are already correct.
+  state.recover_pct, state.recover_stat, state.recover_minions_only = frac, recovery.stat, recovery.minions_only
   local pctlabel = math.floor(frac * 100 + 0.5)
   if recovery.stat then
     echo(string.format("Recovering %s — resting/sleeping; I'll stand you up once %s hits %d%%.",
@@ -1126,6 +1135,8 @@ function recover_minions()
     if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
     recovery.settle = { resolve = resolve, reject = reject }
     recovery.minions_only, recovery.stat, state.recover = true, nil, true
+    -- Mirror onto `state` for reload() re-adoption (see begin_recovery); minion-only keeps the default pct.
+    state.recover_minions_only, state.recover_stat, state.recover_pct = true, nil, recovery.pct
     echo("Healing your minions — casting until they're topped off (leaving your own vitals alone).")
     heal_minions_kick()
     onCancel(function()
@@ -1290,3 +1301,45 @@ function __recovery_cancel(reason)       -- a move / a fight interrupts recovery
 end
 
 function __ready(p) return ready(p) end  -- describe_state's " (ready)" label (AlterAeon.lua)
+
+-- ---- reload re-adoption -------------------------------------------------------------------------
+-- `state` survives a hot reload; the local `recovery` table and the promise that was tracking the
+-- in-flight recovery do NOT (Recovery.lua re-runs, resetting `recovery` and Promise.lua's registries).
+-- So after `#reload` mid-recovery the machine keeps resting (state.recover survived) but there is no
+-- promise to chain onto — `+| explore` had nothing in flight to append to, and the widget row was gone.
+-- Rebuild the recovery parameters from the mirrored state and register a FRESH promise that adopts the
+-- ongoing recovery: it installs its settle callbacks into recovery.settle, so the existing completion
+-- path (maybe_complete_recovery → end_recovery) resolves it, and a move/fight rejects it — exactly like
+-- a recover() promise. We do NOT re-begin (resting/sleeping is already underway); we only re-establish
+-- the promise and re-kick the cast driver under the fresh reactive wiring.
+-- resume_recovery() — rebuild `recovery` from the mirrored state and register a FRESH promise that adopts
+-- the ongoing recovery: it installs its settle callbacks into recovery.settle, so the existing completion
+-- path (maybe_complete_recovery → end_recovery) resolves it and a move/fight rejects it — exactly like a
+-- recover() promise. We do NOT re-begin (resting/sleeping is already underway); we only re-establish the
+-- promise (so it's chainable again and shows in the widget) and re-kick the cast driver under the fresh
+-- reactive wiring. Pure-ish + exposed via _AA_TEST so a spec can drive it without a real reload.
+local function resume_recovery()
+  recovery.pct = state.recover_pct or READY_PCT
+  recovery.stat = state.recover_stat
+  recovery.minions_only = state.recover_minions_only
+  local label = recovery.minions_only and "recover minions"
+    or (recovery.stat and ("recover " .. STAT_LABEL[recovery.stat]) or "recover")
+  local p = __promise(function(resolve, reject, onCancel)
+    if recovery.settle then local old = recovery.settle; recovery.settle = nil; old.reject("superseded") end
+    recovery.settle = { resolve = resolve, reject = reject }
+    onCancel(function()
+      if state.recover then send_posture("stand") end
+      recovery.settle, recovery.pct, recovery.stat, recovery.minions_only, state.recover =
+        nil, READY_PCT, nil, nil, false
+      state.recover_pct, state.recover_stat, state.recover_minions_only = nil, nil, nil
+      reset_minion_heal()
+    end)
+  end, label)
+  heal_minions_kick()   -- resume minion/self casts under the fresh reactive streams
+  return p
+end
+_AA_TEST.resume_recovery = resume_recovery
+
+-- Fire it on load when a recovery was in flight before the reload. Guarded on __promise so a load order
+-- where Promise.lua hasn't run yet (shouldn't happen — it sorts first — and we require it above) is inert.
+if state.recover and __promise then resume_recovery() end

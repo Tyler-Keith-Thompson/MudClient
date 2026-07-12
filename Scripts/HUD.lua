@@ -339,15 +339,25 @@ local function exp_spans()
     -- A partial (micro) level-up: the game splits this class's next level into `total` steps. Flag it so
     -- "▲ thief 1" doesn't read as a full level-up when it's really the next micro step ("micro 0/2").
     local micro = (#nl.names == 1) and nl.micro or nil
+    -- How far the LIVE exp pool has come toward this cost — exp/cost, i.e. (cost - need)/cost. This is the
+    -- same number the game prints in its `( 80%)` column, but computed live so it climbs as you gain exp
+    -- between `level` runs (the column freezes until you re-scrape). Clamped to 99 for the not-yet cases so
+    -- rounding never shows "100%" while `need` is still positive. `%%` for a literal percent sign.
+    local pctstr = ""
+    if nl.cost and nl.cost > 0 then
+      local pct = math.floor((nl.cost - nl.need) / nl.cost * 100)
+      pct = (pct < 0 and 0) or (pct > 99 and 99) or pct
+      pctstr = string.format(" (%d%%)", pct)
+    end
     if nl.need <= 0 then
       local verb = micro and "micro " or "level "
       b[#b + 1] = { text = "  ▲ " .. verb .. label .. " now", fg = "brightgreen", bold = true }
     elseif micro then
-      b[#b + 1] = { text = string.format("  ▲ %s micro %d/%d in %d", label, micro.done, micro.total, nl.need), fg = "magenta" }
+      b[#b + 1] = { text = string.format("  ▲ %s micro %d/%d in %d%s", label, micro.done, micro.total, nl.need, pctstr), fg = "magenta" }
     elseif #nl.names == 1 and nl.level then
-      b[#b + 1] = { text = string.format("  ▲ %s %d in %d", label, nl.level + 1, nl.need), fg = "magenta" }
+      b[#b + 1] = { text = string.format("  ▲ %s %d in %d%s", label, nl.level + 1, nl.need, pctstr), fg = "magenta" }
     else
-      b[#b + 1] = { text = string.format("  ▲ %s in %d", label, nl.need), fg = "magenta" }
+      b[#b + 1] = { text = string.format("  ▲ %s in %d%s", label, nl.need, pctstr), fg = "magenta" }
     end
   end
   -- The per-kill cap, labelled honestly (it's a ceiling on one kill's exp, not progress to a level).

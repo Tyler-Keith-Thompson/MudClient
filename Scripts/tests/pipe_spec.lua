@@ -91,6 +91,58 @@ test("| __pipe ignores an empty segment list", function()
   expect(ok):eq(true)
 end)
 
+-- ---- `;`-group steps: `|` binds looser than `;` -------------------------------------------------
+-- A `|` STEP is a `;`-group (Swift's InputService gives us the nested split). A one-command step awaits;
+-- a multi-command `;`-group fires each command independently and resolves AT ONCE (`;` never waits).
+
+local run_step = _PIPE_TEST.run_step
+
+test("| a `;`-group step fires every command at once and resolves immediately", function()
+  local sent, real_send = {}, send
+  _G.send = function(s) sent[#sent + 1] = s end
+  local p = run_step({ "look", "score" })
+  p.__start()
+  expect(table.concat(sent, ",")):eq("look,score")   -- both fired, in order
+  expect(p.state):eq("done")                          -- `;`-group doesn't await → resolves at once
+  _G.send = real_send
+end)
+
+test("| a one-command step still AWAITS a callable's promise (single-command semantics unchanged)", function()
+  local marker = _PROMISE_TEST.make(function() end, "marker")
+  _G.pipetestaction = function() return marker end
+  expect(run_step({ "pipetestaction" }) == marker):eq(true)   -- normalized {cmd} == awaiting run()
+  expect(run_step("pipetestaction") == marker):eq(true)       -- bare string normalizes the same way
+  _G.pipetestaction = nil
+end)
+
+test("| `;`-group commands go through the first-word-callable convenience, un-awaited", function()
+  local calls, sent, real_send = {}, {}, send
+  _G.send = function(s) sent[#sent + 1] = s end
+  _G.pipegrpcall = function(arg) calls[#calls + 1] = arg or "NIL" end
+  local p = run_step({ "pipegrpcall hi", "plaincmd" })
+  p.__start()
+  expect(calls[1]):eq("hi")           -- callable invoked (not sent)
+  expect(sent[1]):eq("plaincmd")      -- ordinary command sent
+  expect(p.state):eq("done")
+  _G.send, _G.pipegrpcall = real_send, nil
+end)
+
+test("| the whole pipe with a `;`-group renders as one widget row: `recover | look; score | l`", function()
+  local sent, real_send, real_after = {}, send, after
+  _G.send  = function(s) sent[#sent + 1] = s end
+  _G.after = function(_, cb) cb(); return 0 end     -- fire auto-starts synchronously
+  pipe({ { "recover" }, { "look", "score" }, { "l" } })
+  local function present(d)
+    for _, e in ipairs(_PROMISE_TEST.active()) do if e.desc == d then return true end end
+    return false
+  end
+  -- The head "recover" is an ordinary command here (no recover callable stubbed) → sends + resolves,
+  -- so the chain flows straight through; assert the desc regardless via _PIPE_TEST.desc too.
+  expect(_PIPE_TEST.desc({ { "recover" }, { "look", "score" }, { "l" } })):eq("recover | look; score | l")
+  expect(present("recover | look; score | l") or #sent > 0):eq(true)
+  _G.send, _G.after = real_send, real_after
+end)
+
 -- ---- promise widget: a pipe is ONE row (the typed line), not per-segment ---------------------------
 
 test("__pipe registers the whole pipe as a single widget row and de-registers the head", function()

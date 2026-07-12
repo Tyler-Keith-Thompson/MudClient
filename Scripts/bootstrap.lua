@@ -772,8 +772,17 @@ _LOAD_TEST = { filter = load_filter, order = load_order, resolve = resolve_scrip
 -- is `recover(95)` then — once vitals reach 95% — `attack("rat")`, then — once the rat dies —
 -- `goto("town")`. `|` is a sibling of `;`: `;` fires commands independently (no waiting), `|` waits.
 --
--- The host tokenizes the line (InputService.pipeSegments — same swift-parsing escaping as `;`, so `\|`
--- is a literal pipe) and hands us the ordered segment strings; we only build the promise chain, because
+-- `|` binds LOOSER than `;`, so each `|` STEP is itself a `;`-group of independent commands:
+--
+--     recover | look; score | attack rat
+--
+-- is `recover`, then (once recovered) fire `look` and `score` together, then `attack rat`. The host hands
+-- us that as nested steps (a list of `;`-groups); a one-command step awaits (pipe_run_segment), a
+-- multi-command group fires each and resolves at once (pipe_run_step) — `;` never waits, `|` does.
+--
+-- The host tokenizes both levels (InputService.pipeSegments then semicolonSegments — same swift-parsing
+-- escaping, so `\|` is a literal pipe and `\;` a literal semicolon) and hands us the ordered nested steps;
+-- we only build the promise chain, because
 -- promises are a Lua concept. Each segment becomes a promise: a segment whose FIRST WORD names a
 -- callable global — a function like recover/attack/goto or a callable table like eq/pilot — is CALLED
 -- as word("rest"); if that returns a promise (recover/attack do) the chain waits on it, otherwise it
@@ -794,9 +803,13 @@ end
 
 local function pipe_is_promise(x) return type(x) == "table" and x.__is_promise == true end
 
--- Run ONE segment now and return a promise for its completion (always a promise, so the chain composes).
+local function pipe_trim(s) return (s or ""):match("^%s*(.-)%s*$") end
+
+-- Run ONE command now and return a promise for its completion (always a promise, so the chain composes).
+-- A single-command `|` step AWAITS this: a first-word-callable is CALLED (and if it returns a promise the
+-- chain waits on it); anything else is sent as an ordinary command that resolves at once.
 local function pipe_run_segment(seg)
-  seg = (seg or ""):match("^%s*(.-)%s*$")
+  seg = pipe_trim(seg)
   if seg == "" then return __promise(function(res) res() end, "pipe") end
   local word, rest = seg:match("^(%S+)%s*(.-)$")
   local fn = word and _G[word]
@@ -809,45 +822,80 @@ local function pipe_run_segment(seg)
   return __promise(function(res) send(seg); res() end, "pipe:" .. seg)  -- ordinary command
 end
 
--- Host entry point (ScriptInterpreter → engine.runPipe). `segments` is the pre-split, pre-unescaped
--- array from InputService.pipeSegments. Builds the promise chain and lets the head auto-start.
--- `__`-prefixed => internal, doc-exempt.
-function __pipe(segments)
-  if type(segments) ~= "table" or #segments == 0 then return end
-  local head = pipe_run_segment(segments[1])
+-- Fire ONE command right now WITHOUT awaiting it — the `;` semantics (independent, no waiting). Same
+-- first-word-callable convenience as pipe_run_segment, but a callable's returned promise is left to run
+-- on its own and any ordinary command is just sent. Used only for the extra commands inside a `;`-group
+-- step; a bare `send(cmd)` is what most of them are.
+local function pipe_fire_command(cmd)
+  cmd = pipe_trim(cmd)
+  if cmd == "" then return end
+  local word, rest = cmd:match("^(%S+)%s*(.-)$")
+  local fn = word and _G[word]
+  if pipe_is_callable(fn) then pcall(fn, (rest ~= "" and rest or nil)) else send(cmd) end
+end
+
+-- A `|` STEP is a `;`-group of commands (from InputService.semicolonSegments) — usually just one. A
+-- legacy/test caller may pass a bare string; normalize both. One command AWAITS (pipe_run_segment); a
+-- multi-command group fires each independently and resolves AT ONCE — `;` never waits, `|` does. So
+-- `recover | look; score | attack` runs recover, then fires look+score together, then attacks.
+local function pipe_run_step(step)
+  if type(step) == "string" then step = { step } end
+  if type(step) ~= "table" then return __promise(function(res) res() end, "pipe") end
+  if #step <= 1 then return pipe_run_segment(step[1] or "") end
+  return __promise(function(resolve)
+    for _, cmd in ipairs(step) do pipe_fire_command(cmd) end
+    resolve()
+  end, "pipe-step")
+end
+
+-- One step's display text: the `;`-group joined with "; " (a bare string is itself).
+local function step_desc(step)
+  if type(step) ~= "table" then return pipe_trim(step) end
+  local parts = {}
+  for _, c in ipairs(step) do parts[#parts + 1] = pipe_trim(c) end
+  return table.concat(parts, "; ")
+end
+-- The whole pipe as one line for the widget: steps joined with " | ", each step's own `;`-group inside.
+local function pipe_desc(steps)
+  local parts = {}
+  for _, s in ipairs(steps) do parts[#parts + 1] = step_desc(s) end
+  return table.concat(parts, " | ")
+end
+
+-- Host entry point (ScriptInterpreter → engine.runPipe). `steps` is the pre-split, pre-unescaped nested
+-- array from InputService (pipeSegments → semicolonSegments): a list of `;`-group steps. Builds the
+-- promise chain and lets the head auto-start. `__`-prefixed => internal, doc-exempt.
+function __pipe(steps)
+  if type(steps) ~= "table" or #steps == 0 then return end
+  local head = pipe_run_step(steps[1])
   local chain = head
-  for i = 2, #segments do
-    local seg = segments[i]
-    chain = chain.andThen(function() return pipe_run_segment(seg) end)
+  for i = 2, #steps do
+    local step = steps[i]
+    chain = chain.andThen(function() return pipe_run_step(step) end)
   end
   -- Promise widget: show the WHOLE pipe as ONE row (the typed line) for the chain's entire life. The
   -- head auto-registered under its own label (e.g. "recover"); supersede it with the full line on the
   -- final chain promise, which stays pending until the last step resolves.
   if __untrack_promise then __untrack_promise(head) end
-  if __track_promise then
-    local parts = {}
-    for _, s in ipairs(segments) do parts[#parts + 1] = (s or ""):match("^%s*(.-)%s*$") end
-    __track_promise(chain, table.concat(parts, " | "))
-  end
+  if __track_promise then __track_promise(chain, pipe_desc(steps)) end
 end
 
 -- `+| <cmd…>` — APPEND to the current in-flight promise instead of starting a new chain. So `recover`
--- then `+| explore` becomes `recover | explore`: the new segments are grafted onto the promise that's
+-- then `+| explore` becomes `recover | explore`: the new steps are grafted onto the promise that's
 -- already running (via andThen), and the widget row is retitled to the whole line. If nothing's pending
--- ("if possible" fails), we just run the segments as a fresh pipe. Returns true if it appended.
-function __pipe_append(segments)
-  if type(segments) ~= "table" or #segments == 0 then return false end
+-- ("if possible" fails), we just run the steps as a fresh pipe. Returns true if it appended.
+function __pipe_append(steps)
+  if type(steps) ~= "table" or #steps == 0 then return false end
   local head = __current_promise and __current_promise()
-  if not head then __pipe(segments); return false end   -- nothing to append to → just run it
+  if not head then __pipe(steps); return false end   -- nothing to append to → just run it
   local desc = head._track_desc or head.label or "?"
   if __untrack_promise then __untrack_promise(head) end  -- the retitled tail supersedes this row
-  local chain, parts = head, {}
-  for i = 1, #segments do
-    local seg = segments[i]
-    chain = chain.andThen(function() return pipe_run_segment(seg) end)
-    parts[#parts + 1] = (seg or ""):match("^%s*(.-)%s*$")
+  local chain = head
+  for i = 1, #steps do
+    local step = steps[i]
+    chain = chain.andThen(function() return pipe_run_step(step) end)
   end
-  if __track_promise then __track_promise(chain, desc .. " | " .. table.concat(parts, " | ")) end
+  if __track_promise then __track_promise(chain, desc .. " | " .. pipe_desc(steps)) end
   return true
 end
 
@@ -880,7 +928,8 @@ end
 
 -- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder + append/pop. (Split
 -- + escaping is Swift's job now — InputService.pipeSegments — tested on that side.)
-_PIPE_TEST = { run = pipe_run_segment, pipe = __pipe, append = __pipe_append, pop = __pipe_pop,
+_PIPE_TEST = { run = pipe_run_segment, run_step = pipe_run_step, fire = pipe_fire_command,
+               desc = pipe_desc, pipe = __pipe, append = __pipe_append, pop = __pipe_pop,
                callable = pipe_is_callable }
 
 -- scripts / documentation

@@ -111,6 +111,23 @@ test("exp_spans renders a tie as a slashed class list, single class keeps its ne
   state = saved
 end)
 
+test("exp_spans shows the live percent of the way to the next level (exp/cost)", function()
+  local saved = state
+  -- 960 of a 1200 cost = 80% of the way; need = 240.
+  state = { exp = 960, classes = { Warrior = { level = 4, cost = 1200 } } }
+  expect(exp_text()):contains("Warrior 5 in 240 (80%)")
+  -- A micro step carries the percent too (100/500 = 20%).
+  state = { exp = 100, classes = { Thief = { level = 0, cost = 500, micro = { done = 0, total = 2 } } } }
+  expect(exp_text()):contains("Thief micro 0/2 in 400 (20%)")
+  -- A tie shares one percent (300/1200 = 25%).
+  state = { exp = 300, classes = { Warrior = { level = 3, cost = 1200 }, Thief = { level = 7, cost = 1200 } } }
+  expect(exp_text()):contains("Thief/Warrior in 900 (25%)")
+  -- Rounding never reads 100% while the level is still unaffordable (need > 0): clamped to 99%.
+  state = { exp = 1199, classes = { Mage = { level = 5, cost = 1200 } } }
+  expect(exp_text()):contains("(99%)")
+  state = saved
+end)
+
 test("next_level carries the cheapest class's micro fraction (partial level-up)", function()
   local nl = _HUD_TEST.next_level
   local r = nl(0, { Thief = { level = 0, cost = 500, micro = { done = 0, total = 2 } },

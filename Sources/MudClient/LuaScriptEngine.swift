@@ -222,21 +222,25 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("on_user_input", [.string(command)])
     }
 
-    /// Run a `|`-pipe: promise-sequenced commands like "recover 95 | attack rat | l". `segments` is the
-    /// already-tokenized line (see `InputService.pipeSegments` — Swift owns the split + escaping). Hands
-    /// the segments to the Lua `__pipe`, which builds and starts a promise chain where each segment waits
+    /// Run a `|`-pipe: promise-sequenced steps like "recover 95 | attack rat | l". `steps` is the
+    /// already-tokenized line (see `InputService.pipeSegments`/`semicolonSegments` — Swift owns both the
+    /// `|` and the nested `;` split + escaping). Each step is a `;`-group of commands (usually one). Hands
+    /// the nested steps to the Lua `__pipe`, which builds and starts a promise chain where each step waits
     /// for the previous to resolve. The chaining lives in Lua because promises do (Promise.lua); Swift
-    /// only tokenizes. The caller has already established there are ≥2 segments.
-    func runPipe(_ segments: [String]) {
+    /// only tokenizes. The caller has already established there are ≥2 steps.
+    func runPipe(_ steps: [[String]]) {
         lock.lock(); defer { lock.unlock() }
-        try? lua.callGlobal("__pipe", [.table(segments.map { .string($0) }, [:])])
+        let table = LuaValue.table(steps.map { .table($0.map { .string($0) }, [:]) }, [:])
+        try? lua.callGlobal("__pipe", [table])
     }
 
-    /// `+| <cmd…>` — append the segments onto the current in-flight promise (see bootstrap __pipe_append)
+    /// `+| <cmd…>` — append the steps onto the current in-flight promise (see bootstrap __pipe_append)
     /// rather than starting a fresh chain, so `recover` then `+| explore` behaves like `recover | explore`.
-    func appendPipe(_ segments: [String]) {
+    /// Each step is a `;`-group, exactly like `runPipe`.
+    func appendPipe(_ steps: [[String]]) {
         lock.lock(); defer { lock.unlock() }
-        try? lua.callGlobal("__pipe_append", [.table(segments.map { .string($0) }, [:])])
+        let table = LuaValue.table(steps.map { .table($0.map { .string($0) }, [:]) }, [:])
+        try? lua.callGlobal("__pipe_append", [table])
     }
 
     /// `-|` — the inverse of `+|`, an operator on its own: drop the END (last segment) of the current

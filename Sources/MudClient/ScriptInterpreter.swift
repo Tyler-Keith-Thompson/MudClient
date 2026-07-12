@@ -79,18 +79,21 @@ extension AsyncSequence where Self: Sendable, Element == OutboundCommand {
             // A leading `+|` APPENDS to the current in-flight promise ("recover", then "+| explore" ⇒
             // recover | explore). Checked before the plain `|` case, since "+| x" also contains a pipe.
             if input.hasPrefix("+|") {
-                let segments = InputService.pipeSegments(String(input.dropFirst(2)))
-                interpreter.engine.appendPipe(segments)
+                let steps = InputService.pipeSegments(String(input.dropFirst(2)))
+                    .map { InputService.semicolonSegments($0) }
+                interpreter.engine.appendPipe(steps)
                 return nil
             }
-            // A `|` sequences commands on promises ("recover 95 | attack rat | l"): each segment waits
-            // for the previous to resolve. Swift tokenizes (same escaping grammar as `;`); >1 segment
-            // means it's a pipe, so hand the segments to Lua's __pipe to build/run the chain and swallow
-            // the line. Gated on a cheap contains-check so pipe-free lines skip the parse entirely.
+            // A `|` sequences commands on promises ("recover 95 | attack rat | l"): each STEP waits for
+            // the previous to resolve. `|` binds looser than `;`, so each step is itself a `;`-group of
+            // independent commands ("recover | look; score | attack rat" ⇒ recover, then (look; score),
+            // then attack). Swift tokenizes both levels (same escaping grammar); >1 step means it's a
+            // pipe, so hand the nested steps to Lua's __pipe to build/run the chain and swallow the line.
+            // Gated on a cheap contains-check so pipe-free lines skip the parse entirely.
             if input.contains("|") {
                 let segments = InputService.pipeSegments(input)
                 if segments.count > 1 {
-                    interpreter.engine.runPipe(segments)
+                    interpreter.engine.runPipe(segments.map { InputService.semicolonSegments($0) })
                     return nil
                 }
             }

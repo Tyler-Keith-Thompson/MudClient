@@ -446,3 +446,45 @@ test("ensure_regen uses a fresh cached entry (no query); re-queries when the lev
   for key in pairs(RC) do RC[key] = nil end
   state, _G.send = saved_state, saved_send
 end)
+
+-- ---- reload re-adoption: an in-flight recovery becomes a chainable promise again -----------------
+-- After `#reload` mid-recovery, `state.recover` survives but the `recovery` table and its promise don't.
+-- resume_recovery() rebuilds the recovery from the mirrored state and registers a fresh promise adopting
+-- the ongoing recovery — so it's chainable (`+| explore`) and completes/rejects normally.
+local resume = _AA_TEST.resume_recovery
+local rrec   = _AA_TEST.recovery
+local rmaybe = _AA_TEST.maybe_complete_recovery
+
+test("resume_recovery rebuilds recovery params from the mirrored state and installs a promise", function()
+  local saved_state, saved_send = state, send
+  state = { recover = true, recover_pct = 0.95, recover_stat = nil, recover_minions_only = nil,
+            hp = 50, maxhp = 100, mana = 50, maxmana = 100, stam = 50, maxstam = 100,
+            position = "resting", group = {} }
+  _G.send = function() end
+  rrec.settle, rrec.pct, rrec.stat, rrec.minions_only = nil, _AA_TEST.READY_PCT, nil, nil
+  local p = resume()
+  p.__start()                                        -- executor installs the settle callbacks
+  expect(rrec.pct):eq(0.95)                          -- params rebuilt from state.recover_pct
+  expect(rrec.settle ~= nil):eq(true)                -- promise adopted the ongoing recovery
+  expect(p.state):eq("running")                      -- still pending (recovery not complete)
+  rrec.settle, rrec.pct = nil, _AA_TEST.READY_PCT
+  state, _G.send = saved_state, saved_send
+end)
+
+test("a resumed recovery completes (resolves its promise) when vitals reach the target", function()
+  local saved_state, saved_send = state, send
+  local resolved = false
+  state = { recover = true, recover_pct = 0.90, hp = 50, maxhp = 100, mana = 50, maxmana = 100,
+            stam = 50, maxstam = 100, position = "resting", group = {} }
+  _G.send = function() end
+  rrec.settle, rrec.pct, rrec.stat, rrec.minions_only = nil, _AA_TEST.READY_PCT, nil, nil
+  local p = resume()
+  p.__start()
+  p.andThen(function() resolved = true end)
+  state.hp, state.mana, state.stam = 100, 100, 100    -- every vital at target now
+  rmaybe()                                            -- the completion path resolves the settle
+  expect(state.recover):falsy()                       -- recovery ended
+  expect(resolved):eq(true)                           -- the resumed promise resolved → chainable
+  rrec.settle, rrec.pct, rrec.stat, rrec.minions_only = nil, _AA_TEST.READY_PCT, nil, nil
+  state, _G.send = saved_state, saved_send
+end)
