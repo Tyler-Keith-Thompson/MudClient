@@ -87,9 +87,11 @@ end
 -- loader now uses — AIPilot BEFORE AlterAeon — so their globals (state, on_update, run_test_suite,
 -- _HUD_TEST, _AIP_TEST, …) are all present AND the defensive `state = state or {}` decoupling is
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
-for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/AutoFight.lua",
-                     "Scripts/ChatDecode.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
-                     "Scripts/Promise.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
+for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Audio.lua",
+                     "Scripts/AutoFight.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
+                     "Scripts/Corpse.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
+                     "Scripts/Promise.lua", "Scripts/Recovery.lua", "Scripts/Speech.lua",
+                     "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end

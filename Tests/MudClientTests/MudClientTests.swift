@@ -413,7 +413,11 @@ private actor RecordedWrites {
     }
     let engine = LuaScriptEngine()
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
+    // AlterAeon's game logic is split across AlterAeon + its sibling files (Recovery/Combat/Corpse/Audio);
+    // load the whole family so the `kxwt.corpse` command (now in Corpse.lua) is registered.
+    for f in ["AlterAeon", "Audio", "Combat", "Corpse", "Recovery"] {
+        try engine.load(path: repoFile("Scripts/\(f).lua"))
+    }
     var echoed = [String]()
     engine.onEcho = { echoed.append($0) }
 
@@ -525,8 +529,11 @@ private actor RecordedWrites {
     }
     let engine = LuaScriptEngine()
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
-    try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+    // Load the full AlterAeon family (recover/combat/corpse globals moved into sibling files) so the AI
+    // command classifier AIPilot uses can resolve them, mirroring the real load("Scripts").
+    for f in ["AlterAeon", "Audio", "Combat", "Corpse", "Recovery", "AIPilot"] {
+        try engine.load(path: repoFile("Scripts/\(f).lua"))
+    }
 
     var echoed = [String]()
     engine.onEcho = { echoed.append($0) }

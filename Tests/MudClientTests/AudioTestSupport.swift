@@ -19,11 +19,18 @@ private func makeSilentAudioMocks() -> (MockMusicServicing, MockSpeechServicing,
     return (music, speech, msp)
 }
 
-/// Run `body` with the three audio services replaced by silent relaxed mocks, inside a withTestContainer
-/// scope (parallel-safe isolation). Unregistered dependencies resolve to their real prod implementations.
+/// Run `body` with the three audio services replaced by silent relaxed mocks, inside a task-local nested
+/// container. Unregistered dependencies fall through the parent chain to their real prod implementations.
+///
+/// NB: uses `withNestedContainer`, NOT `withTestContainer`. `withTestContainer` additionally sets a
+/// *process-global* `Container.default.fatalErrorOnResolve = true` for the scope's duration; because
+/// swift-testing runs this suite in parallel, any sibling test resolving a `Container.default` dependency
+/// (e.g. `TranscriptStore`, the `anthropicAPIKeyProvider`, at engine construction) during that window
+/// hits an unconditional `fatalError`. `withNestedContainer` only swaps the task-local container, so it
+/// overrides the (cached) audio factories inside this scope without disturbing any other test.
 func withSilentAudio<T>(_ body: () throws -> T) rethrows -> T {
     let (music, speech, msp) = makeSilentAudioMocks()
-    return try withTestContainer(unregisteredBehavior: .custom { _ in }) {
+    return try withNestedContainer {
         Container.musicService.register { music }
         Container.speechService.register { speech }
         Container.mspService.register { msp }
@@ -34,7 +41,7 @@ func withSilentAudio<T>(_ body: () throws -> T) rethrows -> T {
 /// Async overload of `withSilentAudio`.
 func withSilentAudio<T>(_ body: () async throws -> T) async rethrows -> T {
     let (music, speech, msp) = makeSilentAudioMocks()
-    return try await withTestContainer(unregisteredBehavior: .custom { _ in }) {
+    return try await withNestedContainer {
         Container.musicService.register { music }
         Container.speechService.register { speech }
         Container.mspService.register { msp }

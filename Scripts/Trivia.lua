@@ -252,6 +252,82 @@ end
 -- A tool NAME -> the short source tag shown when we answer from its lookup.
 local TOOL_SOURCE = { area_info = "area", library_entry = "library" }
 
+-- ---- Great Library: discover book numbers, never fabricate them ----------------------------------
+-- The model's `library_entry` tool hands us an entry_number, but for a "what's the topic of the book
+-- entitled X?" question it has no way to KNOW the number and just makes one up — the game then rejects
+-- `library read <made-up>` with "Sorry, that's not a valid book number." So we never trust a model
+-- number: we read a number only if it (a) appears verbatim in the QUESTION ("What is entry 16105…"),
+-- or (b) came back from a real `library list`/`library search`. Everything below is pure + unit-tested;
+-- the async discovery chain that uses them lives in decide().
+
+-- The game's rejection of a bad `library read`. Recognizing it is what turns a dead lookup into a retry
+-- (via list/search) instead of a blind answer sourced as "library".
+local function library_read_failed(out)
+  local o = out or ""
+  return o:find("not a valid book number", 1, true) ~= nil
+      or o:find("'library list' for a list", 1, true) ~= nil
+end
+
+-- Parse `library list` / `library search` (and `library read`) catalog lines into entries. A line looks
+-- like "48043 - a scriber's book of runes     Topic: philosophy" (Topic optional). Returns an array of
+-- { num, title, topic } with title/topic normalized. Non-catalog lines (headers, combat) are skipped.
+local function parse_library_list(out)
+  local entries = {}
+  for line in (out or ""):gmatch("[^\n]+") do
+    local l = line:gsub("\27%[[%d;]*%a", "")            -- strip ANSI
+    local num, rest = l:match("^%s*(%d+)%s*%-%s+(.+)$")
+    if num then
+      local title, topic = rest:match("^(.-)%s%s+Topic:%s*(.+)$")
+      if not title then title = rest end
+      entries[#entries + 1] = { num = tonumber(num), title = norm(title), topic = norm(topic or "") }
+    end
+  end
+  return entries
+end
+
+-- Pull the quoted book title out of a "…book entitled "X"…" / "…titled, 'X'…" / "…called "X"…" question.
+local function library_title(question)
+  local q = question or ""
+  return q:match('entitled%s*,?%s*["\'](.-)["\']')
+      or q:match('titled%s*,?%s*["\'](.-)["\']')
+      or q:match('called%s*,?%s*["\'](.-)["\']')
+end
+
+-- The `library list` search keyword for a title question: the most distinctive word of the quoted title.
+local function library_keyword(question)
+  local title = library_title(question)
+  if not title then return nil end
+  return pick_keyword(title)
+end
+
+-- An entry number stated IN the question itself ("What is entry 16105 in the Great Library?"). Trusted
+-- (it's the game's own number, not a model guess) so it may be read directly.
+local function question_book_number(question)
+  local q = question or ""
+  local n = q:match("[Ee]ntry%s+#?(%d+)") or q:match("[Bb]ook%s+#?(%d+)") or q:match("[Nn]umber%s+#?(%d+)")
+  return n and tonumber(n) or nil
+end
+
+-- From parsed catalog entries, pick the number whose title matches the question's book title. Returns a
+-- number that DEFINITELY appeared in the list (so it's safe to `library read`), or nil to give up. This
+-- is the only source of a book number when the question doesn't state one — a model guess never reaches
+-- `library read`.
+local function library_pick_entry(entries, question)
+  if not entries or #entries == 0 then return nil end
+  local title = library_title(question)
+  local tnorm = title and norm(title) or nil
+  if tnorm and tnorm ~= "" then
+    for _, e in ipairs(entries) do
+      if e.title == tnorm or e.title:find(tnorm, 1, true) or tnorm:find(e.title, 1, true) then
+        return e.num
+      end
+    end
+    return nil                                          -- had a title but nothing matched → don't guess
+  end
+  if #entries == 1 then return entries[1].num end       -- no title, but the search pinned a single entry
+  return nil
+end
+
 -- ---- in-game command output capture (noise-tolerant) ---------------------------------------------
 -- Run a lookup command and gather its output over a short window. A broad line collector (below) appends
 -- lines while `capture.active`; we drop the obvious non-answer noise (blanks, kxwt machinery, the [event]
@@ -311,6 +387,56 @@ local function ask_model()
     -- Preferred: the LOCAL model WITH tools, so we don't depend on (or pay for) the pilot's brain and can
     -- look answers up in-game. Fall back to a plain local (then shared) call when the tools builtin is
     -- missing (binary not relaunched yet), and to a guess if there's no model at all.
+    -- Feed a successful lookup's output back to the model and answer, labeling the source.
+    local function feed_lookup(name, out)
+      if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+      local user2 = user .. "\n\nLOOKUP RESULT (" .. name .. "):\n" .. out .. "\n\nNow answer with one letter:"
+      ai_local_tools_request(sys, user2, cfg.max_tokens, cfg.think_prefill, "", function(r2, _, e2)
+        if e2 then guess("model error: " .. e2) else answer_from(r2, TOOL_SOURCE[name] or "tool") end
+      end)
+    end
+
+    -- Resolve a Great Library lookup WITHOUT ever reading a fabricated number. `deliver(out)` gets the
+    -- successful `library read` text; `deliver(nil)` means we couldn't resolve it (caller gives up →
+    -- guesses, narrated — we never lock in a letter as though the library confirmed it). Narrates each step.
+    local function resolve_library(args, deliver)
+      local qnum = question_book_number(q)                 -- a number the QUESTION itself states (trusted)
+      local function stop(msg) echo("\27[33m[trivia] " .. msg .. "\27[0m"); deliver(nil) end
+      -- Search the catalog by the question's book title, then read the matching entry (a real number).
+      local function discover()
+        if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+        local kw = library_keyword(q)
+        if not kw then stop("library: no book title to search — skipping lookup"); return end
+        local list_cmd = "library list " .. kw
+        echo("\27[36m[trivia] searching the library: " .. list_cmd .. "\27[0m")
+        run_lookup(list_cmd, function(list_out)
+          if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+          local pick = library_pick_entry(parse_library_list(list_out), q)
+          if not pick then stop("library: no matching entry in the catalog — giving up on this lookup"); return end
+          local read_cmd = "library read " .. pick
+          echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
+          run_lookup(read_cmd, function(read_out)
+            if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+            if library_read_failed(read_out) then stop("library read " .. pick .. " still rejected — giving up on this lookup")
+            else deliver(read_out) end
+          end)
+        end)
+      end
+      if qnum then
+        local read_cmd = "library read " .. qnum
+        echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
+        run_lookup(read_cmd, function(read_out)
+          if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+          if library_read_failed(read_out) then
+            echo("\27[33m[trivia] library read " .. qnum .. " not a valid book number — searching by title\27[0m")
+            discover()
+          else deliver(read_out) end
+        end)
+      else
+        discover()                                         -- no trusted number → never read the model's guess
+      end
+    end
+
     if ai_local_tools_request then
       ai_local_tools_request(sys, user .. "\n\nAnswer with one letter, or call a tool.", cfg.tool_max_tokens,
         cfg.think_prefill, TOOLS_JSON, function(reply, tool_calls, err)
@@ -318,15 +444,20 @@ local function ask_model()
           if err then guess("model error: " .. err); return end
           if not tool_calls then answer_from(reply, "model"); return end   -- answered directly
           local name, args = parse_tool_call(tool_calls)
+          if name == "library_entry" then                                  -- validated, discovery-first path
+            resolve_library(args, function(out)
+              if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+              if out then feed_lookup("library", out)
+              else guess("library lookup unresolved") end                  -- degrade to a labeled guess, not a fake "library" answer
+            end)
+            return
+          end
           local cmd = tool_command(name, args)
           if not cmd then answer_from(reply, "model"); return end          -- unusable tool call → try the text
           echo("\27[36m[trivia] looking it up: " .. cmd .. "\27[0m")
           run_lookup(cmd, function(out)
             if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-            local user2 = user .. "\n\nLOOKUP RESULT (" .. name .. "):\n" .. out .. "\n\nNow answer with one letter:"
-            ai_local_tools_request(sys, user2, cfg.max_tokens, cfg.think_prefill, "", function(r2, _, e2)
-              if e2 then guess("model error: " .. e2) else answer_from(r2, TOOL_SOURCE[name] or "tool") end
-            end)
+            feed_lookup(name, out)
           end)
         end)
     elseif ai_local_request then
@@ -500,6 +631,12 @@ _TRIVIA_TEST = {
   parse_tool_call = parse_tool_call,
   tool_command = tool_command,
   capture_keep = capture_keep,
+  library_read_failed = library_read_failed,
+  parse_library_list = parse_library_list,
+  library_title = library_title,
+  library_keyword = library_keyword,
+  question_book_number = question_book_number,
+  library_pick_entry = library_pick_entry,
 }
 
 -- Pin the local client to a real chat model (see cfg.model) so ai_local_request doesn't fall through to

@@ -1,5 +1,6 @@
 # Exposes the ported Lua scripts as build inputs (e.g. test `data`).
-exports_files(["AlterAeon.lua", "AIPilot.lua", "AutoFight.lua", "HUD.lua", "Trivia.lua", "Equipment.lua", "bootstrap.lua"])
+exports_files(["AlterAeon.lua", "AIPilot.lua", "AutoFight.lua", "HUD.lua", "Trivia.lua", "Equipment.lua", "bootstrap.lua",
+               "Audio.lua", "Combat.lua", "Corpse.lua", "Recovery.lua"])
 
 # Every runtime script plus the test harness + specs, consumed as `data` by the Lua script test
 # (//tools/luatest:lua_scripts_test) so it loads exactly what the app loads.
@@ -8,9 +9,13 @@ filegroup(
     srcs = [
         "bootstrap.lua",
         "AlterAeon.lua",
+        "Audio.lua",
         "AIPilot.lua",
         "AutoFight.lua",
+        "Combat.lua",
+        "Corpse.lua",
         "HUD.lua",
+        "Recovery.lua",
         "Trivia.lua",
         "Equipment.lua",
         "Speech.lua",

@@ -8,6 +8,10 @@ Scripts/AlterAeon/.build
 tools/tts/.venv
 tools/finetune/.venv
 
+# Agent worktrees are throwaway checkouts (their own BUILD/.bzl copies drift from main); Bazel's
+# //... pattern must not recurse into them.
+.claude/worktrees
+
 # Convenience symlinks
 bazel-bin
 bazel-out

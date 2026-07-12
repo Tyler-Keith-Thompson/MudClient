@@ -8,6 +8,10 @@ swift_test(
     data = [
         "//Scripts:bootstrap.lua",
         "//Scripts:AlterAeon.lua",
+        "//Scripts:Audio.lua",
+        "//Scripts:Combat.lua",
+        "//Scripts:Corpse.lua",
+        "//Scripts:Recovery.lua",
         "//Scripts:AIPilot.lua",
         "//Sources/MudClient:swift_srcs",
         "fixtures/pellam_kxwt_capture.log",

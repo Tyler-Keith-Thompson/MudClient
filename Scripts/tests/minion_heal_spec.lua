@@ -54,6 +54,40 @@ test("minion_target_word is the last word of the name (the noun the player types
   expect(AA.minion_target_word("a bone golem")):eq("golem")
 end)
 
+test("minion_target_words: distinctive noun first, then descriptors, articles dropped", function()
+  expect(table.concat(AA.minion_target_words("a clay man"), ",")):eq("man,clay")
+  expect(table.concat(AA.minion_target_words("A skeletal spider"), ",")):eq("spider,skeletal")
+  expect(table.concat(AA.minion_target_words("the ancient stone golem"), ",")):eq("golem,stone,ancient")
+end)
+
+-- The reported bug: a "clay man" answers to 'clay', not 'man', so `c soothe man` gets
+-- "Sorry, 'man' isn't a valid target for the spell 'soothe wounds'." The driver must try the next
+-- keyword, and once every keyword is refused give up on THAT minion (never loop) — narrating both.
+test("a rejected target keyword retries the minion's other name-words, then gives up + narrates", function()
+  with_group({ me(), minion("a clay man", 50, 100) }, {}, function(sent)
+    local echoed, saved_echo = {}, echo
+    _G.echo = function(s) echoed[#echoed + 1] = (tostring(s):gsub("\27%[[%d;]*m", "")) end
+    local ok, err = pcall(function()
+      AA.try_cast_heal()                                    -- first cast: primary keyword 'man'
+      expect(sent[#sent]:match("(%S+)$")):eq("man")
+      AA.minion_target_invalid("man")                       -- game refuses 'man' → retry 'clay'
+      expect(AA.minion_heal.tried["a clay man"]["man"]):truthy()
+      expect(AA.minion_heal.word_blocked["a clay man"]):falsy()
+      expect(sent[#sent]:match("(%S+)$")):eq("clay")        -- re-cast at the alternate keyword
+      AA.minion_target_invalid("clay")                      -- refuses 'clay' too → give up on this minion
+      expect(AA.minion_heal.word_blocked["a clay man"]):truthy()
+      local before = #sent
+      AA.try_cast_heal()                                    -- driver moves on; no more casts at the blocked minion
+      expect(#sent):eq(before)
+    end)
+    _G.echo = saved_echo
+    if not ok then error(err) end
+    local joined = table.concat(echoed, "\n")
+    expect(joined:find("trying 'clay'", 1, true) ~= nil):truthy()   -- narrated the retry
+    expect(joined:find("giving up", 1, true) ~= nil):truthy()       -- narrated the give-up
+  end)
+end)
+
 -- ---- readiness gates -----------------------------------------------------------------------------
 
 test("minions_pending_spell_heal: skeletal always; our natural-regen minion only when YOU'RE topped off", function()

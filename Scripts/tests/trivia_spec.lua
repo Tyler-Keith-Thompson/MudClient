@@ -129,3 +129,79 @@ test("capture_keep drops noise (blanks, kxwt, the [event] channel, our echoed co
   -- combat text is KEPT (the model reads through it) — we only strip machinery
   expect(capture_keep("A gnoll's claw hits you.", "area Cliffside")):eq(true)
 end)
+
+-- ---- Great Library: never read a fabricated book number ----------------------------------------
+local library_read_failed   = _TRIVIA_TEST.library_read_failed
+local parse_library_list    = _TRIVIA_TEST.parse_library_list
+local library_title         = _TRIVIA_TEST.library_title
+local library_keyword       = _TRIVIA_TEST.library_keyword
+local question_book_number  = _TRIVIA_TEST.question_book_number
+local library_pick_entry    = _TRIVIA_TEST.library_pick_entry
+
+test("library_read_failed recognizes the game's invalid-book-number rejection", function()
+  -- The real line that ended the buggy trace — this must trigger the discovery/retry path, not a blind answer.
+  expect(library_read_failed("Sorry, that's not a valid book number. ('library list' for a list)")):eq(true)
+  expect(library_read_failed("some combat\nSorry, that's not a valid book number.\nmore")):eq(true)
+  -- A successful read is NOT a failure.
+  expect(library_read_failed("48043 - a scriber's book of runes     Topic: philosophy")):eq(false)
+  expect(library_read_failed("")):eq(false)
+  expect(library_read_failed(nil)):eq(false)
+end)
+
+test("parse_library_list reads numbered catalog entries and ignores non-catalog lines", function()
+  local out = table.concat({
+    "Welcome to the Alter Aeon Historical Archive!",
+    "2110 - the book of the sea     Topic: geography",
+    "37364 - a book called 'The Origin of Tartan and Plaid Cloth'     Topic: history and artifacts",
+    "48043 - a scriber's book of runes     Topic: philosophy",
+    "A scorpion bat's bite scratches you.",
+  }, "\n")
+  local e = parse_library_list(out)
+  expect(#e):eq(3)
+  expect(e[1].num):eq(2110)
+  expect(e[1].title):eq("the book of the sea")
+  expect(e[1].topic):eq("geography")
+  expect(e[3].num):eq(48043)
+  expect(e[3].topic):eq("philosophy")
+  -- an entry with no Topic column still parses (title = whole rest)
+  local e2 = parse_library_list("16105 - a lightly scorched letter")
+  expect(e2[1].num):eq(16105)
+  expect(e2[1].title):eq("a lightly scorched letter")
+end)
+
+test("library_title / library_keyword pull the book title out of a topic question", function()
+  local q = 'What is the topic of a book entitled "A Magic Primer: Constructs" in the Great Library?'
+  expect(library_title(q)):eq("A Magic Primer: Constructs")
+  expect(library_keyword(q)):eq("Constructs")           -- longest distinctive title word → `library list Constructs`
+  expect(library_title("What class is the lunge skill?")):eq(nil)
+  expect(library_keyword("What class is the lunge skill?")):eq(nil)
+  -- alternate phrasings the game uses
+  expect(library_title("a book called 'The Origin of Tartan and Plaid Cloth'")):eq("The Origin of Tartan and Plaid Cloth")
+  expect(library_title("titled, 'The History of Pellam, volume 2'")):eq("The History of Pellam, volume 2")
+end)
+
+test("question_book_number trusts a number stated in the question, nothing else", function()
+  expect(question_book_number("What is entry 16105 in the Great Library?")):eq(16105)
+  expect(question_book_number("What is book #48043?")):eq(48043)
+  -- A topic question states NO number, so there's nothing to trust — the model's guess must never be read.
+  expect(question_book_number('What is the topic of a book entitled "A Magic Primer: Constructs"?')):eq(nil)
+end)
+
+test("library_pick_entry only yields a number that actually appeared in the catalog", function()
+  local entries = parse_library_list(table.concat({
+    "2110 - the book of the sea     Topic: geography",
+    "37364 - a book called 'The Origin of Tartan and Plaid Cloth'     Topic: history and artifacts",
+    "48043 - a scriber's book of runes     Topic: philosophy",
+  }, "\n"))
+  -- Title match resolves to the listed number (which we then `library read`) — a real, validated number.
+  local q = "What is the topic of a book called 'The Origin of Tartan and Plaid Cloth'?"
+  expect(library_pick_entry(entries, q)):eq(37364)
+  -- No entry matches the title → nil, so the caller GIVES UP the lookup instead of reading a guess.
+  expect(library_pick_entry(entries, 'What is the topic of "A Nonexistent Tome"?')):eq(nil)
+  -- Empty catalog → nil (never invent a number).
+  expect(library_pick_entry({}, q)):eq(nil)
+  expect(library_pick_entry(parse_library_list(""), q)):eq(nil)
+  -- No title in the question but the search pinned exactly one entry → trust it.
+  local one = parse_library_list("2110 - the book of the sea     Topic: geography")
+  expect(library_pick_entry(one, "What book is this?")):eq(2110)
+end)
