@@ -10,6 +10,14 @@ import Afluent
 import Foundation
 import AVFoundation
 import CryptoKit
+import Mockable
+
+@Mockable
+protocol MSPServicing: Sendable {
+    func setVolume(percent: Double)
+    func stopAll()
+    func player(_ url: URL, volume: Float, loops: Int) -> AnyAsynchronousUnitOfWork<AudioPlayer>
+}
 
 class AudioPlayer: @unchecked Sendable {
     let lock = NSRecursiveLock()
@@ -205,7 +213,7 @@ class AudioPlayer: @unchecked Sendable {
     }
 }
 
-final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
+final class MSPService: NSObject, AVAudioPlayerDelegate, MSPServicing, @unchecked Sendable {
     let cache = AsynchronousUnitOfWorkCache()
     let lock = NSRecursiveLock()
     var players = [AVAudioPlayer]()
@@ -238,7 +246,7 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
         return AudioPlayer(player: player)
     }
 
-    func player(_ url: URL, volume: Float = 1, loops: Int = 0) -> some AsynchronousUnitOfWork<AudioPlayer> {
+    func player(_ url: URL, volume: Float = 1, loops: Int = 0) -> AnyAsynchronousUnitOfWork<AudioPlayer> {
         downloadOrRetrieve(url)
             .tryMap { hash, data in
                 let player = try self._player(data: data, hint: url.pathExtension)
@@ -246,6 +254,7 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
                 player.numberOfLoops = loops
                 return player
             }
+            .eraseToAnyUnitOfWork()
     }
     
     func downloadOrRetrieve(_ url: URL) -> some AsynchronousUnitOfWork<(String, Data)> {
@@ -290,7 +299,7 @@ final class MSPService: NSObject, AVAudioPlayerDelegate, @unchecked Sendable {
 }
 
 extension Container {
-    static let mspService = Factory(scope: .cached) { MSPService() }
+    static let mspService = Factory(scope: .cached) { MSPService() as any MSPServicing }
 }
 
 extension Digest {

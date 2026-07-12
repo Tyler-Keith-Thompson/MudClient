@@ -22,8 +22,17 @@
 import Foundation
 import AVFoundation
 import DependencyInjection
+import Mockable
 
-final class MusicService: @unchecked Sendable {
+@Mockable
+protocol MusicServicing: Sendable {
+    func play(channel: String, track: String)
+    func stop(channel: String)
+    func stopAll()
+    func setVolume(percent: Double)
+}
+
+final class MusicService: MusicServicing, @unchecked Sendable {
     private let crossfade: TimeInterval = 1.5
     private let volumeFade: TimeInterval = 0.4
     private let soundDir: URL?
@@ -179,5 +188,5 @@ private final class MidiChannelPlayer: ChannelPlayer {
 }
 
 extension Container {
-    static let musicService = Factory(scope: .cached) { MusicService() }
+    static let musicService = Factory(scope: .cached) { MusicService() as any MusicServicing }
 }

@@ -32,6 +32,17 @@
 
 import Foundation
 import DependencyInjection
+import Mockable
+
+@Mockable
+protocol SpeechServicing: Sendable {
+    func speak(text: String, voice: String?, rate: Int?, backend: SpeechBackend, sayFallbackVoice: String?)
+    func stop()
+    func setVolume(percent: Double)
+    func backendStatus() -> (backend: String, detail: String)
+    func kokoroVoices() -> [String]
+    func voices(all: Bool) -> [SpeechService.Voice]
+}
 
 /// One spoken utterance in flight. `wait()` blocks the worker until it finishes; `cancel()` aborts it.
 protocol SpeechUtterance: AnyObject {
@@ -177,8 +188,8 @@ private final class KokoroUtterance: SpeechUtterance {
     }
 }
 
-final class SpeechService: @unchecked Sendable {
-    struct Voice: Equatable { let name: String; let locale: String }
+final class SpeechService: SpeechServicing, @unchecked Sendable {
+    struct Voice: Equatable, Sendable { let name: String; let locale: String }
 
     /// One queued item: the text plus the resolved voice(s), requested backend, and a snapshot of the
     /// TTS volume at enqueue time (0…1).
@@ -501,5 +512,5 @@ final class SpeechService: @unchecked Sendable {
 }
 
 extension Container {
-    static let speechService = Factory(scope: .cached) { SpeechService() }
+    static let speechService = Factory(scope: .cached) { SpeechService() as any SpeechServicing }
 }

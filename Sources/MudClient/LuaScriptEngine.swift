@@ -900,6 +900,27 @@ final class LuaScriptEngine: @unchecked Sendable {
             self?.echoTranscript(Container.transcriptStore().received(last: n), header: "last \(n) received")
             return []
         }
+        // claude(feedback) — hand freeform developer feedback + a context bundle to a running Claude Code
+        // session (via the local `muddispatch` channel). Backs `#claude <freeform feedback>`. Builds a
+        // /tmp bundle (feedback + timestamped interleaved transcript + a raw.log copy), then fire-and-
+        // forget POSTs it to the channel server; the working session reads the bundle and acts on it.
+        lua.register("claude") { [weak self] args in
+            guard case .string(let raw)? = args.first,
+                  !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
+                self?.usage(#"claude: describe what you want — e.g. #claude fix the corpse sac timing"#)
+                return []
+            }
+            let feedback = raw.trimmingCharacters(in: .whitespaces)
+            guard let bundle = DispatchBundle.build(feedback: feedback) else {
+                self?.onEcho("\u{1B}[31m↗ claude: couldn't build the context bundle\u{1B}[0m")
+                return []
+            }
+            self?.onEcho("\u{1B}[36m↗ claude\u{1B}[0m \(feedback)  \u{1B}[90m(\(bundle.dir.path))\u{1B}[0m")
+            Self.dispatchToClaude(feedback: feedback, bundle: bundle) { note in
+                self?.onEcho(note)
+            }
+            return []
+        }
         // bell() — ring the terminal bell.
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
         // spellcheck(word) -> suggestion|nil. Native macOS spell-check (NSSpellChecker, local dictionary
@@ -1015,6 +1036,52 @@ final class LuaScriptEngine: @unchecked Sendable {
             codes.append("1")     // "bright" alone: nothing to brighten — bold is the nearest intent
         }
         return (codes, unknown)
+    }
+
+    /// Fire the built context bundle at the local `muddispatch` channel server (see tools/dispatch/).
+    /// Fire-and-forget over loopback HTTP; `note` is called (on the main queue) only to report a
+    /// delivery problem, so a down/unlaunched server degrades to "bundle written, not delivered" rather
+    /// than blocking or erroring the in-game command. Config via env: MUD_DISPATCH_PORT (8788),
+    /// MUD_DISPATCH_TOKEN (else ~/Documents/MudClient/dispatch.token).
+    private static func dispatchToClaude(feedback: String, bundle: (dir: URL, markdown: URL),
+                                         note: @escaping (String) -> Void) {
+        let port = ProcessInfo.processInfo.environment["MUD_DISPATCH_PORT"].flatMap(Int.init) ?? 8788
+        guard let url = URL(string: "http://127.0.0.1:\(port)/dispatch") else { return }
+        let token = dispatchToken()
+        let body: [String: String] = [
+            "feedback": feedback, "bundle": bundle.markdown.path, "dir": bundle.dir.path,
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        if let token { req.setValue(token, forHTTPHeaderField: "x-dispatch-token") }
+        req.httpBody = data
+        req.timeoutInterval = 5
+        func warn(_ why: String) {
+            DispatchQueue.main.async {
+                note("\u{1B}[33m↗ claude: not delivered (\(why)); bundle saved at \(bundle.dir.path). "
+                    + "Is your session running `claude --dangerously-load-development-channels "
+                    + "server:muddispatch`?\u{1B}[0m")
+            }
+        }
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error { warn(error.localizedDescription); return }
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                warn("HTTP \(http.statusCode)")
+            }
+        }.resume()
+    }
+
+    /// The shared dispatch token: MUD_DISPATCH_TOKEN, else the file the channel server writes
+    /// (~/Documents/MudClient/dispatch.token). nil if neither is present (server may be tokenless).
+    private static func dispatchToken() -> String? {
+        if let env = ProcessInfo.processInfo.environment["MUD_DISPATCH_TOKEN"], !env.isEmpty { return env }
+        let path = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents/MudClient/dispatch.token")
+        guard let s = try? String(contentsOf: path, encoding: .utf8) else { return nil }
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// One-line usage/typo feedback for a builtin called with the wrong argument types (in yellow, so
@@ -1154,6 +1221,34 @@ final class LuaScriptEngine: @unchecked Sendable {
                     self.fire(callback, [.string(result.content), .nil])
                 } catch {
                     self.fire(callback, [.nil, .string(error.localizedDescription)])
+                }
+            }
+            return []
+        }
+        // ai_local_tools_request(system, user, max_tokens, prefix, tools_json, callback [, model]).
+        //   Like ai_local_request (LOCAL model, never a paid API) but with TOOLS and tool_choice "auto" —
+        //   the model may answer directly OR request a tool call. tools_json is a JSON array of OpenAI tool
+        //   definitions. callback(reply, tool_calls_json, err): on success `reply` is the text and
+        //   `tool_calls_json` is a `[{name, arguments}]` string (or nil when the model answered directly).
+        lua.register("ai_local_tools_request") { [weak self] args in
+            guard let self,
+                  case .string(let system)? = args.first,
+                  args.count > 5, case .function(let callback) = args[5] else { return [] }
+            let user: String = { if case .string(let u) = args[1] { return u }; return "" }()
+            let maxTokens = Self.intArg(args[2]) ?? 128
+            let prefix: String? = { if case .string(let p) = args[3], !p.isEmpty { return p }; return nil }()
+            let tools: String? = { if case .string(let t) = args[4], !t.isEmpty { return t }; return nil }()
+            let modelOverride: String? = {
+                if args.count > 6, case .string(let m) = args[6], !m.isEmpty { return m }; return nil
+            }()
+            Task {
+                do {
+                    let result = try await self.localLLM.complete(system: system, user: user, maxTokens: maxTokens,
+                                                                  tools: tools, toolChoice: "auto",
+                                                                  assistantPrefix: prefix, modelOverride: modelOverride)
+                    self.fire(callback, [.string(result.content), result.toolCallsJSON.map(LuaValue.string) ?? .nil, .nil])
+                } catch {
+                    self.fire(callback, [.nil, .nil, .string(error.localizedDescription)])
                 }
             }
             return []

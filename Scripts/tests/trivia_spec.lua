@@ -94,3 +94,38 @@ test("letter_for_text finds the answer regardless of A-D order (shuffle-proof me
   -- A cached answer that isn't among this asking's choices resolves to nil (caller falls back to model).
   expect(letter_for_text(first, norm("99"))):eq(nil)
 end)
+
+-- ---- model tool-calling helpers (look answers up via in-game commands) --------------------------
+local parse_tool_call = _TRIVIA_TEST.parse_tool_call
+local tool_command    = _TRIVIA_TEST.tool_command
+local capture_keep    = _TRIVIA_TEST.capture_keep
+
+test("parse_tool_call pulls the tool name + argument out of the escaped tool_calls JSON", function()
+  -- the shape ai_local_tools_request hands back: [{name, arguments}] with arguments an escaped json string
+  local n, a = parse_tool_call('[{"name":"area_info","arguments":"{\\"area_name\\":\\"Cliffside Island\\"}"}]')
+  expect(n):eq("area_info")
+  expect(a.area_name):eq("Cliffside Island")
+  local n2, a2 = parse_tool_call('[{"name":"library_entry","arguments":"{\\"entry_number\\":48043}"}]')
+  expect(n2):eq("library_entry")
+  expect(a2.entry_number):eq(48043)
+end)
+
+test("tool_command builds the right in-game command (area uses the distinctive keyword)", function()
+  expect(tool_command("area_info", { area_name = "Cliffside Island" })):eq("area Cliffside")
+  expect(tool_command("library_entry", { entry_number = 48043 })):eq("library read 48043")
+  expect(tool_command("area_info", { area_name = "" })):eq(nil)      -- no usable arg
+  expect(tool_command("library_entry", {})):eq(nil)
+  expect(tool_command("bogus", { x = 1 })):eq(nil)                   -- unknown tool
+end)
+
+test("capture_keep drops noise (blanks, kxwt, the [event] channel, our echoed command) but keeps real output", function()
+  expect(capture_keep("The Continent of Gianasi", "area Cliffside")):eq(true)
+  expect(capture_keep("Grp 183  4 Cliffside Island   creators", "area Cliffside")):eq(true)
+  expect(capture_keep("", "area Cliffside")):eq(false)
+  expect(capture_keep("   ", "area Cliffside")):eq(false)
+  expect(capture_keep("kxwt_prompt 1 2 3", "area Cliffside")):eq(false)
+  expect(capture_keep("[event] trivia answer: ...", "area Cliffside")):eq(false)
+  expect(capture_keep("area Cliffside", "area Cliffside")):eq(false)  -- our own echoed command
+  -- combat text is KEPT (the model reads through it) — we only strip machinery
+  expect(capture_keep("A gnoll's claw hits you.", "area Cliffside")):eq(true)
+end)

@@ -31,6 +31,7 @@ use_repo(
     "swift_package",
     "swiftpkg_afluent",
     "swiftpkg_dependencyinjection",
+    "swiftpkg_mockable",
     "swiftpkg_shellout",
     "swiftpkg_swift_argument_parser",
     "swiftpkg_swift_nio",

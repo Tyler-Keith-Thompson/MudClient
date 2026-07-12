@@ -64,14 +64,18 @@ final class LLMClient: @unchecked Sendable {
     /// consults nor caches the client's configured/resolved model, so a per-call override (e.g. the
     /// equipment adviser asking for a bigger dense model) never disturbs the pinned default other
     /// callers rely on (e.g. Trivia's pinned chat model).
-    func complete(system: String, user: String, maxTokens: Int, tools: String? = nil,
+    /// `toolChoice` controls whether a supplied tool set is forced ("required"/nil, the always-acting
+    /// pilot's default) or optional ("auto" — the model may answer directly OR call a tool, which is what
+    /// a trivia lookup wants). Ignored when `tools` is nil.
+    func complete(system: String, user: String, maxTokens: Int, tools: String? = nil, toolChoice: String? = nil,
                   assistantPrefix: String? = nil, modelOverride: String? = nil) async throws -> Completion {
         let model = try await resolveModel(override: modelOverride)
         lock.lock(); let base = baseURL; let temp = temperature; let provider = authKeyProvider; let native = useAnthropic; lock.unlock()
         let key = provider()   // resolve the key now, at request time (may read the keychain)
         if native {
             return try await completeAnthropic(model: model, base: base, key: key, temp: temp, system: system,
-                                               user: user, maxTokens: maxTokens, tools: tools, assistantPrefix: assistantPrefix)
+                                               user: user, maxTokens: maxTokens, tools: tools, toolChoice: toolChoice,
+                                               assistantPrefix: assistantPrefix)
         }
         var req = URLRequest(url: try Self.url(base, "/chat/completions"))
         req.httpMethod = "POST"
@@ -96,10 +100,10 @@ final class LLMClient: @unchecked Sendable {
         ]
         if let tools, let parsed = try? JSONSerialization.jsonObject(with: Data(tools.utf8)) {
             body["tools"] = parsed
-            // "required" forces the model to emit a tool call every turn instead of replying with
-            // prose (a weak/small model otherwise narrates "I'll cast X" and never acts). The script
-            // provides a `wait` tool for "do nothing", so requiring a call never traps the model.
-            body["tool_choice"] = "required"
+            // Default "required" forces a tool call every turn (a weak/small pilot model otherwise narrates
+            // "I'll cast X" and never acts; the script's `wait` tool covers "do nothing"). Callers that want
+            // the model free to answer directly OR look up — e.g. trivia — pass "auto".
+            body["tool_choice"] = toolChoice ?? "required"
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
@@ -147,7 +151,7 @@ final class LLMClient: @unchecked Sendable {
     /// same `Completion` the caller expects.
     private func completeAnthropic(model: String, base: String, key: String?, temp: Double,
                                    system: String, user: String, maxTokens: Int,
-                                   tools: String?, assistantPrefix: String?) async throws -> Completion {
+                                   tools: String?, toolChoice: String? = nil, assistantPrefix: String?) async throws -> Completion {
         var req = URLRequest(url: try Self.url(base, "/messages"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -187,7 +191,8 @@ final class LLMClient: @unchecked Sendable {
             if !atools.isEmpty {
                 atools[atools.count - 1]["cache_control"] = ["type": "ephemeral"]
                 body["tools"] = atools
-                body["tool_choice"] = ["type": "any"]   // force a tool call (== OpenAI "required")
+                // {type:any} == OpenAI "required" (force a call); {type:auto} lets the model answer or call.
+                body["tool_choice"] = (toolChoice == "auto") ? ["type": "auto"] : ["type": "any"]
             }
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)

@@ -14,6 +14,7 @@ _DEPS = [
     "@swift_parsing//:Parsing",
     "@swiftpkg_afluent//:Afluent",
     "@swiftpkg_dependencyinjection//:DependencyInjection",
+    "@swiftpkg_mockable//:Mockable",
     "@swiftpkg_shellout//:ShellOut",
     "@swiftpkg_swift_argument_parser//:ArgumentParser",
     "@swiftpkg_swift_nio//:NIO",
@@ -39,6 +40,11 @@ swift_library(
         ["*.swift"],
         exclude = ["MudClient.swift"],
     ),
+    # MOCKING makes Mockable's @Mockable macro emit its generated Mock types (they're wrapped in
+    # `#if MOCKING`). Defined here — the test-facing module — so mocks are available to the test
+    # bundle that `@testable import MudClient`s them, while the production `swift_binary` above
+    # compiles the same sources WITHOUT MOCKING, keeping mocks out of the shipped app.
+    defines = ["MOCKING"],
     module_name = "MudClient",
     visibility = ["//visibility:public"],
     deps = _DEPS,

@@ -20,15 +20,15 @@ local function with_corpse(fields, fn)
   if not ok then error(err, 2) end
 end
 
-test("a corpse still holding loot (its name auto-printed 'contains:') is NEVER sacrificed", function()
+test("a corpse holding loot is BSAC'd (blood only) but never SAC'd (removed)", function()
   with_corpse({ on = true, active = true, idx = 1, cur_name = "a jaguar",
                 with_items = { ["a jaguar"] = true } }, function(sent)
     corpse_finish()
-    for _, c in ipairs(sent) do
-      expect(c:find("^bsac") == nil):eq(true)    -- never blood-sacrificed
-      expect(c:find("^sac ") == nil):eq(true)    -- never sacrificed
-    end
-    expect(corpse.idx):eq(2)                      -- stepped PAST it, leaving it intact
+    expect(sent[1]):eq("bsac 1.corpse")           -- bsac only drains blood → safe on a loot corpse
+    expect(corpse.cur_empty):eq(false)            -- but flagged not-empty, so NOT sac-safe
+    corpse_sac()                                  -- bsac reply → decide
+    expect(corpse.idx):eq(2)                      -- stepped PAST it, items intact
+    for _, c in ipairs(sent) do expect(c:find("^sac ") == nil):eq(true) end   -- never REMOVED
   end)
 end)
 
@@ -48,18 +48,21 @@ test("a fully barren corpse (no name learned) IS sacrificed when the batch print
   end)
 end)
 
-test("an un-named corpse is left intact when SOME corpse in the batch DID hold loot (can't tell which)", function()
+test("an un-named corpse (batch held loot somewhere) is bsac'd but left intact — never removed", function()
   with_corpse({ on = true, active = true, idx = 1, cur_name = nil,
                 with_items = { ["a jaguar"] = true } }, function(sent)
     corpse_finish()
-    for _, c in ipairs(sent) do expect(c:find("^bsac") == nil):eq(true) end   -- never risk the loot corpse
-    expect(corpse.idx):eq(2)
+    expect(sent[1]):eq("bsac 1.corpse")             -- blood is always safe
+    expect(corpse.cur_empty):eq(false)              -- but can't prove it's empty → not sac-safe
+    corpse_sac()
+    expect(corpse.idx):eq(2)                        -- stepped past, not removed
+    for _, c in ipairs(sent) do expect(c:find("^sac ") == nil):eq(true) end
   end)
 end)
 
-test("sac is STREAM-driven: corpse_sac sends `sac` and WAITS for the god's reply (no early re-harvest)", function()
+test("sac is STREAM-driven: for an EMPTY corpse, corpse_sac sends `sac` and WAITS for the god's reply", function()
   with_corpse({ on = true, active = true, idx = 1, step = "bsac", remaining = 2, cur_name = nil,
-                with_items = {} }, function(sent)
+                cur_empty = true, with_items = {} }, function(sent)
     corpse_sac()
     expect(sent[1]):eq("sac 1.corpse")
     expect(#sent):eq(1)                              -- nothing else until the sac is confirmed
@@ -148,7 +151,9 @@ test("after sacrificing corpse 1, a leftover LOOT corpse doesn't cause a phantom
   -- so there is NO 2.corpse — the walk must end instead of probing it.
   with_corpse({ on = true, active = true, idx = 1, step = "spellcomps", remaining = 1,
                 cur_name = "a jaguar", with_items = { ["a jaguar"] = true } }, function(sent)
-    corpse_finish()                                  -- loot corpse → leave intact, idx->2 > remaining 1 → done
+    corpse_finish()                                  -- loot corpse → bsac (blood), then decide
+    expect(sent[1]):eq("bsac 1.corpse")
+    corpse_sac()                                     -- not empty → leave intact, idx->2 > remaining 1 → done
     expect(corpse.active):eq(false)                  -- walk ended (corpse_done also resets idx)
     for _, c in ipairs(sent) do expect(c:find("2%.corpse") == nil):eq(true) end   -- never probed 2.corpse
   end)

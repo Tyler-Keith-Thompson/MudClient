@@ -19,13 +19,13 @@ for _, n in ipairs({
   "rule_remove", "rule_enable", "class_enable", "class_remove",
   "music_play", "music_stop", "music_volume", "msp_volume", "speech_volume",
   "panel_render", "panel_top", "panel_height", "panel_top_height",
-  "ai_request", "ai_local_request", "ai_set_local_endpoint", "ai_set_local_model",
+  "ai_request", "ai_local_request", "ai_local_tools_request", "ai_set_local_endpoint", "ai_set_local_model",
   "ai_memory_request", "ai_retrieve", "ai_rag_load",
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
   "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send",
   "log_start", "log_stop", "log_active", "replay",
-  "grep", "sent", "received",
+  "grep", "sent", "received", "claude",
   "speak", "speech_stop",
 }) do stub(n) end
 -- Speech / live-vs-history stubs (SpeechService + SpeechBuiltins). is_live defaults to true so specs

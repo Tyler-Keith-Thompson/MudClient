@@ -137,6 +137,7 @@ private actor RecordedWrites {
 }
 
 @Test func replayCapturedRawLog() async throws {
+  try await withSilentAudio {
     // Debug tool: replay a MUD_RAW_LOG capture through the real IAC + MSP path.
     // Run with: bazel test ... --test_filter=replayCapturedRawLog --test_env=REPLAY_FILE=/path
     guard let path = ProcessInfo.processInfo.environment["REPLAY_FILE"],
@@ -163,9 +164,11 @@ private actor RecordedWrites {
         .filter { $0.contains("track_") || $0.contains(".wav") || $0.hasPrefix("ground_") }
     print("REPLAY chunks=\(chunks.count) leakedSOUND=\(display.contains("!!SOUND")) "
         + "markerLeak=\(display.contains(promptGoAheadMarker)) leakedTails=\(leakedTails)")
+  }
 }
 
 @Test func splitProtocolLineDoesNotLeakTailToDisplay() async throws {
+  try await withSilentAudio {
     // Regression: a `kxwt_` protocol line split across a TCP read leaks its orphaned tail. The head
     // fragment still matches the `^kxwt_` gag and is hidden, but the tail (here "ground_01") matches
     // nothing and leaks to the terminal — the reported "last bit of the sound path" after a move.
@@ -201,6 +204,7 @@ private actor RecordedWrites {
     #expect(!display.contains("kxwt_"))            // head still gagged
     #expect(!display.contains(promptGoAheadMarker)) // the GO-AHEAD marker is consumed, never shown
     #expect(display.contains("Password: "))        // the real prompt still reaches the display
+  }
 }
 
 @Test func goAheadFlushesPromptOnlyWhileNotSuppressed() async throws {
@@ -333,6 +337,7 @@ private actor RecordedWrites {
 }
 
 @Test func gaggedKxwtBatchesRenderNothing() async throws {
+  try await withSilentAudio {
     // Regression for "a bunch of blank lines before my command". When the player is idle, AlterAeon
     // streams kxwt_ status batches (group HP, prompt, sky/time) as their OWN network packets. Each
     // is fully gagged, so processServerOutputForScripts returns "" for it. The display consumer
@@ -394,9 +399,11 @@ private actor RecordedWrites {
         let between = String(screen[n.upperBound..<r.lowerBound])
         #expect(!between.contains("\n\n\n"), "blank-line run between notify and room: \(between.debugDescription)")
     }
+  }
 }
 
 @Test func scriptRegisteredCommandsDispatch() throws {
+  try withSilentAudio {
     // `#` commands are owned by scripts via the `command` BRIDGE: command("kxwt", h) defines a global
     // `kxwt`, and the REPL's legacy rewrite turns typed `#kxwt dump 5` into `kxwt("dump 5")`.
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
@@ -426,6 +433,7 @@ private actor RecordedWrites {
     echoed.removeAll()
     engine.evalREPL("kxwt corpse status")
     #expect(echoed.contains { $0.contains("corpse ON") })
+  }
 }
 
 @Test func luaAfterTimerFiresCallback() async throws {
@@ -449,6 +457,7 @@ private actor RecordedWrites {
 }
 
 @Test func luaGameScriptsLoadCleanly() throws {
+  try withSilentAudio {
     // Load the real game scripts through the engine to catch syntax errors and missing builtins —
     // they're otherwise only exercised at runtime. Resolved relative to this source file.
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
@@ -460,6 +469,7 @@ private actor RecordedWrites {
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // throws on syntax/runtime error
     try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+  }
 }
 
 @Test func aiPilotToolDefinitionsAreValidJSON() throws {
@@ -563,6 +573,7 @@ private actor RecordedWrites {
 }
 
 @Test func rawLogPipelineGagsKxwtNoLeak() async throws {
+  try await withSilentAudio {
     // Repro from a real raw capture: run actual server bytes through the real text pipeline
     // (IAC strip + CRLF normalize + MSP strip) and the AlterAeon gag, and prove kxwt machinery and
     // IAC Go-Ahead do NOT leak to the display.
@@ -602,6 +613,7 @@ private actor RecordedWrites {
     #expect(!display.unicodeScalars.contains { $0.value == 0xFF || $0.value == 0xF9 })  // IAC GA stripped
     // sanity: real content survived
     #expect(display.contains("Pellam Cemetery") || display.contains("Exits"))
+  }
 }
 
 /// A real slice of a server capture (8 network chunks) containing kxwt_ machinery, IAC Go-Ahead

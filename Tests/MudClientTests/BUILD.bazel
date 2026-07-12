@@ -17,5 +17,6 @@ swift_test(
         "//Sources/MudClient:MudClientLib",
         "@swift_parsing//:Parsing",
         "@swiftpkg_dependencyinjection//:DependencyInjection",
+        "@swiftpkg_mockable//:Mockable",
     ],
 )

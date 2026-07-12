@@ -506,6 +506,13 @@ doc("sent", { sig = "sent([n])", group = "history",
 doc("received", { sig = "received([n])", group = "history",
   text = "Print the last n (default 20) lines received (displayed) from the server.",
   example = "#received 10" })
+doc("claude", { sig = "claude(feedback)", group = "history",
+  text = "Hand freeform developer feedback to a running Claude Code session so it can go work on it. "
+      .. "Builds a /tmp bundle (your feedback + a timestamped, interleaved transcript of what you and "
+      .. "the Lua scripts sent and what the server displayed + a raw.log copy) and POSTs it to the local "
+      .. "`muddispatch` channel (see tools/dispatch/). The session must be launched with "
+      .. "`claude --dangerously-load-development-channels server:muddispatch` to receive it.",
+  example = "#claude the corpse sac fires one tick too early after a lifetap" })
 
 -- logging / replay
 doc("log_start", { sig = "log_start(path[, opts]) -> bool", group = "logging",
@@ -553,6 +560,8 @@ doc("ai_request", { sig = "ai_request(system, user, max_tokens, tools_json, assi
   text = "Async decision-model completion. cb(reply, tool_calls_json, err). tools_json/assistant_prefix may be nil/\"\"." })
 doc("ai_local_request", { sig = "ai_local_request(system, user, max_tokens, prefix, cb[, model])", group = "ai",
   text = "Async completion against the LOCAL model (never a paid API), for cheap always-on features. cb(reply, err). Optional model overrides the pinned local model for this call." })
+doc("ai_local_tools_request", { sig = "ai_local_tools_request(system, user, max_tokens, prefix, tools_json, cb[, model])", group = "ai",
+  text = "Like ai_local_request but with TOOLS and tool_choice 'auto' (the model may answer directly OR request a tool call). cb(reply, tool_calls_json, err); tool_calls_json is [{name, arguments}] or nil when it answered directly." })
 doc("ai_memory_request", { sig = "ai_memory_request(system, user, max_tokens, cb)", group = "ai",
   text = "Async completion against the separately-configured memory-head client. cb(reply, err). No tools or prefill." })
 doc("ai_retrieve", { sig = "ai_retrieve(query, k, cb)", group = "ai",

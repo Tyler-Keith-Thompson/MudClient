@@ -24,6 +24,9 @@ final class TranscriptStore: @unchecked Sendable {
         let origin: CommandOrigin?
         /// The line as it went over the wire (sent) or was displayed (received), ANSI intact.
         let text: String
+        /// Wall-clock instant the line was recorded. Lets consumers (e.g. the `#claude` dispatch
+        /// bundle) render an interleaved, timestamped picture of sends and receives.
+        let at: Date
     }
 
     private let lock = NSLock()
@@ -35,11 +38,11 @@ final class TranscriptStore: @unchecked Sendable {
     // MARK: Recording
 
     func recordSent(_ text: String, origin: CommandOrigin) {
-        append(Entry(kind: .sent, origin: origin, text: text))
+        append(Entry(kind: .sent, origin: origin, text: text, at: Date()))
     }
 
     func recordReceived(_ text: String) {
-        append(Entry(kind: .received, origin: nil, text: text))
+        append(Entry(kind: .received, origin: nil, text: text, at: Date()))
     }
 
     private func append(_ entry: Entry) {
@@ -55,6 +58,11 @@ final class TranscriptStore: @unchecked Sendable {
 
     /// The last `n` received lines.
     func received(last n: Int?) -> [Entry] { tail(where: { $0.kind == .received }, n) }
+
+    /// The last `n` entries of EVERY kind, interleaved in the order they occurred (oldest-first). This
+    /// is the timestamped picture the `#claude` dispatch bundle renders: your sends, script/AI sends,
+    /// and displayed server lines, together on one timeline.
+    func chronological(last n: Int?) -> [Entry] { tail(where: { _ in true }, n) }
 
     /// Every entry (sent AND received) whose ANSI-stripped text contains `needle`, case-insensitively.
     func grep(_ needle: String) -> [Entry] {

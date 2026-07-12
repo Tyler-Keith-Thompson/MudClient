@@ -28,7 +28,9 @@ local cfg = {
   enabled = true,          -- auto-answer by default (that's the whole point); `#trivia off` to disable
   rag_k = 4,               -- help passages retrieved to ground an unseen question
   area_wait = 1.2,         -- seconds to let the `area` command's rows arrive before deciding
-  max_tokens = 12,         -- we only want a letter back
+  lookup_wait = 1.5,       -- seconds to capture a tool lookup's in-game command output before answering
+  max_tokens = 12,         -- we only want a letter back (the direct/answer turns)
+  tool_max_tokens = 128,   -- the tools turn needs room to emit a tool call (name + arguments)
   home = os.getenv("HOME") or "",
   -- Same trailing prefill the pilot uses: a CLOSED, empty <think> block suppresses Qwen3.x's habit of
   -- spending the whole budget "thinking" and returning nothing. Harmless to hosted Claude.
@@ -209,36 +211,130 @@ local function guess(reason)
   submit(ls[math.random(#ls)], "guess")
 end
 
+-- ---- model tool-calling: look answers up with in-game commands ------------------------------------
+-- Some questions aren't in the RAG corpus but ARE answerable live (an area's sector/level; a Great Library
+-- entry). We give the model two TOOLS; when it can't answer from the reference it calls one, we run the
+-- matching in-game command, capture its output (tolerating combat noise), feed it back, and it answers.
+-- Needs the ai_local_tools_request builtin (a relaunch after adding it); without it we fall back to the
+-- old tool-less single call, so trivia keeps working (guessing on lookup questions) until then.
+local TOOLS_JSON = [==[[
+{"type":"function","function":{"name":"area_info","description":"Look up an Alter Aeon AREA by name to find its sector/continent and its level. Call this for any question about which sector or continent an area is in, or an area's level.","parameters":{"type":"object","properties":{"area_name":{"type":"string","description":"the area name, e.g. Cliffside Island"}},"required":["area_name"]}}},
+{"type":"function","function":{"name":"library_entry","description":"Look up a Great Library ENTRY by its number to get its title and topic. Call this for any question asking what a numbered Great Library entry is.","parameters":{"type":"object","properties":{"entry_number":{"type":"integer","description":"the entry number, e.g. 48043"}},"required":["entry_number"]}}}
+]]==]
+
+-- Parse the first tool call out of ai_local_tools_request's tool_calls_json ("[{name, arguments}]", where
+-- arguments is an ESCAPED json string). No JSON decoder in this runtime, so we pull the fields we need with
+-- patterns: the name, then the one argument value each tool takes (tolerant of the \"…\" escaping).
+local function parse_tool_call(tool_calls_json)
+  local j = tool_calls_json or ""
+  local name = j:match('"name"%s*:%s*"([%w_]+)"')
+  if name == "area_info" then
+    local a = j:match('area_name["\\:%s]+([^"\\]+)')
+    return name, { area_name = a and trim(a) or nil }
+  elseif name == "library_entry" then
+    local n = j:match('entry_number["\\:%s]+(%d+)')
+    return name, { entry_number = n and tonumber(n) or nil }
+  end
+  return name, {}
+end
+
+-- The in-game command that answers a given tool call, or nil for an unusable one.
+local function tool_command(name, args)
+  args = args or {}
+  if name == "area_info" and args.area_name and args.area_name ~= "" then
+    return "area " .. pick_keyword(args.area_name)     -- pick_keyword: a distinctive search word
+  elseif name == "library_entry" and args.entry_number then
+    return "library read " .. args.entry_number
+  end
+  return nil
+end
+
+-- A tool NAME -> the short source tag shown when we answer from its lookup.
+local TOOL_SOURCE = { area_info = "area", library_entry = "library" }
+
+-- ---- in-game command output capture (noise-tolerant) ---------------------------------------------
+-- Run a lookup command and gather its output over a short window. A broad line collector (below) appends
+-- lines while `capture.active`; we drop the obvious non-answer noise (blanks, kxwt machinery, the [event]
+-- channel, our own echoed command) and cap the total — the model reads through whatever combat text is left.
+local capture = { active = false, lines = {}, cmd = nil }
+local CAPTURE_MAX = 40
+
+-- Should this line be kept in a lookup capture? (Pure — unit-tested.)
+local function capture_keep(line, cmd)
+  local l = trim(line or "")
+  if l == "" then return false end
+  if l:find("^kxwt_") then return false end                 -- protocol machinery
+  if l:find("^%[event%]") then return false end             -- the trivia channel itself
+  if cmd and l == trim(cmd) then return false end           -- our own echoed command
+  return true
+end
+
+local function collect_line(line)
+  if not capture.active then return end
+  if #capture.lines >= CAPTURE_MAX then return end
+  if capture_keep(line, capture.cmd) then capture.lines[#capture.lines + 1] = trim(line) end
+end
+
+local function run_lookup(cmd, cb)
+  capture.active, capture.lines, capture.cmd = true, {}, cmd
+  send(cmd)
+  after(cfg.lookup_wait, function()
+    local out = table.concat(capture.lines, "\n")
+    capture.active, capture.lines, capture.cmd = false, {}, nil
+    cb(out)
+  end)
+end
+
 local function ask_model()
-  local q, choices = T.q, T.choices
+  local q, choices = T.q_raw or T.q, T.choices
   local prompt_choices = {}
   for _, L in ipairs({ "a", "b", "c", "d" }) do
     if choices[L] then prompt_choices[#prompt_choices + 1] = L:upper() .. ": " .. choices[L] end
   end
-  local sys = "You answer multiple-choice trivia about the MUD 'Alter Aeon'. Use the REFERENCE if it "
-    .. "helps. Reply with EXACTLY ONE character: the letter (A, B, C, or D) of the best answer. Output "
-    .. "nothing else."
+  local sys = "You answer multiple-choice trivia about the MUD 'Alter Aeon'. Use the REFERENCE if it helps. "
+    .. "If you can't answer for certain from the reference (e.g. which sector/continent an area is in, an "
+    .. "area's level, or what a numbered Great Library entry is), CALL a tool to look it up, then answer. "
+    .. "Otherwise reply with EXACTLY ONE character: the letter A, B, C, or D. Output nothing else."
 
-  local function on_reply(reply, err)
+  -- Parse a model reply into a letter and submit (or guess). `source` labels how we got it.
+  local function answer_from(reply, source)
     if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-    if err then guess("model error: " .. err); return end
     local letter = extract_letter(reply)
-    if letter and T.choices[letter] then submit(letter, "model")
+    if letter and T.choices[letter] then submit(letter, source)
     else guess("couldn't parse a letter from '" .. tostring(reply) .. "'") end
   end
 
-  local function decide(manual)
+  local function decide(reference)
     if EPOCH ~= _TRIVIA.epoch or T.answered then return end
-    local user = (manual and manual ~= "" and ("REFERENCE:\n" .. manual .. "\n\n") or "")
-      .. "QUESTION: " .. q .. "\n" .. table.concat(prompt_choices, "\n") .. "\n\nAnswer with one letter:"
-    -- Answer with the LOCAL model so we don't depend on (or pay for) the pilot's hosted brain — which
-    -- may be down or unconfigured, in which case the shared ai_request just errors and we'd guess every
-    -- time. Fall back to the shared brain only if the local builtin is missing (un-relaunched binary),
-    -- and to a guess if there's no model at all.
-    if ai_local_request then
-      ai_local_request(sys, user, cfg.max_tokens, cfg.think_prefill, on_reply)
+    local user = (reference and reference ~= "" and ("REFERENCE:\n" .. reference .. "\n\n") or "")
+      .. "QUESTION: " .. q .. "\n" .. table.concat(prompt_choices, "\n")
+    -- Preferred: the LOCAL model WITH tools, so we don't depend on (or pay for) the pilot's brain and can
+    -- look answers up in-game. Fall back to a plain local (then shared) call when the tools builtin is
+    -- missing (binary not relaunched yet), and to a guess if there's no model at all.
+    if ai_local_tools_request then
+      ai_local_tools_request(sys, user .. "\n\nAnswer with one letter, or call a tool.", cfg.tool_max_tokens,
+        cfg.think_prefill, TOOLS_JSON, function(reply, tool_calls, err)
+          if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+          if err then guess("model error: " .. err); return end
+          if not tool_calls then answer_from(reply, "model"); return end   -- answered directly
+          local name, args = parse_tool_call(tool_calls)
+          local cmd = tool_command(name, args)
+          if not cmd then answer_from(reply, "model"); return end          -- unusable tool call → try the text
+          echo("\27[36m[trivia] looking it up: " .. cmd .. "\27[0m")
+          run_lookup(cmd, function(out)
+            if EPOCH ~= _TRIVIA.epoch or T.answered then return end
+            local user2 = user .. "\n\nLOOKUP RESULT (" .. name .. "):\n" .. out .. "\n\nNow answer with one letter:"
+            ai_local_tools_request(sys, user2, cfg.max_tokens, cfg.think_prefill, "", function(r2, _, e2)
+              if e2 then guess("model error: " .. e2) else answer_from(r2, TOOL_SOURCE[name] or "tool") end
+            end)
+          end)
+        end)
+    elseif ai_local_request then
+      ai_local_request(sys, user .. "\n\nAnswer with one letter:", cfg.max_tokens, cfg.think_prefill,
+        function(reply, err) if err then guess("model error: " .. err) else answer_from(reply, "model") end end)
     elseif ai_request then
-      ai_request(sys, user, cfg.max_tokens, "", cfg.think_prefill, function(reply, _, err) on_reply(reply, err) end)
+      ai_request(sys, user .. "\n\nAnswer with one letter:", cfg.max_tokens, "", cfg.think_prefill,
+        function(reply, _, err) if err then guess("model error: " .. err) else answer_from(reply, "model") end end)
     else
       guess("no model available")
     end
@@ -312,6 +408,10 @@ trigger("^\\s*(?:Lvl|Grp)\\s+\\d", function(line)
   local r = parse_area_row(line)
   if r then T.area_rows[#T.area_rows + 1] = r end
 end)
+
+-- Broad line collector for a tool lookup's command output. Matches every line but no-ops unless a lookup
+-- capture is active (run_lookup), so it's cheap the rest of the time; collect_line does the filtering.
+trigger(".+", function(line) collect_line(line) end)
 
 trigger("\\[event\\] trivia choices:\\s*(.+)", function(_, c)
   if not T.q then return end   -- choices without a question we captured; ignore
@@ -397,6 +497,9 @@ _TRIVIA_TEST = {
   pick_keyword = pick_keyword,
   norm_area = norm_area,
   choice_for_level = choice_for_level,
+  parse_tool_call = parse_tool_call,
+  tool_command = tool_command,
+  capture_keep = capture_keep,
 }
 
 -- Pin the local client to a real chat model (see cfg.model) so ai_local_request doesn't fall through to

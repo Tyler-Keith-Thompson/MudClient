@@ -17,5 +17,6 @@ let package = Package(
         .package(url: "https://github.com/Tyler-Keith-Thompson/Afluent.git", from: "0.6.2"),
         .package(url: "https://github.com/Tyler-Keith-Thompson/DependencyInjection.git", from: "0.0.7"),
         .package(url: "https://github.com/JohnSundell/ShellOut.git", from: "2.3.0"),
+        .package(url: "https://github.com/Kolos65/Mockable.git", from: "0.6.4"),
     ]
 )

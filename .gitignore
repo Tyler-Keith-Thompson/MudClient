@@ -22,3 +22,6 @@ mud_raw.log
 
 # Finetune model checkpoints — training outputs, multi-GB. Keep adapter_config.json, ignore weights.
 *.safetensors
+
+# mud-dispatch-channel deps
+tools/dispatch/node_modules/

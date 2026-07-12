@@ -20,6 +20,7 @@ let package = Package(
         .package(url: "git@github.com:Tyler-Keith-Thompson/DependencyInjection.git", from: "0.0.7"),
         .package(path: "../swift-parsing"),
         .package(url: "git@github.com:JohnSundell/ShellOut.git", from: "2.3.0"),
+        .package(url: "https://github.com/Kolos65/Mockable.git", from: "0.6.4"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -41,8 +42,15 @@ let package = Package(
                 .product(name: "DependencyInjection", package: "DependencyInjection"),
                 .product(name: "Parsing", package: "swift-parsing"),
                 .product(name: "ShellOut", package: "ShellOut"),
+                .product(name: "Mockable", package: "Mockable"),
                 "ScriptDescription",
                 "CLua",
+            ],
+            // Mockable's generated mocks are gated behind the MOCKING compile condition, so they
+            // exist in debug (tests) but are stripped from release builds. Bazel mirrors this by
+            // defining MOCKING only on the test-facing MudClientLib target.
+            swiftSettings: [
+                .define("MOCKING", .when(configuration: .debug)),
             ]
         ),
         .target(name: "ScriptDescription",
@@ -53,7 +61,10 @@ let package = Package(
                 ]),
         .testTarget(
             name: "MudClientTests",
-            dependencies: ["MudClient"]
+            dependencies: [
+                "MudClient",
+                .product(name: "Mockable", package: "Mockable"),
+            ]
         ),
     ]
 )

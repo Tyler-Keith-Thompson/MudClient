@@ -140,6 +140,18 @@ test("casts at the single skeletal minion by bare keyword; bolster when badly hu
   end)
 end)
 
+test("does NOT heal minions when YOUR mana is critically low — recover your own mana first", function()
+  local g = { me(), minion("A skeletal mage", 40, 79) }    -- a hurt skeletal minion that would normally heal
+  with_group(g, { mana = 20 }, function(sent)               -- 20% mana < MINION_HEAL_MANA_MIN (30%)
+    AA.try_cast_heal()
+    expect(#sent):eq(0)                                     -- no cast — don't drain a critically low pool
+  end)
+  with_group(g, { mana = 50 }, function(sent)               -- 50% mana ≥ floor → healing resumes
+    AA.try_cast_heal()
+    expect(sent[1]):eq("c bolster mage")
+  end)
+end)
+
 test("heals the MOST-hurt skeletal minion first", function()
   with_group({ me(), minion("A skeletal mage", 70, 79), minion("A skeletal spider", 5, 39) }, {}, function(sent)
     AA.try_cast_heal()

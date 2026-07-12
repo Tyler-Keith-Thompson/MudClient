@@ -1,0 +1,13 @@
+{
+  "name": "mud-dispatch-channel",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Local Claude Code custom-channel MCP server that pushes MudClient developer feedback into a running claude session.",
+  "main": "mud-channel.mjs",
+  "scripts": {
+    "start": "node mud-channel.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  }
+}

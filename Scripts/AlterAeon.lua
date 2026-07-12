@@ -447,6 +447,10 @@ local REFRESH_COST       = 15     -- mana; help: "Spell: refresh  Mana: 15"
 local HEAL_COST          = 14     -- mana; bolster's cost (the pricier of the two — conservative guard)
 local CAST_MIN_TICKS     = 3      -- don't bother casting if the stat is within this many ticks of target
 local SELF_CAST_MANA_MIN = 0.50   -- only trade mana for hp/stam when mana is at least this full
+-- Skeletal minions can only heal via a cast, but a cast still costs mana — so when YOUR mana is critically
+-- low, don't drain it further on minions; recover your own mana first and heal them once it climbs back.
+-- Lower than SELF_CAST_MANA_MIN because minion heals are more essential (skeletons have no natural regen).
+local MINION_HEAL_MANA_MIN = 0.30
 
 -- ticks_to_target(cur,max,rate,frac) — ticks of natural regen to reach frac*max. 0 if already there;
 -- nil when we have no positive rate (→ "unknown", never treated as slow-enough-to-cast). Forward-declared
@@ -696,6 +700,10 @@ local function try_cast_heal()
   local m, f
   if not (recovery and recovery.stat) then m, f = most_hurt_spell_minion() end
   if not m then try_self_cast(); return end
+  -- Mana too low to spend on minions: don't drain it further (recover YOUR mana first). The skeletal minion
+  -- stays hurt for now — recovery keeps resting, and once mana climbs back above the floor we heal it. We
+  -- do NOT fall through to a self-cast: those need even MORE mana (SELF_CAST_MANA_MIN), so also no-op here.
+  if pct(state.mana, state.maxmana) < MINION_HEAL_MANA_MIN then return end
   local word = minion_target_word(m.name)
   local K = keyword_count(word)
   local target = word
@@ -825,6 +833,7 @@ _AA_TEST = { ready = ready, pct = pct, READY_PCT = READY_PCT,
              keyword_count = keyword_count, keyword_matches = keyword_matches,
              minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,
              minion_heal = minion_heal, try_cast_heal = try_cast_heal,
+             MINION_HEAL_MANA_MIN = MINION_HEAL_MANA_MIN,
              minion_cast_settled = minion_cast_settled, reset_minion_heal = reset_minion_heal,
              reset_posture = reset_posture,
              ticks_to_target = ticks_to_target, cast_beats_waiting = cast_beats_waiting,
@@ -2001,6 +2010,7 @@ end
 function corpse_done()
   corpse.active = false; corpse.step = nil; corpse.idx = 1; corpse.killed = false
   corpse.promise = nil; corpse.kills = {}; corpse.kill_count = 0; corpse.remaining = nil   -- fresh tallies for the next batch
+  corpse.cur_empty = nil
   if corpse.watchdog then cancel(corpse.watchdog); corpse.watchdog = nil end
   local s = corpse.settle; corpse.settle = nil
   if s then s.resolve() end
@@ -2072,34 +2082,36 @@ function corpse_harvest_done()
   end
 end
 
--- Done harvesting this corpse. Sacrifice it ONLY if we're sure it's empty: we know its name (from its
--- harvest reply) AND the kill didn't auto-print any loot contents for it. Otherwise (has loot, or name
--- unknown) leave it INTACT and step to the next index — never destroy items.
+-- Done harvesting this corpse. `bsac` only DRAINS the blood (safe even on a corpse holding items), while
+-- `sac` REMOVES the whole thing (and destroys any items). So we BLOOD-SACRIFICE every corpse for the mana,
+-- and only truly SAC (remove) the ones we're sure are EMPTY. A corpse we know holds loot — or can't
+-- identify — gets its blood taken and is then left INTACT (never sac'd).
 function corpse_finish()
   if not corpse.active then return end
   local name = corpse.cur_name
-  -- Sacrifice ONLY when we're sure no loot is at risk. Two safe ways to know a corpse is empty:
+  -- Empty enough to REMOVE (sac)? Two safe ways to know:
   --   * we learned its NAME (from a harvest reply) and it never printed "…contains:" at the kill; OR
-  --   * we never learned a name — a FULLY barren corpse (no teeth AND no spellcomps) names itself in
-  --     neither reply — but NO corpse in this batch printed "…contains:", so there is no loot anywhere to
-  --     destroy. (Without this the common "kill one mob, nothing to harvest, no loot" corpse was left
-  --     un-sacrificed forever.)
-  -- Otherwise (name unknown while SOME corpse held loot) leave it intact — never risk items.
-  local empty = (name and not corpse.with_items[name]) or (not name and next(corpse.with_items) == nil)
-  if empty then
-    corpse.step = "bsac"
-    send("bsac " .. corpse.idx .. ".corpse")   -- empty → blood-sacrifice, then sac on the bsac result line
-  else
-    corpse.idx = corpse.idx + 1                 -- has loot (or unsure) → leave it, next corpse
-    corpse_process()
-  end
+  --   * we never learned a name — a FULLY barren corpse names itself in neither reply — but NO corpse in
+  --     this batch printed "…contains:", so there's no loot anywhere to destroy.
+  -- Otherwise (name unknown while SOME corpse held loot, or it printed contents) it's NOT sac-safe.
+  corpse.cur_empty = (name and not corpse.with_items[name]) or (not name and next(corpse.with_items) == nil)
+  corpse.step = "bsac"
+  send("bsac " .. corpse.idx .. ".corpse")     -- blood is safe to take from ANY corpse; sac decision comes next
 end
 
+-- The blood-sacrifice resolved (its reply drives us here). bsac took the blood; now REMOVE the corpse only
+-- if it's empty. A corpse holding loot (or one we couldn't identify) keeps its items — leave it intact and
+-- step to the next index, exactly like a sac that fails.
 function corpse_sac()
   if not corpse.active or corpse.step == "sac" then return end
   corpse_touch()          -- progress: (re)arm the stall watchdog
+  if not corpse.cur_empty then
+    corpse.idx = corpse.idx + 1               -- held items → drained but NOT removed; on to the next corpse
+    corpse_process()
+    return
+  end
   corpse.step = "sac"
-  send("sac " .. corpse.idx .. ".corpse")   -- removes it — but WAIT for the god's reply before re-processing
+  send("sac " .. corpse.idx .. ".corpse")   -- empty → remove it — but WAIT for the god's reply before re-processing
 end
 
 -- The `sac` resolved (STREAM-driven, like every other step). "ok" = the god accepted it (an "appreciates
@@ -2158,6 +2170,11 @@ trigger([[^You do not see anything like that here]], function() if corpse.active
 trigger([[^You don't see any usable]], function() corpse_harvest_done() end)             -- teeth (likely spellcomps too)
 trigger([[^You can't safely carry any more teeth]], function() corpse_harvest_done() end) -- teeth full
 trigger([[^Your collected teeth grow restless]], function() corpse_harvest_done() end)    -- teeth full
+-- Mid-harvest PROGRESS (NOT a step advance): a single `harvest teeth` works through several teeth, printing
+-- one of these per tooth before the terminal line. They're real activity, so re-arm the stall watchdog off
+-- them — otherwise a slow multi-tooth harvest trips the false "loot pass stalled" timeout mid-work.
+trigger([[^You carefully extract one tooth]], function() if corpse.active then corpse_touch() end end)
+trigger([[^You shatter one of the teeth]], function() if corpse.active then corpse_touch() end end)
 trigger([[^You don't know enough about the undead]], function() corpse_harvest_done() end) -- no spellcomp skill
 trigger([[^You can't harvest spell components from that]], function() corpse_harvest_done() end) -- this corpse yields no spellcomps
 

@@ -61,9 +61,9 @@ import Testing
 
 @Test func formatTranscriptLabelsByKindAndOrigin() {
     let entries: [TranscriptStore.Entry] = [
-        .init(kind: .sent, origin: .user, text: "kill orc"),
-        .init(kind: .sent, origin: .script, text: "c icebolt"),
-        .init(kind: .received, origin: nil, text: "The orc dies."),
+        .init(kind: .sent, origin: .user, text: "kill orc", at: Date()),
+        .init(kind: .sent, origin: .script, text: "c icebolt", at: Date()),
+        .init(kind: .received, origin: nil, text: "The orc dies.", at: Date()),
     ]
     let lines = LuaScriptEngine.formatTranscript(entries)
     #expect(lines.count == 3)
