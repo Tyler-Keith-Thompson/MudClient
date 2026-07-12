@@ -2597,6 +2597,25 @@ end
 function pilot.reload() return reload() end
 doc(pilot.reload, { name = "pilot.reload", sig = "pilot.reload()", group = "pilot",
   text = "Hot-reload the Scripts/ directory (same as reload() / legacy `#ai reload`)." })
+-- pilot.restore_map([path]) — import a saved/backup map file into the LIVE map, replacing what's in
+-- memory, then persist it. Race-free (an in-memory swap, not a file-timing dance): use it to recover from
+-- a backup (e.g. explored.lua.bak or a hand-made copy) without stopping the session. `path` defaults to
+-- explored.lua.bak; a bare name resolves under the MudClient data dir. self-heals via persist.load.
+function pilot.restore_map(path)
+  path = (path ~= nil and path ~= "") and tostring(path) or (cfg.dir .. "/explored.lua.bak")
+  if not path:find("/") then path = cfg.dir .. "/" .. path end
+  local t = persist.load(path, function(m) if echo then echo(m, "yellow") end end)
+  if type(t) ~= "table" or not t.rooms then
+    echo("[map] restore failed: " .. path .. " is not a valid map file.", "red"); return
+  end
+  P.rooms = t.rooms or {}; P.dir_deltas = t.dir_deltas or {}; P.memories = t.memories or {}
+  P.waypoints = t.waypoints or {}; P.wp_room = t.wp_room or {}; P.room_wp = t.room_wp or {}
+  schedule_save()
+  echo(string.format("[map] restored %d rooms, %d memories from %s (saving safely now).",
+                     count_map(P.rooms), count_map(P.memories), path), "green")
+end
+doc(pilot.restore_map, { name = "pilot.restore_map", sig = "pilot.restore_map([path])", group = "pilot",
+  text = "Import a saved/backup map file into the live map (replaces the in-memory rooms/marks/notes/waypoints, then saves). `path` defaults to explored.lua.bak; a bare name resolves under ~/Documents/MudClient. Use it to recover from a backup mid-session." })
 setmetatable(pilot, { __call = function(_, args) return ai(args) end })
 
 -- `ai` stays as a thin, deprecated wrapper (bootstrap defines it; here we just re-document it) so the

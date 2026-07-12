@@ -549,6 +549,15 @@ end
 
 load_regen_cache()   -- warm the cache from disk (stale/level-mismatched entries are filtered at lookup)
 
+-- Warm state.regen once shortly after connecting, so the rates are known (and shown in the model's STATE
+-- block) BEFORE the first recovery — not only after one. ensure_regen is cache-backed + the query is
+-- gagged/debounced, so this is a single silent `show regen` at most. Chains any existing on_connect.
+local _prev_on_connect_regen = on_connect
+function on_connect(...)
+  if _prev_on_connect_regen then _prev_on_connect_regen(...) end
+  if after then after(4, function() if not state.fighting then ensure_regen() end end) end
+end
+
 -- Skeletal/undead constructs the player raises: no natural regen, must be spell-healed. Matched by name
 -- ("skeletal spider", "skeletal mage", "bone ..."). Everything else is assumed to self-regen.
 local function minion_needs_spell_heal(name)

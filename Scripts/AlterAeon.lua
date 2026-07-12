@@ -580,6 +580,14 @@ function describe_state()
   local sp = {}
   for k in pairs(state.spells) do sp[#sp+1] = k end
   if #sp > 0 then out[#out+1] = "active spells: " .. table.concat(sp, ", ") end
+  -- Regen rates (from `show regen`, auto-queried + cached by Recovery.lua). Surfaced so the decision model
+  -- can reason about rest-vs-keep-going, not just the deterministic recovery layer that also reads it.
+  if state.regen and state.regen.hp then
+    local r = state.regen
+    out[#out+1] = string.format("regen per tick: %d hp, %d mana, %d move (while %s%s)",
+      r.hp, r.mana or 0, r.move or 0, r.position or state.position or "standing",
+      state.sharp and ", sharp" or "")
+  end
   -- Inventory/equipment intentionally omitted: kxwt doesn't report them (they're parsed from
   -- `inventory`/`equipment` output and go stale fast), so they're noise in the state block.
   if state.gold then out[#out+1] = "gold: " .. state.gold end
