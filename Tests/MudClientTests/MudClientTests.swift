@@ -192,6 +192,7 @@ private actor RecordedWrites {
     }
     // Apply the AlterAeon gag the way the display consumer does, then hunt for leaked protocol tails.
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     let scriptDir = URL(fileURLWithPath: "\(#filePath)")
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
@@ -234,6 +235,7 @@ private actor RecordedWrites {
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
 
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
         URL(fileURLWithPath: "\(file)")
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -263,6 +265,7 @@ private actor RecordedWrites {
   try await withTestContainer {
     Container.scriptInterpreter.register { ScriptInterpreter() }
     Container.anthropicAPIKeyProvider.register { { nil } }
+    Container.lagMonitor.register { LagMonitor() }
     // GA is a prompt boundary by the telnet NVT default, so `Password: ` + IAC GA flushes the held
     // partial line to the display (the injected marker is consumed by the assembler, not shown).
     func run(_ chunks: [Data]) async throws -> String {
@@ -444,7 +447,12 @@ private actor RecordedWrites {
 
     Container.scriptInterpreter.register { ScriptInterpreter() }
     let interp = Container.scriptInterpreter()
+    defer { interp.engine.clearRules() }
     interp.engine.clearRules()
+    // This test asserts only on gagged/rendered output, never on outbound commands. The real
+    // ScriptInterpreter's default onSend resolves Container.inputService() (fileprivate init, not
+    // test-constructible); give it a sink so a script's send() has somewhere to go.
+    interp.engine.onSend = { _ in }
     try? interp.engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try interp.engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
@@ -511,6 +519,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     // AlterAeon's game logic is split across AlterAeon + its sibling files (Recovery/Combat/Corpse/Audio);
     // load the whole family so the `kxwt.corpse` command (now in Corpse.lua) is registered.
@@ -588,6 +597,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // throws on syntax/runtime error
     try engine.load(path: repoFile("Scripts/AIPilot.lua"))
@@ -596,6 +606,13 @@ private actor RecordedWrites {
 
 @Test func aiPilotToolDefinitionsAreValidJSON() throws {
   try withTestContainer {
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork() }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     Container.terminalService.register { TerminalService() }
     Container.lagMonitor.register { LagMonitor() }
     Container.transcriptStore.register { TranscriptStore() }
@@ -609,6 +626,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
     try engine.load(path: repoFile("Scripts/AIPilot.lua"))
@@ -643,6 +661,13 @@ private actor RecordedWrites {
 
 @Test func humanPlayMapsToToolCallTrainingExamples() throws {
   try withTestContainer {
+    let music = MockMusicServicing(policy: .relaxedVoid)
+    let speech = MockSpeechServicing(policy: .relaxedVoid)
+    let msp = MockMSPServicing(policy: .relaxedVoid)
+    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork() }
+    Container.musicService.register { music }
+    Container.speechService.register { speech }
+    Container.mspService.register { msp }
     Container.terminalService.register { TerminalService() }
     Container.lagMonitor.register { LagMonitor() }
     Container.transcriptStore.register { TranscriptStore() }
@@ -657,6 +682,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     // Load the full AlterAeon family (recover/combat/corpse globals moved into sibling files) so the AI
     // command classifier AIPilot uses can resolve them, mirroring the real load("Scripts").
@@ -746,6 +772,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     let engine = LuaScriptEngine()
+    defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
     try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let lines = text.components(separatedBy: "\n")

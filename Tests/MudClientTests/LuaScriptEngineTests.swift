@@ -370,6 +370,7 @@ private func luaStringLiteral(_ s: String) -> String {
     // Route copy()'s clipboard write into a capture so the test never touches the real pasteboard,
     // then assert it echoes a "copied N lines" confirmation and wrote (the scrollback is empty in a
     // headless test, so N is 0 — the wiring, format, and pasteboard call are what's under test).
+    Container.terminalService.register { TerminalService() }
     let original = LuaScriptEngine.pasteboardWrite
     defer { LuaScriptEngine.pasteboardWrite = original }
     var captured: String?

@@ -64,7 +64,21 @@ Each test resolves through its own `TestContainer`; nothing reaches the shared `
   Prefer **not** using `Task.detached`. If the context loss is under Apple's covers (GCD/`Thread`),
   `withContainer(ref)` is the remedy — that's exactly what it's for.
 
-### Fixes made so far
+### A test must cancel timers it started
+Loading the game scripts arms real timers (the reactive scripts schedule one-shot `after(2, save_*)`
+persistence timers, `after(0, …)` promise starts, etc.). A fast test finishes in milliseconds, but a 2s
+timer then fires *later* — and because `arm` faithfully re-applies the container captured at schedule time
+(see below), it re-enters that test's now-defunct `TestContainer` and traps on the first dependency the
+test didn't register, landing on whatever test is running at that instant (nondeterministic flake). So a
+test that loads scripts must cancel its timers on the way out: `defer { engine.clearRules() }` (or
+`interp.engine.clearRules()`). Tests clean up after themselves.
+
+### `--test_filter` does not work here
+Bazel's `--test_filter` silently matches **zero** swift-testing tests and reports a green "0 tests" — so
+you can't isolate a single test that way. To chase a nondeterministic trap, run the whole target repeatedly
+(`--nocache_test_results`, several times) and collect the distinct trapped factories.
+
+### Prod task-local leak fixes made so far
 - **`LuaScriptEngine.arm`** (backing `after`/`every`): timer callbacks fire on a GCD `timerQueue`, which
   drops task-locals, and the Lua callback resolves services (`terminalService` via `echo`, the LLM
   clients). Fixed by capturing `Container.current` when the timer is armed and wrapping the fired
