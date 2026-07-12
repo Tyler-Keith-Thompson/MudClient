@@ -278,22 +278,32 @@ def _clean(s):
     return s.strip(" .,;:'\"").strip()
 
 
-def template_prompt(event_type, detail, state, snippet):
+def template_prompt(moment, state, snippet):
+    event_type, detail = moment["event"], moment["detail"]
+    meta = moment.get("meta", {})
     room = _clean(state.get("room", "a dark dungeon")) or "a dark dungeon"
     area = _clean(state.get("area", ""))
     name = _clean(state.get("name", "a lone adventurer")) or "a lone adventurer"
-    detail = _clean(detail)
+    if meta.get("player"):
+        name = _clean(meta["player"]) or name
+    mob = _clean(meta.get("mob", "")) or "a fearsome foe"
+    freak = meta.get("freak", 0)
+    rare = "an incredibly rare, legendary" if freak >= 32 else ("a rare" if freak >= 16 else "a")
+    cd = _clean(detail)
     setting = f"in {room}" + (f", {area}" if area else "")
     scenes = {
+        "soulsteal": f"{name} the soul-reaver ripping the glowing soul out of {mob} {setting}, {rare} soul-harvest, a spectral essence torn free and swirling into a radiant soulstone, necromantic energy, ghostly light",
+        "backstab": f"{name} driving a dagger into {mob} from the shadows {setting}, a devastating {rare} critical strike, blood and steel, shadowy assassin",
+        "notify": f"{name} performing a legendary feat {setting}: {cd}, epic and heroic",
         "player_death": f"The fall of {name} {setting}; a fallen hero's final moment, spirit rising, somber and heroic",
-        "achievement": f"{name} triumphant {setting}, achievement unlocked: {detail}, glory and light",
-        "quest_complete": f"{name} completing an epic quest {setting}: {detail}, victorious",
-        "level_up": f"{name} surging with new power {setting}, radiant burst of energy, ascending to level {detail}",
-        "level_up2": f"{name} surging with new power {setting}, radiant burst of energy, now {detail}",
-        "kill": f"{name} striking the killing blow against {detail} {setting}, dramatic combat, weapons and magic clashing",
+        "achievement": f"{name} triumphant {setting}, achievement unlocked: {cd}, glory and light",
+        "quest_complete": f"{name} completing an epic quest {setting}: {cd}, victorious",
+        "level_up": f"{name} surging with new power {setting}, radiant burst of energy, ascending to a new level",
+        "level_up2": f"{name} surging with new power {setting}, radiant burst of energy, {cd}",
+        "kill": f"{name} striking the killing blow against {mob} {setting}, dramatic combat, weapons and magic clashing",
         "near_death_escape": f"{name} narrowly escaping death {setting}, bloodied and fleeing through peril, desperate and tense",
     }
-    scene = scenes.get(event_type, f"{name} {setting}: {detail}")
+    scene = scenes.get(event_type, f"{name} {setting}: {cd}")
     return f"{scene}. {STYLE}."
 
 
@@ -377,10 +387,19 @@ def llm_prompt(moment, state, snippet):
         f"Character: {state.get('name', PLAYER)} in {state.get('room','?')} "
         f"({state.get('area','')})\nRaw game log:\n{snippet[-1000:]}"
     )
-    obj = _llm_json([{"role": "system", "content": sys_prompt},
-                     {"role": "user", "content": user_msg}], max_tokens=400)
+    msgs = [{"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_msg}]
+    obj = _llm_json(msgs, max_tokens=400)
     if isinstance(obj, dict) and isinstance(obj.get("prompt"), str) and len(obj["prompt"]) > 15:
         return obj["prompt"].strip()
+    # Robustness: some replies aren't valid JSON. Accept a clean plain-text prompt.
+    raw = _llm_chat(msgs, max_tokens=400, temperature=0.3)
+    if raw:
+        raw = re.sub(r"^```.*?$|```", "", raw, flags=re.M).strip().strip('"')
+        raw = re.sub(r'^\s*\{?\s*"?prompt"?\s*:\s*"?', "", raw).strip().strip('",').strip()
+        raw = raw.replace("\n", " ").strip()
+        if 20 < len(raw) < 900 and "{" not in raw:
+            return raw
     return None
 
 
@@ -457,7 +476,7 @@ def build_prompt(moment, state, snippet):
     p = claude_prompt(moment["event"], moment["detail"], state, snippet)
     if p:
         return p, "claude"
-    return template_prompt(moment["event"], moment["detail"], state, snippet), "template"
+    return template_prompt(moment, state, snippet), "template"
 
 
 # ---------------------------------------------------------------------------

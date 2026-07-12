@@ -1,0 +1,52 @@
+Decoded kxwt_midi event stream — Asuka performing on 'A Beautifully Carved Wooden Flute'
+Source: captures/2026-07-12-asuka-flute-performance.raw.b64log (kxwt_midi frames, in wire order)
+Each line: <raw hex from the wire>  ->  <MIDI event meaning>
+
+C0 49        -> Program ch0 prog=73 (Flute (GM program 74, 0-indexed 73))
+90 4d 32     -> NoteOn  ch0 note=77  vel=50
+80 4d 00     -> NoteOff ch0 note=77
+90 52 32     -> NoteOn  ch0 note=82  vel=50
+80 52 00     -> NoteOff ch0 note=82
+90 4d 32     -> NoteOn  ch0 note=77  vel=50
+80 4d 00     -> NoteOff ch0 note=77
+90 56 32     -> NoteOn  ch0 note=86  vel=50
+80 56 00     -> NoteOff ch0 note=86
+90 52 32     -> NoteOn  ch0 note=82  vel=50
+80 52 00     -> NoteOff ch0 note=82
+90 59 32     -> NoteOn  ch0 note=89  vel=50
+B0 7B 00     -> CC      ch0 ctrl=123 val=0  (All Notes Off)
+C0 49        -> Program ch0 prog=73 (Flute (GM program 74, 0-indexed 73))
+90 4d 32     -> NoteOn  ch0 note=77  vel=50
+80 4d 00     -> NoteOff ch0 note=77
+90 52 32     -> NoteOn  ch0 note=82  vel=50
+80 52 00     -> NoteOff ch0 note=82
+90 4d 32     -> NoteOn  ch0 note=77  vel=50
+80 4d 00     -> NoteOff ch0 note=77
+90 56 32     -> NoteOn  ch0 note=86  vel=50
+80 56 00     -> NoteOff ch0 note=86
+90 52 32     -> NoteOn  ch0 note=82  vel=50
+80 52 00     -> NoteOff ch0 note=82
+90 59 32     -> NoteOn  ch0 note=89  vel=50
+B0 7B 00     -> CC      ch0 ctrl=123 val=0  (All Notes Off)
+C0 49        -> Program ch0 prog=73 (Flute (GM program 74, 0-indexed 73))
+90 59 32     -> NoteOn  ch0 note=89  vel=50
+80 59 00     -> NoteOff ch0 note=89
+90 5b 32     -> NoteOn  ch0 note=91  vel=50
+80 5b 00     -> NoteOff ch0 note=91
+90 51 32     -> NoteOn  ch0 note=81  vel=50
+80 51 00     -> NoteOff ch0 note=81
+90 5b 32     -> NoteOn  ch0 note=91  vel=50
+80 5b 00     -> NoteOff ch0 note=91
+90 59 32     -> NoteOn  ch0 note=89  vel=50
+80 59 00     -> NoteOff ch0 note=89
+90 56 32     -> NoteOn  ch0 note=86  vel=50
+B0 7B 00     -> CC      ch0 ctrl=123 val=0  (All Notes Off)
+C0 49        -> Program ch0 prog=73 (Flute (GM program 74, 0-indexed 73))
+90 56 32     -> NoteOn  ch0 note=86  vel=50
+80 56 00     -> NoteOff ch0 note=86
+90 56 32     -> NoteOn  ch0 note=86  vel=50
+80 56 00     -> NoteOff ch0 note=86
+90 54 32     -> NoteOn  ch0 note=84  vel=50
+80 54 00     -> NoteOff ch0 note=84
+90 52 32     -> NoteOn  ch0 note=82  vel=50
+B0 7B 00     -> CC      ch0 ctrl=123 val=0  (All Notes Off)

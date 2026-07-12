@@ -55,6 +55,45 @@ test("minimap shows a stub for every exit, even walked ones whose neighbor is of
   P.rooms, P.current_room = saved.rooms, saved.cur
 end)
 
+test("minimap gathers spatial neighbours by coordinate, not move-graph reachability", function()
+  -- Repro of the teleport-onto-isolated-waypoint / zone-renumber bug: the current room has a valid
+  -- coord but its `moves` reach NOTHING on this floor (or only a far, off-window node). Several rooms
+  -- sit at adjacent coords on the SAME plane+height but are NOT in its move-component. The old
+  -- graph-based gather drew only the current room; the coord-based gather must include the neighbours.
+  local P = _AIP_TEST.P
+  local saved = { rooms = P.rooms, cur = P.current_room }
+  P.rooms = {
+    -- current room: graph-isolated (moves point off-floor / to an unstored far node)
+    HERE = { coord = { 100, 100, 0, 0 }, exits = {}, moves = { down = "FAR" } },
+    FAR  = { coord = { 100, 100, 9, 0 }, exits = {}, moves = {} },   -- different height -> another floor
+    -- spatial neighbours on the SAME plane+height, unreachable via HERE's moves:
+    N    = { coord = { 100, 101, 0, 0 }, exits = {}, moves = {} },   -- one coord-unit north
+    E    = { coord = { 101, 100, 0, 0 }, exits = {}, moves = {} },   -- one coord-unit east
+    S    = { coord = { 100,  99, 0, 0 }, exits = {}, moves = {} },   -- one coord-unit south
+    NE   = { coord = { 101, 101, 0, 0 }, exits = {}, moves = {} },
+    -- a same-column room a couple units north, still inside the window:
+    N2   = { coord = { 100, 102, 0, 0 }, exits = {}, moves = {} },
+    -- off-floor room that must NOT appear (different plane):
+    OTHER = { coord = { 101, 101, 0, 1 }, exits = {}, moves = {} },
+  }
+  P.current_room = "HERE"
+  local m = minimap(3, 2)
+  local ccol, crow = 4 * 3 + 1, 2 * 2 + 1                  -- centre cell (13, 5)
+  expect(m.cells[crow][ccol].ch):eq("◉")                  -- you, anchored at 0,0
+  -- neighbours placed by coordinate delta (north = +y -> up = row-1); glyph is a node marker, not blank.
+  local nodes = { ["□"]=true, ["▣"]=true, ["★"]=true, ["ᴡ"]=true, ["◉"]=true }
+  local function is_node(cell) return cell and nodes[cell.ch] end
+  expect(is_node(m.cells[crow - 2] and m.cells[crow - 2][ccol])):truthy()      -- N (one unit up)
+  expect(is_node(m.cells[crow] and m.cells[crow][ccol + 4])):truthy()          -- E (one unit right)
+  expect(is_node(m.cells[crow + 2] and m.cells[crow + 2][ccol])):truthy()      -- S (one unit down)
+  -- count all node glyphs: should be many (HERE + N + E + S + NE + N2 = 6), proving coord-gather —
+  -- the old move-graph gather would have drawn only HERE.
+  local count = 0
+  for _, cols in pairs(m.cells) do for _, cell in pairs(cols) do if is_node(cell) then count = count + 1 end end end
+  expect(count):eq(6)                                     -- OTHER (other plane) and FAR (other floor) excluded
+  P.rooms, P.current_room = saved.rooms, saved.cur
+end)
+
 test("find_path won't route through a known dead-end exit", function()
   local saved_rooms, saved_cur = P.rooms, P.current_room
   P.rooms = {
@@ -101,6 +140,34 @@ test("mark_death tags the current room 'death', replacing any earlier one but ke
   expect(has_mark(P.rooms.here, "death")):truthy()               -- new corpse marked
   expect(P.rooms.old.marks and P.rooms.old.marks.death):falsy()  -- old death cleared
   expect(has_mark(P.rooms.old, "trainer")):truthy()              -- unrelated label preserved
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("mark('return') is a singleton — re-marking MOVES it, wiping the old one, keeping other labels", function()
+  local mark_command = _AIP_TEST.mark_command
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = {
+    here = { coord = { 1, 2, 3, 0 }, name = "the shrine" },
+    old  = { coord = { 4, 5, 6, 0 }, marks = { ["return"] = true, trainer = true } },  -- prior return + keeper
+  }
+  P.current_room = "here"
+  mark_command("return")
+  expect(has_mark(P.rooms.here, "return")):truthy()               -- return now points here
+  expect(P.rooms.old.marks and P.rooms.old.marks["return"]):falsy()  -- old return cleared
+  expect(has_mark(P.rooms.old, "trainer")):truthy()               -- unrelated label preserved
+  -- Re-marking the SAME room is idempotent (no "already marked" bail — it just re-places).
+  mark_command("return")
+  expect(has_mark(P.rooms.here, "return")):truthy()
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("a NON-singleton mark still refuses to re-mark the same room", function()
+  local mark_command = _AIP_TEST.mark_command
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { here = { coord = { 1, 2, 3, 0 }, name = "the den", marks = { trainer = true } } }
+  P.current_room = "here"
+  mark_command("trainer")                                         -- already marked → no-op, no crash
+  expect(has_mark(P.rooms.here, "trainer")):truthy()
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
 

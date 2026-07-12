@@ -382,19 +382,23 @@ function minimap(hw, hh)
 
   local rc = P.rooms[cur].coord
   if rc and rc[1] then
-    -- GEOMETRIC. Gather the connected component on THIS floor (same plane + z) by walking every
-    -- move-edge (we place by COORDINATES, so we don't need — and no longer gate on — advertised exits;
-    -- a room goes to its true spot whether or not its exits have been recorded yet).
+    -- GEOMETRIC. Gather every known room on THIS floor (same plane + z) by COORDINATE, NOT by move-graph
+    -- reachability: we place by coordinates, so a room's true spot is known whether or not it connects to
+    -- the current room through recorded exits. This is what makes the map render after a teleport onto a
+    -- graph-isolated waypoint, or after a zone reboot renumbered room IDs and fragmented the move-graph —
+    -- the whole spatial neighbourhood still draws. (Bounded per floor; `claim()` clamps to the window.)
     local cx, cy, cz, cpl = rc[1], rc[2], rc[3], rc[4]
-    local raw, seen, queue, head = {}, { [cur] = true }, { cur }, 1
-    while head <= #queue do
-      local id = queue[head]; head = head + 1
-      for _, nb in pairs(P.rooms[id].moves or {}) do
-        if not seen[nb] then
-          seen[nb] = true
-          local c = P.rooms[nb] and P.rooms[nb].coord
-          if c and c[1] and c[4] == cpl and c[3] == cz then
-            raw[nb] = { c[1] - cx, c[2] - cy }; queue[#queue + 1] = nb
+    -- Guard `unit` against a far-flung outlier: only rooms within a generous coordinate box (far larger
+    -- than the drawn window) feed the layout; anything past that would be clamped off by claim() anyway.
+    local BOX = 4096
+    local raw = {}
+    for id, room in pairs(P.rooms) do
+      if id ~= cur then
+        local c = room.coord
+        if c and c[1] and c[4] == cpl and c[3] == cz then
+          local dx, dy = c[1] - cx, c[2] - cy
+          if math.abs(dx) <= BOX and math.abs(dy) <= BOX then
+            raw[id] = { dx, dy }
           end
         end
       end
@@ -1767,9 +1771,23 @@ alias([[^noexit (.+)$]], function(_, rest) noexit_command(rest) end)
 -- lists every tagged room; mark('del <label>') (or mark('-<label>')) removes one. Marks persist with
 -- the map and show as ★ on the minimap. Multiple labels per room are fine. (The `mark <label>` typed
 -- straight into the game line is a separate game alias and still works.)
+-- Singleton marks: labels you only ever have ONE of, so a fresh mark overwrites the old one anywhere on
+-- the map instead of stacking. "death" is placed automatically (mark_death); "return" is placed by hand
+-- (mark('return')) — you only have one recall/return point, so re-marking moves it rather than adding a
+-- second. drop_mark_everywhere() is the shared "clear the previous one first" step.
+local SINGLETON_MARKS = { death = true, ["return"] = true }
+local function drop_mark_everywhere(label)
+  for _, rr in pairs(P.rooms) do
+    if rr.marks and rr.marks[label] then
+      rr.marks[label] = nil
+      if not next(rr.marks) then rr.marks = nil end
+    end
+  end
+end
+
 function mark(label) return mark_command(label) end
 doc(mark, { name = "mark", sig = "mark([label])", group = "map",
-  text = "Tag the current room with a landmark label; mark() lists all marks; mark('del <label>') removes one. Marks persist with the map, show as ★ on the minimap, and are travel()/navigate() targets." })
+  text = "Tag the current room with a landmark label; mark() lists all marks; mark('del <label>') removes one. Marks persist with the map, show as ★ on the minimap, and are travel()/navigate() targets. 'return' and 'death' are singletons — you only ever have one, so re-marking MOVES it here instead of adding a second." })
 function mark_command(args)
   args = trim(args or "")
   if args == "" then
@@ -1797,8 +1815,13 @@ function mark_command(args)
     return
   end
   local label = args:lower()
+  if SINGLETON_MARKS[label] then
+    -- One-of-a-kind mark: move it here, wiping any previous placement (this room included).
+    drop_mark_everywhere(label)
+  elseif r.marks and r.marks[label] then
+    echo("[mark] already marked '" .. label .. "'."); return
+  end
   r.marks = r.marks or {}
-  if r.marks[label] then echo("[mark] already marked '" .. label .. "'."); return end
   r.marks[label] = true
   schedule_save()
   echo("[mark] tagged " .. (r.name or "this room") .. (r.area and (" (" .. r.area .. ")") or "")
@@ -1821,9 +1844,7 @@ function mark_death()
     return
   end
   -- Drop any previous death mark first, so `goto death` always heads to your MOST RECENT corpse.
-  for _, rr in pairs(P.rooms) do
-    if rr.marks and rr.marks.death then rr.marks.death = nil; if not next(rr.marks) then rr.marks = nil end end
-  end
+  drop_mark_everywhere("death")
   r.marks = r.marks or {}
   r.marks.death = true
   schedule_save()
@@ -2693,6 +2714,7 @@ end
 _AIP_TEST = {
   has_mark = has_mark, marks_list = marks_list, find_path = find_path,
   nearest_reachable_to_coord = nearest_reachable_to_coord, mark_death = mark_death,
+  mark_command = mark_command,
   find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
   parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
   learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
