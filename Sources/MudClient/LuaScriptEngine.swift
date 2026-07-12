@@ -158,6 +158,11 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// Host sinks. The integration layer wires these to the real services.
     var onSend: (String) -> Void = { _ in }
     var onEcho: (String) -> Void = { _ in }
+    /// Record a locally-echoed CONTENT line into the searchable transcript (so `#grep` finds it). Wired
+    /// by the integration layer to `TranscriptStore.recordEcho`; a no-op in bare-engine unit tests (which
+    /// don't stand up a container). Deliberately called ONLY from content echoes (`echo()`, `↗ claude`) —
+    /// NOT from the `#grep`/`#sent`/`#received` dump path, so viewing the transcript never re-appends to it.
+    var onRecordEcho: (String) -> Void = { _ in }
 
     /// While the `on_send` hook is being consulted this is non-nil; any `send()` the hook itself calls
     /// is diverted here (instead of the normal `onSend` sink) so those commands go straight to the MUD
@@ -539,6 +544,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                     self.usage("echo: unknown color '\(word)' — try help(colors)")
                 }
             }
+            self.onRecordEcho(text)   // so `#grep` finds script echoes, not just wire lines
             self.onEcho(text)
             return []
         }
@@ -908,21 +914,31 @@ final class LuaScriptEngine: @unchecked Sendable {
         // session (via the local `muddispatch` channel). Backs `#claude <freeform feedback>`. Builds a
         // /tmp bundle (feedback + timestamped interleaved transcript + a raw.log copy), then fire-and-
         // forget POSTs it to the channel server; the working session reads the bundle and acts on it.
+        // A leading `--chat` / `--bare` / `-c` flag sends a context-FREE bundle (like `#chat`, below).
         lua.register("claude") { [weak self] args in
             guard case .string(let raw)? = args.first,
                   !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
-                self?.usage(#"claude: describe what you want — e.g. #claude fix the corpse sac timing"#)
+                self?.usage(#"claude: describe what you want — e.g. #claude fix the corpse sac timing  (or #chat <message> to talk with no game context attached)"#)
                 return []
             }
-            let feedback = raw.trimmingCharacters(in: .whitespaces)
-            guard let bundle = DispatchBundle.build(feedback: feedback) else {
-                self?.onEcho("\u{1B}[31m↗ claude: couldn't build the context bundle\u{1B}[0m")
+            let (feedback, bare) = Self.parseClaudeFlags(raw)
+            guard !feedback.isEmpty else {
+                self?.usage(#"chat: add a message — e.g. #chat how's the pilot looking?"#)
                 return []
             }
-            self?.onEcho("\u{1B}[36m↗ claude\u{1B}[0m \(feedback)  \u{1B}[90m(\(bundle.dir.path))\u{1B}[0m")
-            Self.dispatchToClaude(feedback: feedback, bundle: bundle) { note in
-                self?.onEcho(note)
+            self?.sendToClaude(feedback: feedback, bare: bare)
+            return []
+        }
+        // chat(message) — talk to Claude through the client with NO game context attached (no transcript,
+        // no raw capture) — for when you just want to converse, not file a task. Backs `#chat <message>`;
+        // exactly `#claude --chat <message>`. The receiving session is told to reply, not spawn work.
+        lua.register("chat") { [weak self] args in
+            guard case .string(let raw)? = args.first,
+                  !raw.trimmingCharacters(in: .whitespaces).isEmpty else {
+                self?.usage(#"chat: add a message — e.g. #chat how's the pilot looking?"#)
+                return []
             }
+            self?.sendToClaude(feedback: raw.trimmingCharacters(in: .whitespaces), bare: true)
             return []
         }
         // bell() — ring the terminal bell.
@@ -1040,6 +1056,43 @@ final class LuaScriptEngine: @unchecked Sendable {
             codes.append("1")     // "bright" alone: nothing to brighten — bold is the nearest intent
         }
         return (codes, unknown)
+    }
+
+    /// Split a leading `--chat` / `--bare` / `-c` flag off a `#claude` argument. Returns the remaining
+    /// message (trimmed) and whether context should be omitted (`bare`). The flag is only honored as the
+    /// FIRST whitespace-delimited token, so a message that merely mentions "--chat" later is untouched.
+    /// Static + pure so the flag parsing is unit-testable without the dispatch machinery.
+    static func parseClaudeFlags(_ raw: String) -> (feedback: String, bare: Bool) {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        let bareFlags: Set<String> = ["--chat", "--bare", "-c"]
+        // First token vs. the rest (split on the first run of whitespace).
+        if let range = trimmed.rangeOfCharacter(from: .whitespaces) {
+            let first = String(trimmed[trimmed.startIndex..<range.lowerBound]).lowercased()
+            if bareFlags.contains(first) {
+                let rest = String(trimmed[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                return (rest, true)
+            }
+        } else if bareFlags.contains(trimmed.lowercased()) {
+            // Flag with no message after it — bare, but empty (caller rejects it with usage).
+            return ("", true)
+        }
+        return (trimmed, false)
+    }
+
+    /// Build a dispatch bundle for `feedback` and fire it at the channel server, echoing the outbound
+    /// `↗ claude` line (bright-cyan reply comes back via the inbox). `bare` omits the game context — the
+    /// shared body behind both `#claude` (optionally `--chat`) and the dedicated `#chat` command.
+    private func sendToClaude(feedback: String, bare: Bool) {
+        guard let bundle = DispatchBundle.build(feedback: feedback, bare: bare) else {
+            onEcho("\u{1B}[31m↗ claude: couldn't build the context bundle\u{1B}[0m")
+            return
+        }
+        let tag = bare ? "↗ claude (chat)" : "↗ claude"
+        onRecordEcho("\(tag) \(feedback)")   // grep-able alongside the ↙ reply
+        onEcho("\u{1B}[36m\(tag)\u{1B}[0m \(feedback)  \u{1B}[90m(\(bundle.dir.path))\u{1B}[0m")
+        Self.dispatchToClaude(feedback: feedback, bundle: bundle) { [weak self] note in
+            self?.onEcho(note)
+        }
     }
 
     /// Fire the built context bundle at the local `muddispatch` channel server (see tools/dispatch/).
@@ -1423,6 +1476,7 @@ final class LuaScriptEngine: @unchecked Sendable {
             case (.sent, .script): return "\u{1B}[36m» lua\u{1B}[0m \(e.text)"
             case (.sent, nil):     return "\u{1B}[33m»\u{1B}[0m \(e.text)"
             case (.received, _):   return "\u{1B}[90m«\u{1B}[0m \(e.text)"
+            case (.echo, _):       return "\u{1B}[35m‹\u{1B}[0m \(e.text)"
             }
         }
     }

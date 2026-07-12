@@ -41,12 +41,13 @@ enum ClaudeReplyRenderer {
     }
 
     /// The styled terminal text for a reply — one `↙ claude` line, plus a second aligned `→ run …` line
-    /// when an action is suggested. Cyan arrow mirrors the outbound `↗ claude` styling in LuaScriptEngine;
-    /// the action line is bold and indented 10 cols so it sits under the message text.
+    /// when an action is suggested. Bold BRIGHT cyan (1;96) so replies pop out of the game stream; the
+    /// whole message line is coloured (not just the arrow) so it's unmistakable at a glance. The action
+    /// line is indented 10 cols so it sits under the message text.
     static func render(_ reply: ClaudeReply) -> String {
-        var out = "\u{1B}[36m↙ claude\u{1B}[0m  \(reply.message)"
+        var out = "\u{1B}[1;96m↙ claude  \(reply.message)\u{1B}[0m"
         if !reply.action.isEmpty {
-            out += "\n          \u{1B}[1m→ run \(reply.action)\u{1B}[0m"
+            out += "\n          \u{1B}[1;96m→ run \(reply.action)\u{1B}[0m"
         }
         return out
     }
@@ -73,7 +74,12 @@ final class ClaudeInboxWatcher: @unchecked Sendable {
         let dir = inboxDir ?? Self.defaultInboxDir()
         self.inboxDir = dir
         self.archiveDir = dir.appendingPathComponent("archive", isDirectory: true)
-        self.emit = emit ?? { line in Container.terminalService().print(line, isEcho: true) }
+        self.emit = emit ?? { line in
+            // Record into the searchable transcript so `#grep claude` surfaces replies, then print. Tests
+            // inject their own `emit`, so this recording only runs in the real app.
+            Container.transcriptStore().recordEcho(line)
+            Container.terminalService().print(line, isEcho: true)
+        }
     }
 
     /// Default inbox: `~/Documents/MudClient/claude-inbox`, overridable via `MUD_DISPATCH_INBOX` (same

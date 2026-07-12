@@ -6,10 +6,28 @@ a path to a context bundle to this server. The server, loaded by a running
 `claude` session as a channel, **pushes** that feedback into the session as a
 channel notification so Claude sees it and acts on it.
 
+`#chat <message>` (or `#claude --chat <message>`) sends the message with **no
+context attached** — no transcript, no raw capture — for when you just want to
+converse through the client instead of filing a task. The receiving session is
+told (in the bundle) to reply, not spawn work.
+
 The reply leg (Claude → game) rides a **file inbox**: after acting on a dispatch,
 Claude calls the `report_to_game` MCP tool, which drops a small JSON file the
-MudClient app watches and echoes in-game as a `↙ claude` line (mirroring the
+MudClient app watches and echoes in-game as a bright `↙ claude` line (mirroring the
 outbound `↗ claude`). See "Reply path" below.
+
+### Automatic completion pings (`stop-ping.py`)
+
+`report_to_game` is deliberate — Claude only calls it after a `#claude` dispatch. To
+surface **every** turn's completion in-game (including tasks started from the terminal),
+a `Stop` hook in `.claude/settings.local.json` runs `tools/dispatch/stop-ping.py`: it
+reads the turn's final assistant text from the transcript, condenses it to one line, and
+writes it to the **same inbox** the app already watches — so it echoes as a `↙ claude`
+line automatically. It skips no-text turns and turns that end in a question (waiting on
+you, not done). It writes to the same `MUD_DISPATCH_INBOX` (default
+`~/Documents/MudClient/claude-inbox/`) and can never fail a turn (any error → exit 0,
+no write). Disable/edit it via `/hooks`. This is separate from — and additive to —
+`report_to_game`.
 
 ## Launching
 

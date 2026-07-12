@@ -15,13 +15,14 @@ import Testing
 
 @Test func claudeReplyRendersMessageOnlyLine() {
     let reply = ClaudeReply(message: "reload done, corpse timing fixed", action: "", ts: "2026-07-12T00:00:00Z")
-    #expect(ClaudeReplyRenderer.render(reply) == "\u{1B}[36m↙ claude\u{1B}[0m  reload done, corpse timing fixed")
+    // Bold bright cyan, whole line coloured so it pops out of the game stream.
+    #expect(ClaudeReplyRenderer.render(reply) == "\u{1B}[1;96m↙ claude  reload done, corpse timing fixed\u{1B}[0m")
 }
 
 @Test func claudeReplyRendersActionOnSecondAlignedLine() {
     let reply = ClaudeReply(message: "fix applied", action: "#reload", ts: "")
-    let expected = "\u{1B}[36m↙ claude\u{1B}[0m  fix applied"
-        + "\n          \u{1B}[1m→ run #reload\u{1B}[0m"
+    let expected = "\u{1B}[1;96m↙ claude  fix applied\u{1B}[0m"
+        + "\n          \u{1B}[1;96m→ run #reload\u{1B}[0m"
     #expect(ClaudeReplyRenderer.render(reply) == expected)
 }
 

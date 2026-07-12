@@ -22,6 +22,10 @@ final class ScriptInterpreter {
         // isEcho: re-assert the game's active colour after the echo so a script line's own `ESC[0m`
         // doesn't strip the colour off the game output that follows it (e.g. multi-line coloured chat).
         engine.onEcho = { message in Container.terminalService().print(message, isEcho: true) }
+        // Record content echoes (script `echo(...)`, `↗ claude`) into the searchable transcript so `#grep`
+        // surfaces them — the wire log only had sent/received before. NOT wired to `onEcho`, so the
+        // `#grep`/`#sent`/`#received` dump output (which flows through onEcho) never re-records itself.
+        engine.onRecordEcho = { message in Container.transcriptStore().recordEcho(message) }
         // Install the text-to-speech + live/history builtins (speak/speech_stop/speech_voices/is_live).
         // Kept out of LuaScriptEngine/bootstrap; see SpeechBuiltins.swift.
         engine.installSpeech()

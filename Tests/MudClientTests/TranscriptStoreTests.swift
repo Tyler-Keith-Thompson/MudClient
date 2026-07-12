@@ -58,6 +58,36 @@ import Testing
   }
 }
 
+@Test func transcriptGrepSpansEchoes() {
+  try withTestContainer {
+    let t = TranscriptStore()
+    t.recordSent("#claude fix corpse timing", origin: .user)
+    t.recordEcho("↗ claude fix corpse timing")                    // outbound dispatch echo
+    t.recordEcho("\u{1B}[36m↙ claude\u{1B}[0m  reload done")       // inbound reply echo (ANSI)
+    t.recordReceived("The orc dies.")
+
+    let hits = t.grep("claude")
+    #expect(hits.count == 3)                                      // the sent line + BOTH echoes
+    #expect(hits.filter { $0.kind == .echo }.count == 2)
+    // echoes carry no origin, and don't leak into #sent / #received
+    #expect(t.grep("reload done").count == 1)                     // the inbound echo, matched through ANSI
+    #expect(t.sent(last: nil).allSatisfy { $0.kind == .sent })
+    #expect(t.received(last: nil).allSatisfy { $0.kind == .received })
+  }
+}
+
+@Test func formatTranscriptLabelsEchoDistinctFromSentAndReceived() {
+  try withTestContainer {
+    let entries: [TranscriptStore.Entry] = [
+        .init(kind: .echo, origin: nil, text: "↙ claude reload done", at: Date()),
+    ]
+    let lines = LuaScriptEngine.formatTranscript(entries)
+    #expect(lines.count == 1)
+    #expect(lines[0].hasSuffix("↙ claude reload done"))
+    #expect(!lines[0].contains("you") && !lines[0].contains("lua"))   // not a sent origin label
+  }
+}
+
 @Test func transcriptRingDropsOldestPastLimit() {
   try withTestContainer {
     let t = TranscriptStore(limit: 3)

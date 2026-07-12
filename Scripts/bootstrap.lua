@@ -532,8 +532,15 @@ doc("claude", { sig = "claude(feedback)", group = "history",
       .. "Builds a /tmp bundle (your feedback + a timestamped, interleaved transcript of what you and "
       .. "the Lua scripts sent and what the server displayed + a raw.log copy) and POSTs it to the local "
       .. "`muddispatch` channel (see tools/dispatch/). The session must be launched with "
-      .. "`claude --dangerously-load-development-channels server:muddispatch` to receive it.",
+      .. "`claude --dangerously-load-development-channels server:muddispatch` to receive it. Reply comes "
+      .. "back in-game as a bright `↙ claude` line. A leading `--chat` flag attaches NO context (same as "
+      .. "the `#chat` command).",
   example = "#claude the corpse sac fires one tick too early after a lifetap" })
+doc("chat", { sig = "chat(message)", group = "history",
+  text = "Talk to Claude through the client with NO game context attached (no transcript, no raw "
+      .. "capture) — for when you just want to converse, not file a task. Same channel/reply path as "
+      .. "`#claude` (bright `↙ claude` reply); equivalent to `#claude --chat <message>`.",
+  example = "#chat how's the pilot looking today?" })
 
 -- logging / replay
 doc("log_start", { sig = "log_start(path[, opts]) -> bool", group = "logging",

@@ -23,7 +23,12 @@ import DependencyInjection
 enum DispatchBundle {
     /// Build a bundle for `feedback`, rendering the most recent `entries` transcript lines. Returns the
     /// bundle directory and the `dispatch.md` path, or nil if the directory couldn't be created.
-    static func build(feedback: String, entries: Int = 400) -> (dir: URL, markdown: URL)? {
+    ///
+    /// `bare: true` (the `#claude --chat` path) omits the game context entirely — no transcript, no raw
+    /// capture — so the message reads as a plain chat, not a task with a pile of session context. The
+    /// dispatch.md then just carries the message plus a note telling the receiving session to converse
+    /// rather than spawn work.
+    static func build(feedback: String, entries: Int = 400, bare: Bool = false) -> (dir: URL, markdown: URL)? {
         let now = Date()
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("mud-dispatch", isDirectory: true)
@@ -34,17 +39,25 @@ enum DispatchBundle {
             return nil
         }
 
-        let log = renderTranscript(Container.transcriptStore().chronological(last: entries))
-        let raw = copyRawLog(into: dir)
-
-        var md = "# MudClient dispatch — \(iso(now))\n\n"
-        md += "## Feedback\n\n\(feedback.trimmingCharacters(in: .whitespacesAndNewlines))\n\n"
-        md += "## Session transcript (interleaved, most recent \(entries) events)\n\n"
-        md += "Each line: `HH:MM:SS.mmm  origin  text` — `you` = you typed it, `lua` = a script / the AI "
-        md += "pilot sent it, `srv` = displayed server output (ANSI stripped).\n\n"
-        md += "```\n\(log.isEmpty ? "(no transcript recorded yet)" : log)\n```\n"
-        if let raw {
-            md += "\nRaw wire capture (byte-exact, base64 per line) copied alongside as `\(raw)`.\n"
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
+        var md: String
+        if bare {
+            md = "# MudClient dispatch — \(iso(now))  (chat — no context attached)\n\n"
+            md += "## Message\n\n\(trimmed)\n\n"
+            md += "_Sent with `--chat`: no game transcript or raw capture is attached. This is a plain "
+            md += "conversational message — just reply, don't spawn a subagent or hunt for context._\n"
+        } else {
+            let log = renderTranscript(Container.transcriptStore().chronological(last: entries))
+            let raw = copyRawLog(into: dir)
+            md = "# MudClient dispatch — \(iso(now))\n\n"
+            md += "## Feedback\n\n\(trimmed)\n\n"
+            md += "## Session transcript (interleaved, most recent \(entries) events)\n\n"
+            md += "Each line: `HH:MM:SS.mmm  origin  text` — `you` = you typed it, `lua` = a script / the AI "
+            md += "pilot sent it, `srv` = displayed server output (ANSI stripped).\n\n"
+            md += "```\n\(log.isEmpty ? "(no transcript recorded yet)" : log)\n```\n"
+            if let raw {
+                md += "\nRaw wire capture (byte-exact, base64 per line) copied alongside as `\(raw)`.\n"
+            }
         }
 
         let markdown = dir.appendingPathComponent("dispatch.md")
@@ -66,6 +79,7 @@ enum DispatchBundle {
             case (.sent, .script): label = "lua"
             case (.sent, _):       label = "snd"
             case (.received, _):   label = "srv"
+            case (.echo, _):       label = "ech"
             }
             let text = TranscriptStore.strip(e.text).trimmingCharacters(in: .newlines)
             return "\(clock(e.at))  \(label)  \(text)"
