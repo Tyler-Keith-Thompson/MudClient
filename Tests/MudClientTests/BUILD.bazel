@@ -9,6 +9,7 @@ swift_test(
         "//Scripts:bootstrap.lua",
         "//Scripts:_dsl.lua",
         "//Scripts:_rx.lua",
+        "//Scripts:_persist.lua",
         "//Scripts:AlterAeon.lua",
         "//Scripts:Audio.lua",
         "//Scripts:Combat.lua",
