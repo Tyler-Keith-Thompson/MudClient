@@ -242,7 +242,7 @@ local function maybe_complete_recovery()
      and (recovery.stat or (all_minions_ready and all_minions_ready(recovery.pct))) then
     if recovery.stat then echo(string.format("Your %s is recovered — standing up.", STAT_LABEL[recovery.stat]))
     else echo("You have recovered and are ready to adventure!") end
-    send("stand")
+    send_posture("stand")
     end_recovery(true)
     return true
   end
@@ -1101,7 +1101,7 @@ function recover(target)
     onCancel(function()
       -- Chain aborted: stand up and clear the recovery flag WITHOUT firing resolve/reject (the promise
       -- is cancelled, not settled). A later kxwt_prompt then can't complete it (state.recover is false).
-      if state.recover then send("stand") end
+      if state.recover then send_posture("stand") end
       recovery.settle, recovery.pct, state.recover = nil, READY_PCT, false
       reset_minion_heal()   -- drop any in-flight minion healing too
     end)
@@ -1160,7 +1160,7 @@ function recover_stat(stat, target)
     recovery.minions_only, recovery.stat = nil, key
     begin_recovery(frac)
     onCancel(function()
-      if state.recover then send("stand") end
+      if state.recover then send_posture("stand") end
       recovery.settle, recovery.pct, recovery.stat, state.recover = nil, READY_PCT, nil, false
       reset_minion_heal()
     end)
