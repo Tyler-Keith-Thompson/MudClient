@@ -6,7 +6,7 @@
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
 --   0. OPENER:           bloodmist when HP is healthy (> cfg.bloodmist_hp_min — it costs hp to cast), else
 --                        the free tarrants. (A known-winner target skips straight past the probe below.)
---   1. PROBE:            on COMBAT START, cast the PRIMARY probes lightning bolt (once) then scorch (once);
+--   1. PROBE:            on COMBAT START, cast the PRIMARY probes lightning bolt (once) then fireball (once);
 --                        compare how much each dropped the enemy's health %; the bigger drop WINS. (Coarse %
 --                        heuristic — fine.) If NEITHER primary cleared cfg.probe_enough, also try the
 --                        FALLBACK probes icebolt then prism (once each), then pick among all four — icebolt/
@@ -84,11 +84,11 @@ local cfg = {
   bloodmist_cmd    = "c bloodmist",  -- summons a blood demon; used as the opener when HP is healthy — it
                                      -- COSTS hp to cast, so we only lead with it above bloodmist_hp_min
   bloodmist_hp_min = 0.5,            -- only open with bloodmist when HP is ABOVE this fraction of max
-  lightning_cmd    = "cast 'lightning bolt'",  -- LIGHTNING; a PRIMARY probe/nuke (tried every fight, with scorch)
-  icebolt_cmd      = "c icebolt",    -- COLD; a FALLBACK probe now — only tried if lightning+scorch underwhelm
-  scorch_cmd       = "c scorch",     -- the FIRE probe/nuke (PRIMARY, tried every fight)
-  prism_cmd        = "c prism",      -- LIGHT; a FALLBACK probe — only tried when lightning+scorch both underwhelm
-  probe_enough     = 5,              -- % health a single PRIMARY (lightning/scorch) hit must clear to SKIP the
+  lightning_cmd    = "cast 'lightning bolt'",  -- LIGHTNING; a PRIMARY probe/nuke (tried every fight, with fireball)
+  icebolt_cmd      = "c icebolt",    -- COLD; a FALLBACK probe now — only tried if lightning+fireball underwhelm
+  fireball_cmd     = "c fireball",   -- the FIRE probe/nuke (PRIMARY, tried every fight)
+  prism_cmd        = "c prism",      -- LIGHT; a FALLBACK probe — only tried when lightning+fireball both underwhelm
+  probe_enough     = 5,              -- % health a single PRIMARY (lightning/fireball) hit must clear to SKIP the
                                      -- icebolt/prism fallback probes (they're rarely best, so don't bother
                                      -- trying them if a primary already hits hard)
   soulsteal_cmd    = "c soulsteal",
@@ -116,7 +116,7 @@ F.self_sent         = F.self_sent or {}     -- cmd -> count of sends WE issued (
 F.no_mana           = F.no_mana or {}       -- spell -> true once we've been told we can't afford it
 F.lightning_drop    = F.lightning_drop or 0
 F.icebolt_drop      = F.icebolt_drop or 0
-F.scorch_drop       = F.scorch_drop or 0
+F.fireball_drop     = F.fireball_drop or 0
 F.prism_drop        = F.prism_drop or 0
 F.fallback_tried    = F.fallback_tried or false   -- did we already run the icebolt/prism fallback probes this fight?
 F.finish_ready      = F.finish_ready or false     -- authoritative "target near death" latch: switch to soulsteal
@@ -161,7 +161,7 @@ local function say(s) if echo then echo("\27[1;35m[autofight]\27[0m " .. s) end 
 
 -- ---- learned winners (per target NAME) -----------------------------------------------------------
 -- Remember which probe spell won against a given target so the next fight against the same name skips
--- the icebolt/scorch probe and nukes the known winner straight away. Keyed by a normalized name (lower-
+-- the icebolt/fireball probe and nukes the known winner straight away. Keyed by a normalized name (lower-
 -- cased, leading article stripped) so "a Gnomian guard" / "The Gnomian guard" collapse to one entry.
 -- Persisted to disk (mirrors AlterAeon's classes.lua) so it survives a relaunch; kept on _AUTOFIGHT so
 -- it also survives a live pilot.reload().
@@ -175,7 +175,7 @@ end
 -- THE two probe spells the routine compares (cold vs fire). Single source of truth: change these and
 -- the persisted winners file MIGRATES on next load (see load below) instead of being wiped. To swap a
 -- spell later (e.g. icebolt -> some newer cold spell), edit this + its _cmd + its landed trigger.
-local PROBE_SPELLS = { "lightning", "icebolt", "scorch", "prism" }
+local PROBE_SPELLS = { "lightning", "icebolt", "fireball", "prism" }
 local function is_probe_spell(s) for _, v in ipairs(PROBE_SPELLS) do if v == s then return true end end return false end
 local function probe_spellset_key() local t = {}; for _, v in ipairs(PROBE_SPELLS) do t[#t + 1] = v end; table.sort(t); return table.concat(t, ",") end
 
@@ -197,48 +197,66 @@ local function schedule_winners_save()
   if cancel and winners_save_timer then cancel(winners_save_timer) end
   winners_save_timer = after and after(2, save_winners) or nil
 end
--- Load from disk ONCE per session (not on a live reload, where _AUTOFIGHT.winners already holds the
--- current, possibly-newer table). VERSIONED MIGRATION: we NEVER wipe the file on a spell change. We keep
--- every entry whose winning spell is still one of the current PROBE_SPELLS, and DROP only the entries
--- whose spell was retired (e.g. old "shards" after the icebolt swap) — those targets simply re-probe
--- fresh on the next fight. Entries for a still-valid spell (e.g. "scorch") are trusted as-is.
-if not _AUTOFIGHT.winners then
-  _AUTOFIGHT.winners = {}
-  local t = persist.load(WINNERS_FILE)
-  if type(t) == "table" then
-    local raw = (type(t.winners) == "table") and t.winners or t   -- v2 has .winners; v1 was flat
-    local recorded = t.spells                                     -- nil for a v1 file
-    local dropped = 0
-    for name, spell in pairs(raw) do
-      if is_probe_spell(spell) then _AUTOFIGHT.winners[name] = spell
-      else dropped = dropped + 1 end                              -- retired spell (e.g. "shards") → re-probe
-    end
-    -- Re-save (in v2 form) if we migrated: a v1 file, a changed spell set, or anything dropped.
-    if recorded ~= probe_spellset_key() or dropped > 0 then
-      if dropped > 0 and echo then
-        echo(string.format("\27[1;35m[autofight]\27[0m spell set changed → kept %d learned winner(s), "
-          .. "re-probing %d target(s) whose old spell was retired.",
-          (function() local n = 0 for _ in pairs(_AUTOFIGHT.winners) do n = n + 1 end return n end)(), dropped))
-      end
-      if after then after(0, save_winners) end                   -- rewrite the file in v2/migrated form
+-- Given a raw winners table loaded from disk (or held over in-memory across a live reload) plus its
+-- recorded spell-set key (nil for a v1 file / no prior key), decide what to KEEP. VERSIONED MIGRATION: a
+-- spell-set change (e.g. scorch → fireball) makes the WHOLE table stale, not just the entries for the
+-- retired spell — a still-current spell like lightning/icebolt/prism was picked as the winner by comparing
+-- it against the OLD lineup (it beat scorch, not fireball), so that verdict can't be trusted either. So on
+-- any mismatch we clear EVERYTHING and every target simply re-probes fresh; only a matching spell-set is
+-- trusted as-is. Returns (kept, matched).
+local function migrate_winners(raw, recorded)
+  local matched = recorded == probe_spellset_key()
+  local kept = {}
+  if matched then
+    for name, spell in pairs(raw or {}) do
+      if is_probe_spell(spell) then kept[name] = spell end
     end
   end
+  return kept, matched
 end
 
--- Runs on EVERY load (not just a fresh one): a live `#pilot.reload()` after a spell swap keeps the old
--- in-memory _AUTOFIGHT.winners (the `if not` above is skipped), so prune retired-spell entries here too —
--- otherwise a later save would write "shards" back into the migrated file.
-do
-  local dropped = 0
-  for name, spell in pairs(_AUTOFIGHT.winners) do
-    if not is_probe_spell(spell) then _AUTOFIGHT.winners[name] = nil; dropped = dropped + 1 end
+-- Load from disk ONCE per session (not on a live reload, where _AUTOFIGHT.winners already holds the
+-- current, possibly-newer table).
+if not _AUTOFIGHT.winners then
+  local raw, recorded = {}, nil
+  local t = persist.load(WINNERS_FILE)
+  if type(t) == "table" then
+    raw = (type(t.winners) == "table") and t.winners or t   -- v2 has .winners; v1 was flat
+    recorded = t.spells                                     -- nil for a v1 file
   end
-  if dropped > 0 then
-    if echo then
-      echo(string.format("\27[1;35m[autofight]\27[0m spell set changed → re-probing %d target(s) whose old spell was retired.", dropped))
+  local kept, matched = migrate_winners(raw, recorded)
+  _AUTOFIGHT.winners = kept
+  if not matched then
+    local n = 0
+    for _ in pairs(raw) do n = n + 1 end
+    if n > 0 then
+      if echo then
+        echo("\27[1;35m[autofight]\27[0m spell set changed → cleared all learned winners, re-probing every target.")
+      end
+      if after then after(0, save_winners) end   -- rewrite the (now empty) file in v2 form
     end
-    if after then after(0, save_winners) end
   end
+  _AUTOFIGHT.winners_spellset = probe_spellset_key()   -- baseline for the every-load check below
+end
+
+-- Runs on EVERY load (not just a fresh one): a live `#pilot.reload()` after a spell-set change keeps the
+-- old in-memory _AUTOFIGHT.winners (the `if not` above is skipped) — entries learned under the PREVIOUS
+-- spell set are stale (even ones whose spell is still a current probe spell; see migrate_winners above),
+-- so compare the remembered spell-set against the current one and clear the whole table on a mismatch.
+do
+  local key = probe_spellset_key()
+  if _AUTOFIGHT.winners_spellset and _AUTOFIGHT.winners_spellset ~= key then
+    local n = 0
+    for _ in pairs(_AUTOFIGHT.winners) do n = n + 1 end
+    _AUTOFIGHT.winners = {}
+    if n > 0 then
+      if echo then
+        echo("\27[1;35m[autofight]\27[0m spell set changed → cleared all learned winners, re-probing every target.")
+      end
+      if after then after(0, save_winners) end
+    end
+  end
+  _AUTOFIGHT.winners_spellset = key
 end
 
 -- Record (and persist) the probe's verdict for this target. Only writes on a real change.
@@ -306,14 +324,14 @@ local FIGHT_RESET = {
   busy_spell    = NIL,
   lightning_drop = 0,
   icebolt_drop  = 0,
-  scorch_drop   = 0,
+  fireball_drop = 0,
   prism_drop    = 0,
   fallback_tried = false,
   last_damage_spell = NIL,
   soul_latched  = false,
   finish_ready  = false,    -- reset the near-death latch each fight
   renuke_pending = false,   -- a soulsteal resist forces exactly ONE winner-nuke before retrying it
-  probe_ptr     = NIL,      -- the fight flow's probe pointer (lightning → scorch → decide, + icebolt/prism fallback); flow owns it
+  probe_ptr     = NIL,      -- the fight flow's probe pointer (lightning → fireball → decide, + icebolt/prism fallback); flow owns it
   suspended     = false,
   no_mana       = function() return {} end,   -- fresh per fight
   self_sent     = function() return {} end,   -- fresh per fight
@@ -569,11 +587,11 @@ local function opener()
 end
 
 -- STAGE 2 — the PROBE. Resolves WITH the winning spell name. Walks a pointer through the PRIMARY probes
--- lightning → scorch → decide, and — only when NEITHER primary hit hard enough — a FALLBACK tier
+-- lightning → fireball → decide, and — only when NEITHER primary hit hard enough — a FALLBACK tier
 -- icebolt → prism → decide, crediting each spell's %-drop (via on_fight/last_damage_spell) and picking the
 -- biggest. AOE, while active, overrides the actual cast with frostflower WITHOUT advancing the pointer — so
 -- when the pack thins the probe resumes exactly where it paused.
-local PROBE_NEXT = { lightning = "scorch", scorch = "decide", icebolt = "prism", prism = "decide" }
+local PROBE_NEXT = { lightning = "fireball", fireball = "decide", icebolt = "prism", prism = "decide" }
 local function probe()
   F.phase = "probe"
   F.probe_ptr = "lightning"
@@ -589,16 +607,16 @@ local function probe()
     end
     local ptr = F.probe_ptr
     if ptr == "decide" then
-      -- fallback gate: only run the icebolt/prism probes when NEITHER primary (lightning, scorch) hit hard
+      -- fallback gate: only run the icebolt/prism probes when NEITHER primary (lightning, fireball) hit hard
       -- enough — they're rarely best, so skip them when a primary already landed big.
-      if not F.fallback_tried and math.max(F.lightning_drop, F.scorch_drop) < cfg.probe_enough then
+      if not F.fallback_tried and math.max(F.lightning_drop, F.fireball_drop) < cfg.probe_enough then
         F.fallback_tried, F.probe_ptr = true, "icebolt"
         return step()
       end
-      -- coarse winner pick: biggest drop; ties prefer lightning > scorch > icebolt (prism must win outright).
-      local ld, sd, id, pd = F.lightning_drop, F.scorch_drop, F.icebolt_drop, F.prism_drop or 0
+      -- coarse winner pick: biggest drop; ties prefer lightning > fireball > icebolt (prism must win outright).
+      local ld, sd, id, pd = F.lightning_drop, F.fireball_drop, F.icebolt_drop, F.prism_drop or 0
       local winner, best = "lightning", ld
-      if sd > best then winner, best = "scorch", sd end
+      if sd > best then winner, best = "fireball", sd end
       if id > best then winner, best = "icebolt", id end
       if pd > best then winner, best = "prism", pd end
       remember_winner(F.name, winner)                 -- learn it so the next fight skips the probe
@@ -821,7 +839,7 @@ local function on_fight(pct, name)
     local d = prev - pct
     if     F.last_damage_spell == "lightning" then F.lightning_drop = F.lightning_drop + d
     elseif F.last_damage_spell == "icebolt" then F.icebolt_drop = F.icebolt_drop + d
-    elseif F.last_damage_spell == "scorch"  then F.scorch_drop  = F.scorch_drop + d
+    elseif F.last_damage_spell == "fireball" then F.fireball_drop = F.fireball_drop + d
     elseif F.last_damage_spell == "prism"   then F.prism_drop   = F.prism_drop + d end
   end
   -- A health-% change updates the winner comparison ONLY. It NEVER triggers a cast — casting is driven
@@ -854,7 +872,7 @@ end
 -- awaiting a given event the push is simply dropped (that's the pacing guarantee).
 local function hit_lightning()   if landedS then landedS:onNext("lightning")   end end
 local function hit_icebolt()     if landedS then landedS:onNext("icebolt")     end end
-local function hit_scorch()      if landedS then landedS:onNext("scorch")      end end
+local function hit_fireball()    if landedS then landedS:onNext("fireball")    end end
 local function hit_prism()       if landedS then landedS:onNext("prism")       end end
 local function hit_frostflower() if landedS then landedS:onNext("frostflower") end end
 -- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so no stage ever awaits "shower" — the push
@@ -1067,18 +1085,24 @@ if rx then
   -- LANDED ─ each spell the routine casts announces its own success line. Merge them into one "a spell
   -- landed" stream tagged with the spell name and push it onto landedS; the in-flight castStep await
   -- resolves on ITS spell. VERIFIED live: icebolt "You create and magically throw bolts of ice at <x>!",
-  -- scorch "You throw an intense burst of <colour> flames at <x>!" (colour varies → wildcard), prism the
-  -- crystal line, frostflower the whole-line AOE message. DORMANT: shower isn't in the routine, so no
+  -- fireball has TWO landed forms: "You conjure and throw a <size/colour> fireball at <x>!" AND (verified
+  -- live) "You throw a <size/colour> fireball at <x>!" — the "conjure and " prefix is optional, so it's
+  -- wildcarded along with the adjectives. prism
+  -- the crystal line, frostflower the whole-line AOE message. DORMANT: shower isn't in the routine, so no
   -- stage ever awaits "shower" — the push has no subscriber and is dropped; kept only so its wire string
   -- stays live for a future mana-aware feature.
   local spellLanded = rx.merge(
     tag([[^A .* bolt of lightning leaps from you to ]], "lightning"),
     tag([[^You create and magically throw bolts of ice at ]], "icebolt"),
-    tag([[^You throw an intense burst of .* flames at ]], "scorch"),
+    tag([[^You (?:conjure and )?throw a .* fireball at ]], "fireball"),
     tag([[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]], "prism"),
     tag([[^Spiked flowers of ice quickly form on everything in a ring around you!$]], "frostflower"),
     tag([[^A shower of .* sparks suddenly engulfs]], "shower"))
   spellLanded:subscribe(function(spell) if landedS then landedS:onNext(spell) end end)
+
+  -- fireball BACKFIRE ─ "Your fireball backfires, and blows up in your face!" is a FAILURE outcome (it hit
+  -- US, not the target) — route it through the same fail/retry path as a fizzle, NOT the landed stream.
+  T([[^Your fireball backfires]]):subscribe(function() hit_fail() end)
 
   -- SEQUENCE ─ the OPENER (tarrants OR bloodmist) landing. While engaging it just clears the init-busy
   -- flag (combat is about to start); in-combat it advances the phase like any landed spell. bloodmist has
@@ -1197,7 +1221,7 @@ doc(autofight.tank, { name = "autofight.tank", sig = "autofight.tank(['on'|'off'
 
 function autofight.on()
   F.on = true
-  say("armed — tarrants → lightning/scorch probe → nuke winner → soulsteal")
+  say("armed — tarrants → lightning/fireball probe → nuke winner → soulsteal")
   -- Armed mid-fight (e.g. after a manual off): (re)start the reactive flow on the current enemy.
   if F.fighting and combatStartS then combatStartS:onNext(true) end
 end
@@ -1265,7 +1289,7 @@ end
 
 doc(autofight.winners, { name = "autofight.winners", sig = "autofight.winners()", group = "combat",
   text = "List the learned best-spell-per-target memory: for each target name the script has probed, "
-      .. "which of icebolt/scorch/prism won. Known names skip the probe on the next fight." })
+      .. "which of icebolt/fireball/prism won. Known names skip the probe on the next fight." })
 doc(autofight.forget, { name = "autofight.forget", sig = "autofight.forget([name])", group = "combat",
   text = "Forget a learned winner so it re-probes next time: pass a target name to drop just that one, "
       .. "or call with no argument to clear the whole memory. Persists the change." })
@@ -1304,7 +1328,7 @@ doc(autofight.unstealable, { name = "autofight.unstealable", sig = "autofight.un
 
 -- winner(name[, spell]) — manually SET (override) the learned attack for a target NAME. Use it when the
 -- probe mislearned: it picked the element the enemy RESISTS, or — worse — one that HEALS it (a cold mob
--- healed by icebolt, a fire one by scorch). `spell` is one of PROBE_SPELLS ('icebolt' cold / 'scorch' fire
+-- healed by icebolt, a fire one by fireball). `spell` is one of PROBE_SPELLS ('icebolt' cold / 'fireball' fire
 -- / 'prism'), the spells the routine nukes with. No spell → report the current winner; 'none'/'clear' →
 -- forget it (re-probe next fight). Persists, skips the probe for that name, and switches the CURRENT fight.
 function autofight.winner(name, spell)
@@ -1338,10 +1362,10 @@ function autofight.winner(name, spell)
   end
   say("'" .. key .. "' → " .. s .. " (set, persisted)")
 end
-doc(autofight.winner, { name = "autofight.winner", sig = "autofight.winner(name[, 'icebolt'|'scorch'])",
+doc(autofight.winner, { name = "autofight.winner", sig = "autofight.winner(name[, 'icebolt'|'fireball'])",
   group = "combat", text = "Manually override the learned attack spell for a target NAME — for when the "
       .. "probe mislearned and picked the element the enemy RESISTS or is HEALED by. 'icebolt' (cold) or "
-      .. "'scorch' (fire); no spell reports the current winner; 'none' forgets it. Persists, skips the "
+      .. "'fireball' (fire); no spell reports the current winner; 'none' forgets it. Persists, skips the "
       .. "probe for that name, and switches the current fight immediately if you're fighting it." })
 
 -- engage(target[, on_dead][, on_fail]) — START a fight from out of combat. Sets the target and casts
@@ -1381,7 +1405,7 @@ doc("attack", { sig = "attack(target) -> promise", group = "combat",
 
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
   text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes "
-      .. "icebolt vs scorch and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
+      .. "icebolt vs fireball and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
       .. "dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by default; any command "
       .. "YOU type suspends it briefly so you can intervene." })
 doc(autofight.off, { name = "autofight.off", sig = "autofight.off()", group = "combat",
@@ -1415,7 +1439,7 @@ end })
 
 -- Game-line aliases so the controls work typed straight in (no `#` needed), like explore/goto/noexit:
 -- `autofight` alone reports status; `autofight <verb …>` dispatches (on/off/aoe/winners/forget/winner),
--- e.g. `autofight winner A ghostly presence scorch`. (`#autofight …` via the REPL still works too.)
+-- e.g. `autofight winner A ghostly presence fireball`. (`#autofight …` via the REPL still works too.)
 if alias then
   alias([[^autofight$]], function() autofight() end)
   alias([[^autofight (.+)$]], function(_, rest) autofight(rest) end)
@@ -1423,7 +1447,7 @@ end
 
 -- ---- test seam -----------------------------------------------------------------------------------
 -- The spec drives the state machine by calling the SAME handlers the live triggers call — there is no
--- second line-matching path to drift. on_fight is the kxwt_fighting handler; icebolt/scorch/… are the
+-- second line-matching path to drift. on_fight is the kxwt_fighting handler; icebolt/fireball/… are the
 -- resolution handlers each trigger dispatches to.
 _AF_TEST = {
   cfg           = cfg,
@@ -1432,10 +1456,11 @@ _AF_TEST = {
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
   on_input      = observe_input,
-  lightning     = hit_lightning,   icebolt      = hit_icebolt,     scorch    = hit_scorch,
+  lightning     = hit_lightning,   icebolt      = hit_icebolt,     fireball  = hit_fireball,
   tarrants      = hit_tarrants,
   prism         = hit_prism,       bloodmist    = hit_bloodmist,   opener_cmd = opener_cmd,
   is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS,    save_winners = save_winners,
+  spellset_key  = probe_spellset_key, migrate_winners = migrate_winners,
   frostflower   = hit_frostflower, aoe_active   = aoe_active,   room_fighter = note_room_fighter,
   mdeath        = note_mdeath,
   tank          = function() return TANK end,             -- tank-rescue state (name/resummoning/tries)

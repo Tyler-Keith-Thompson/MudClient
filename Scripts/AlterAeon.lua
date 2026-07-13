@@ -557,7 +557,14 @@ trigger([[.*]], function(line)
   if t:match("^You are carrying") then return end            -- the header itself; keep going
   if t == "" or t:match("^<%d+hp") or t:match("^kxwt_")
      or t:match("^You are using") or t:match("^You are wearing") or t:match("^You can't carry") then
-    inv_capturing = false; return                            -- end of the list
+    inv_capturing = false
+    -- The block just closed: state.inventory is now current. Bump a monotonic marker and fire an
+    -- optional hook so a script (Soulforge.lua) can await the ACTUAL response instead of guessing a
+    -- fixed post-send delay — a laggy server can take seconds to answer `inv`, and a fixed short wait
+    -- reads a stale/empty inventory (see Soulforge.lua's kick_inventory).
+    state.inv_seq = (state.inv_seq or 0) + 1
+    if on_inventory then pcall(on_inventory) end
+    return
   end
   local low = t:lower()
   if low ~= "nothing." and low ~= "nothing" then state.inventory[#state.inventory + 1] = t end

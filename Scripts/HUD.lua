@@ -470,7 +470,8 @@ local function promise_rows(width)
   return rows
 end
 
--- Lag widget — sits under the promise widget (right column). Differentiates a LOCAL UI hitch (the
+-- Lag widget — sits to the LEFT of the promise widget (right column; see update_top's side-by-side zip).
+-- Differentiates a LOCAL UI hitch (the
 -- terminal's own main loop stalling — a surprisingly common thing, measured by a Swift heartbeat on the
 -- UI queue) from SERVER round-trip latency (time from your last command to the next prompt). A recent
 -- spike shows a bright ⚠ alert with its duration; otherwise a dim readout of the last figures. lag_status()
@@ -514,6 +515,7 @@ end
 -- terminals or when the width is unknown.
 local GROUP_NAME_W = 26      -- group_member_row's name cell width
 local STAM_W       = 18      -- "MV " + 6-cell gauge + " nnn/nnn": where the stamina numbers end
+local LAG_COL_W    = 20      -- fixed left sub-column for the lag widget (longest line "  ⚠ UI hitch nnnms")
 local function term_width()
   if type(__term_cols) ~= "function" then return 80 end
   local ok, n = pcall(__term_cols)
@@ -553,22 +555,41 @@ local function update_top()
   local ww = widget_width(mw)
   local right = {}
   if mini then for _, m in ipairs(mini) do right[#right + 1] = m end end
-  local prows = promise_rows(ww)
-  local lrows = lag_rows(ww)
+  -- The LAG widget sits to the LEFT of the PROMISES widget (side by side), so the two short readouts SHARE
+  -- rows instead of stacking — the widget band stays vertically compact. lag takes a fixed narrow left
+  -- sub-column (its text is never truncated); promises flex into the rest. When there's no lag, promises
+  -- reclaim the full width (no empty left gutter).
+  local lrows = lag_rows(math.min(LAG_COL_W, ww))     -- width only tags the cell; lag text isn't truncated
+  local have_lag = #lrows > 0
+  local prom_w = have_lag and math.max(10, ww - LAG_COL_W) or ww
+  local lag_w  = have_lag and (ww - prom_w) or ww
+  local prows = promise_rows(prom_w)
   -- Every GROUP-MEMBER row carries the HP/MP/MV bars, and their flex widths depend on the right cell's
   -- width — so those rows MUST get a minimap-width (mw) cell or the bars compress and misalign (the "last
-  -- spider offset" bug). The group is often TALLER than the minimap, so when we're about to stack the WIDER
-  -- promise/lag widgets, first pad the right column with blank mw cells to cover every group row; the
-  -- widgets then land on the reference rows below, where the wider width is fine. (No widgets → no padding,
-  -- so a widget-less panel stays plain and the group rows fall back to the mw `blank` below.)
+  -- spider offset" bug). The group is often TALLER than the minimap, so when we're about to place the WIDER
+  -- widget band, first pad the right column with blank mw cells to cover every group row; the widgets then
+  -- land on the reference rows below, where the wider width is fine. (No widgets → no padding, so a
+  -- widget-less panel stays plain and the group rows fall back to the mw `blank` below.)
   if #prows > 0 or #lrows > 0 then
     local group_rows = (#g >= 2) and (1 + #g) or 0   -- header + one row per member
     while #right < group_rows do right[#right + 1] = { text = "", width = mw } end
+    if #right > 0 then right[#right + 1] = { text = "", width = ww } end   -- gap under the map
+    -- Zip lag (left) + promises (right) row-for-row into one band of width ww, blank-filling the shorter
+    -- side. With no lag, each promise row goes in at full width (no empty lag column on the left).
+    local nrows = math.max(#prows, #lrows)
+    for i = 1, nrows do
+      if have_lag then
+        local lcell = lrows[i] or { text = "" }
+        local pcell = prows[i] or { text = "" }
+        lcell.width, pcell.width = lag_w, prom_w
+        right[#right + 1] = { cols = { lcell, pcell }, width = ww }
+      else
+        local pcell = prows[i] or { text = "" }
+        pcell.width = ww
+        right[#right + 1] = pcell
+      end
+    end
   end
-  if #prows > 0 and #right > 0 then right[#right + 1] = { text = "", width = ww } end   -- gap under the map
-  for _, r in ipairs(prows) do right[#right + 1] = r end
-  if #lrows > 0 and #right > 0 then right[#right + 1] = { text = "", width = ww } end   -- gap above the lag widget
-  for _, r in ipairs(lrows) do right[#right + 1] = r end
   if #right == 0 then panel.top(left); return end
   local blank = { text = "", width = mw }
   local rows, n = {}, math.max(#left, #right)

@@ -176,11 +176,58 @@ test("never merges deep or purple (the goal, not fuel)", function()
   expect(pair.a):eq(1); expect(pair.b):eq(2)          -- pale ords 1,2; deep (ords 5,6) never selected
 end)
 
+test("BUG 1 fix: plan_next_forge's pale-surplus test honors an explicit CONTEXT, not just the carried subset", function()
+  -- 3 pale on hand alone: not surplus (pale_lots is 4) → no context arg means "judge stones on their own".
+  local carried = SF.parse_soulstones(inv("pale", "pale", "pale"))
+  expect(SF.plan_next_forge(carried)):eq(nil)
+  -- The SAME 3 carried stones, but a wider context (e.g. carried + what's still sitting in a container)
+  -- shows 4 pale total → surplus → the carried pair IS planned (ordinals still come from `carried`).
+  local context = SF.parse_soulstones(inv("pale", "pale", "pale", "pale"))
+  local pair = SF.plan_next_forge(carried, context)
+  expect(pair.a):eq(1); expect(pair.b):eq(2)
+end)
+
 -- ---- (d) flow: observable send sequences ---------------------------------------------------------
 test("begin reads inventory then casts the merge: inv → c soulforge 1.soulstone 2.soulstone", function()
   begin_with(inv("green", "green"))
   expect(SF.sent[1]):eq("inv")               -- first thing an op does: re-read what you carry
   expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
+end)
+
+test("inventory read is RESPONSE-DRIVEN: a laggy `inv` reply is used when it lands, not a stale snapshot", function()
+  -- Reproduces the bug: on a laggy server the `inv`/`look in` reply can arrive well after any fixed short
+  -- wait, so a timer-based read builds its plan from an empty/stale state.inventory. SF.begin() now only
+  -- SENDS `inv` and starts waiting (SF.awaiting_inv() true) — it must NOT plan yet, because the reply
+  -- hasn't landed. Only once state.inventory is actually populated AND the completion hook fires
+  -- (SF.inventory_ready(), the test-seam mirror of the on_inventory global AlterAeon.lua calls when the
+  -- "You are carrying:" block closes) does soulforge read and plan.
+  SF.reset()
+  state.inventory = {}                       -- stale/empty — as if a previous read, or nothing yet
+  SF.begin()
+  expect(#SF.sent):eq(1)                     -- only the send so far — no premature read/cast
+  expect(SF.sent[1]):eq("inv")
+  expect(SF.awaiting_inv()):eq(true)
+
+  -- The laggy reply finally lands: state.inventory gets populated, THEN the block-close hook fires.
+  state.inventory = inv("yellow", "green")
+  SF.inventory_ready()
+
+  expect(SF.awaiting_inv()):eq(false)
+  expect(#SF.sent):eq(2)
+  expect(SF.sent[2]):eq("c soulforge 1.soulstone 2.soulstone")   -- planned from the LATE reply, not the stale empty one
+end)
+
+test("inventory_ready is a no-op when nothing is awaiting it (an unrelated/late fire can't double-plan)", function()
+  SF.reset()
+  expect(SF.active()):eq(false)
+  SF.inventory_ready()               -- no op running at all
+  expect(SF.active()):eq(false)
+
+  begin_with(inv("green", "green"))  -- begin_with already resolves via SF.on_inv, so awaiting_inv is clear
+  expect(SF.awaiting_inv()):eq(false)
+  local n = #SF.sent
+  SF.inventory_ready()               -- stray fire — must not trigger another read/cast
+  expect(#SF.sent):eq(n)
 end)
 
 test("a forge result updates the model IN MEMORY and casts the next merge with NO re-inventory", function()
@@ -294,16 +341,18 @@ test("gather: LOOKS IN the container, understands contents, then pulls ONLY the 
   SF.look_soulstone("a deep blue soulstone")  -- deep blue is the GOAL, not fuel — must be left alone
   SF.look_done()                              -- block quiet → decide + start pulling
   expect(SF.sent[#SF.sent]):eq("get red soulstone sack")     -- raw red first (never `get deep …`)
-  SF.get_ok("red"); SF.get_empty()            -- one red out (appended to the model), reds drained → next
-  expect(SF.sent[#SF.sent]):eq("get green soulstone sack")
-  SF.get_ok("green"); SF.get_empty()          -- green out → queue done → forge STRAIGHT from memory (no inv)
+  SF.get_ok("red")            -- one red out (appended to the model); known count (1) exhausted → next queued colour
+  expect(SF.sent[#SF.sent]):eq("get green soulstone sack")   -- advanced WITHOUT a trailing miss-probe for red
+  SF.get_ok("green")          -- green out; known count (1) exhausted → queue done → forge STRAIGHT from memory
   expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- the pulled red + green
-  local invs = 0
+  local invs, gets = 0, 0
   for _, c in ipairs(seq()) do
     expect(c:find("get deep", 1, true) == nil):eq(true)      -- deep blue left in the sack
     if c == "inv" then invs = invs + 1 end
+    if c:find("^get ") then gets = gets + 1 end
   end
   expect(invs):eq(1)                          -- only the initial read; the pull → forge was all in memory
+  expect(gets):eq(2)                          -- exactly one `get` per known-count colour, no trailing miss-probe
 end)
 
 test("gather: an EMPTY container is looked in, reported, and not pulled — loose stones forge, no extra inv", function()
@@ -343,6 +392,38 @@ test("gather: a full pack during pulling stops the sweep and forges what we have
   SF.get_ok("red"); SF.get_ok("red")          -- pulled two (both appended to the model)…
   SF.carry_full()                             -- "You can't carry that many items." → stop, forge from memory
   expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
+end)
+
+test("BUG 2 fix: pull is COUNT-BOUNDED to the known look-in count — no trailing miss-probe get", function()
+  SF.reset()
+  state.inventory = { "a small sack" }
+  SF.begin(); SF.on_inv()
+  expect(SF.sent[#SF.sent]):eq("look in sack")
+  SF.look_soulstone("(  3) a red soulstone")   -- the sack holds EXACTLY 3
+  SF.look_done()
+  expect(SF.sent[#SF.sent]):eq("get red soulstone sack")
+  SF.get_ok("red"); SF.get_ok("red"); SF.get_ok("red")   -- pull all 3 known — no fourth `get` fired
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- advances straight to forging
+  local gets = 0
+  for _, c in ipairs(seq()) do if c:find("^get ") then gets = gets + 1 end end
+  expect(gets):eq(3)   -- exactly the known count — never the extra miss-probe get
+end)
+
+test("BUG 1 fix: pale surplus is judged on carried+container combined, so a pull cut short still forges", function()
+  -- 3 pale carried + 1 more sitting in the sack (4 total, pale_lots=4) → the LOOK phase sees it as surplus
+  -- and queues a pull. But the pack fills before that pull lands (carry_full), so the container's pale is
+  -- NEVER actually moved into the carried model. Before the fix, plan_and_cast would judge surplus off the
+  -- carried model alone (3 < pale_lots) and forge nothing; the fix judges it off the combined picture (4),
+  -- same as the pull decision, so the carried pale pair still forges.
+  SF.reset()
+  state.inventory = { "a small sack", "a pale blue soulstone", "a pale blue soulstone", "a pale blue soulstone" }
+  SF.begin(); SF.on_inv()
+  expect(SF.sent[#SF.sent]):eq("look in sack")
+  SF.look_soulstone("a pale blue soulstone")   -- 1 more pale sitting in the sack
+  SF.look_done()                               -- combined (3 carried + 1 sack = 4) is surplus → queues a pull
+  expect(SF.sent[#SF.sent]):eq("get pale soulstone sack")
+  SF.carry_full()                              -- pack fills before the pull lands — the sack's pale stays put
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- forges the carried pale surplus anyway
 end)
 
 -- ---- (g) stow: put the forged stones back, and batch through a big stash -------------------------

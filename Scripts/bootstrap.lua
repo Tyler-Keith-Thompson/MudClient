@@ -972,3 +972,4 @@ doc("on_resize", { sig = "on_resize(cols, rows)", group = "hooks", text = "hooks
 doc("on_mouse", { sig = "on_mouse(event, x, y, button)", group = "hooks", text = "hooks: define a global with this name. Return truthy to consume a mouse event." })
 doc("on_user_input", { sig = "on_user_input(cmd)", group = "hooks", text = "hooks: define a global with this name. Observe a typed command (non-swallowing)." })
 doc("on_update", { sig = "on_update()", group = "hooks", text = "hooks: define a global with this name. Fired after a batch of server output so the script can refresh panels." })
+doc("on_inventory", { sig = "on_inventory()", group = "hooks", text = "hooks: define a global with this name. Fired by AlterAeon.lua's inventory trigger when the `You are carrying:` block just closed (state.inventory is current; state.inv_seq also bumps). Lets a script await the ACTUAL inv reply instead of a fixed post-send delay." })

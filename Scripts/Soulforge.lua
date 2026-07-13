@@ -39,9 +39,17 @@ state = state or {}   -- defensive: this file may load before AlterAeon.lua unde
 local cfg = {
   pale_lots       = 4,    -- once you hold this many pale blue, start spending the SURPLUS climbing to deep
   keep_pale       = 2,    -- ...but never merge pale below this many on hand (a working stash)
-  inv_wait        = 0.6,  -- seconds after sending `inv` before we read the repopulated state.inventory
+  inv_backstop    = 4.5,  -- GENEROUS backstop: only fires if the `inv` reply never drives on_inventory (a
+                          -- laggy server can take seconds; the real read is response-driven — see on_inventory)
   recast_wait     = 0.4,  -- seconds to wait before re-sending the SAME cast after a fizzle (anti-spam)
-  gather_wait     = 1.0,  -- backstop: quiet time after a container `get`/`put` with no reply before moving on
+  gather_wait     = 2.5,  -- backstop: quiet time after a container `look in`/`get`/`put` with no reply before
+                          -- moving on. Each captured line RE-ARMS this (see hit_look_soulstone), so it's
+                          -- effectively response-driven once the block starts streaming — the risk is only
+                          -- the INITIAL gap before the first line lands on a laggy server, same class of bug
+                          -- as the inv read (see on_inventory/kick_inventory above). A true block-end signal
+                          -- would need AlterAeon.lua to parse `look in` output generically (it doesn't today,
+                          -- unlike `inv`/`equipment`, which already have start/end markers) — too invasive for
+                          -- this fix, so we widened the backstop instead; revisit if look-in still races.
   max_no_progress = 3,    -- bail after this many re-inventories that DON'T reduce the soulstone count
   stow            = true, -- after each forge pass, PUT the soulstones back into the source container
 }
@@ -124,15 +132,22 @@ local function is_raw(color, stones)
   return false
 end
 
--- plan_next_forge(stones) -> { a=ord1, b=ord2 } (ord1 < ord2) for the next merge, or nil when nothing's
--- worth merging (fewer than two raw stones). Always CONSUMES THE LOWEST-TIER raw stone so low junk never
--- gets stranded: it pairs that stone with a SAME-colour partner when one exists (similar-level merges are
--- most effective), and otherwise MIXES it with the next-lowest raw stone — so a lone red combines with a
--- green/pale instead of sitting there while pales pair up around it. Pure — the whole policy lives here.
-local function plan_next_forge(stones)
+-- plan_next_forge(stones, context) -> { a=ord1, b=ord2 } (ord1 < ord2) for the next merge, or nil when
+-- nothing's worth merging (fewer than two raw stones). Always CONSUMES THE LOWEST-TIER raw stone so low
+-- junk never gets stranded: it pairs that stone with a SAME-colour partner when one exists (similar-level
+-- merges are most effective), and otherwise MIXES it with the next-lowest raw stone — so a lone red
+-- combines with a green/pale instead of sitting there while pales pair up around it. Pure — the whole
+-- policy lives here.
+--
+-- `context` is an OPTIONAL list-of-{color=...} used only for the pale-surplus is_raw TEST (defaults to
+-- `stones` when nil, so existing callers/tests that reason purely off the carried pile are unaffected).
+-- The ordinals selected are always real carried stones (from `stones`) — context only widens the picture
+-- used to decide whether pale counts as surplus (see plan_and_cast: it passes carried+container combined).
+local function plan_next_forge(stones, context)
+  context = context or stones
   local raw = {}
   for _, s in ipairs(stones) do
-    if s.color and is_raw(s.color, stones) then raw[#raw + 1] = s end
+    if s.color and is_raw(s.color, context) then raw[#raw + 1] = s end
   end
   if #raw < 2 then return nil end
 
@@ -281,11 +296,25 @@ end
 
 local plan_and_cast, start_gather, forge_done, done_looking   -- fwd
 
+-- combined_colors(op) -> { {color=...}, ... } — the carried model's colours PLUS every carried container's
+-- known contents, expanded to one entry per stone. This is the "whole picture" is_raw needs to judge pale
+-- surplus correctly: the pull decision (done_looking) and the forge decision (plan_and_cast) must agree on
+-- what's plentiful, or pales pulled out of a container never actually get forged (see the BUG 1 header).
+-- Factored out once so done_looking/container_has_raw/plan_and_cast can't drift from each other.
+local function combined_colors(op)
+  local combined = {}
+  for _, s in ipairs(op.model or {}) do if s.color then combined[#combined + 1] = { color = s.color } end end
+  for _, counts in pairs(op.container_stones or {}) do
+    for color, n in pairs(counts) do for _ = 1, n do combined[#combined + 1] = { color = color } end end
+  end
+  return combined
+end
+
 -- Read the freshly-repopulated inventory INTO the model, then plan. Used only for the INITIAL read and a
 -- desync resync — NOT after every forge (the model is maintained in memory from forge-result feedback).
 local function resync_and_plan()
   local op = sf_op; if not op then return end
-  op.inv_timer = nil
+  op.inv_timer, op.awaiting_inv = nil, false
   op.model = parse_soulstones(state.inventory)
   -- FIRST read of the run: look in the carried containers (once) and pull their soulstones. After that the
   -- whole run is memory-driven — this resync is reached again only on a desync re-inventory (see
@@ -294,14 +323,32 @@ local function resync_and_plan()
   plan_and_cast()
 end
 
--- Send `inv` and, once the output has had inv_wait to land in state.inventory, resync the model + plan.
--- Only the initial kick and desync recoveries call this — the steady state never re-inventories.
+-- Send `inv` and resync the model + plan RESPONSE-DRIVEN: on_inventory (fired by AlterAeon.lua when the
+-- "You are carrying:" block actually closes) drives resync_and_plan, so we read whatever state.inventory
+-- the reply produced rather than guessing a fixed post-send delay — a laggy server can take seconds, and a
+-- fixed short wait was reading a stale/empty inventory (see AlterAeon.lua's inv_capturing trigger). The
+-- inv_backstop timer is only a SAFETY NET for a reply that never arrives at all. Only the initial kick and
+-- desync recoveries call this — the steady state never re-inventories.
 local function kick_inventory()
   local op = sf_op; if not op then return end
   sf_touch()
+  op.awaiting_inv = true
   if op.inv_timer and cancel then cancel(op.inv_timer) end
   sf_send("inv")
-  op.inv_timer = after and after(cfg.inv_wait, resync_and_plan) or nil
+  op.inv_timer = after and after(cfg.inv_backstop, resync_and_plan) or nil
+end
+
+-- Fired by AlterAeon.lua when the `inv` reply's "You are carrying:" block just closed — the real
+-- (response-driven) trigger for resync_and_plan; the inv_backstop timer above only covers a reply that
+-- never comes at all. A no-op if we're not currently waiting on one (e.g. an unrelated `inv` elsewhere).
+-- Documented once, in bootstrap.lua (see on_inventory there, next to the other on_* hooks), since it's a
+-- host-hook-shaped optional global even though AlterAeon.lua is what fires it.
+function on_inventory()
+  local op = sf_op
+  if not op or not op.awaiting_inv then return end
+  op.awaiting_inv = false
+  if op.inv_timer and cancel then cancel(op.inv_timer) end
+  resync_and_plan()
 end
 
 -- Plan the next merge FROM THE MODEL and cast it, or FINISH — no inventory read (the model is kept current
@@ -314,7 +361,10 @@ plan_and_cast = function()
   -- PASS is done — hand off to forge_done, which stows the results back into the container and, if this
   -- pass forged anything, runs another pull/forge/stow cycle until the stash is fully worked.
   if #model < 2 then return forge_done() end
-  local pair = plan_next_forge(model)
+  -- The pale-surplus TEST reasons over the whole picture (carried + whatever's still in the containers we
+  -- pulled from), matching done_looking's pull decision — see combined_colors / the BUG 1 header. The
+  -- ordinals plan_next_forge picks are still real carried stones, drawn from `model`.
+  local pair = plan_next_forge(model, combined_colors(op))
   if not pair then return forge_done() end
 
   op.pair = pair
@@ -392,18 +442,16 @@ done_looking = function()
   local op = sf_op; if not op then return end
   op.phase = "gather"   -- a new pass may be entered from the stow phase (next_cycle) — back to gathering
   -- Combined multiset (carried model + every container's contents) → the is_raw decision context.
-  local combined = {}
-  for _, s in ipairs(op.model or {}) do if s.color then combined[#combined + 1] = { color = s.color } end end
-  for _, counts in pairs(op.container_stones) do
-    for color, n in pairs(counts) do for _ = 1, n do combined[#combined + 1] = { color = color } end end
-  end
+  local combined = combined_colors(op)
   -- Queue a pull for each raw colour a container actually holds (skip deep/purple and non-surplus pale).
   op.pull_queue = {}
   for _, kw in ipairs(op.containers) do
     for _, color in ipairs({ "red", "yellow", "green", "pale", "deep", "purple" }) do
       local n = (op.container_stones[kw] or {})[color]
       if n and n > 0 and is_raw(color, combined) then
-        op.pull_queue[#op.pull_queue + 1] = { kw = kw, color = color }
+        -- `remaining` is the KNOWN count from the look-in — gather_pull bounds the pull to it, so we don't
+        -- fire one extra `get` that just misses (see the BUG 2 header).
+        op.pull_queue[#op.pull_queue + 1] = { kw = kw, color = color, remaining = n }
       end
     end
   end
@@ -415,12 +463,20 @@ done_looking = function()
   gather_pull()
 end
 
--- PULL: `get <colour> soulstone <kw>` for the current queue entry. hit_get_ok re-fires this (pull the next
--- of that colour); hit_get_empty advances the queue. A backstop advances if the game says nothing.
+-- PULL: `get <colour> soulstone <kw>` for the current queue entry. COUNT-BOUNDED: the look-in already told
+-- us exactly how many of this colour the container holds (item.remaining), so once that's exhausted we
+-- advance straight to the next queue entry ourselves instead of firing one more `get` that just misses
+-- ("You don't see anything named …") — see the BUG 2 header. hit_get_ok decrements remaining and re-fires
+-- this; hit_get_empty (a real miss — the game disagreed with our count, e.g. it changed underfoot) still
+-- advances the queue as a safety net. A quiet-time backstop also advances if the game says nothing at all.
 gather_pull = function()
   local op = sf_op; if not op then return end
   local item = op.pull_queue[op.pull_idx]
   if not item then return finish_gather() end
+  if (item.remaining or 1) <= 0 then
+    op.pull_idx = op.pull_idx + 1
+    return gather_pull()
+  end
   sf_touch()
   sf_send(string.format("get %s soulstone %s", item.color, item.kw))
   arm_gather_backstop(gather_pull_advance)
@@ -509,11 +565,7 @@ end
 -- Are there still at least TWO raw stones in the whole (in-memory) picture — i.e. another forge is
 -- possible? Requires two so a lone unpairable stone doesn't trigger a wasted pull-and-stow pass.
 local function container_has_raw(op)
-  local combined = {}
-  for _, s in ipairs(op.model or {}) do if s.color then combined[#combined + 1] = { color = s.color } end end
-  for _, counts in pairs(op.container_stones or {}) do
-    for color, n in pairs(counts) do for _ = 1, n do combined[#combined + 1] = { color = color } end end
-  end
+  local combined = combined_colors(op)
   local raw = 0
   for _, s in ipairs(combined) do if is_raw(s.color, combined) then raw = raw + 1 end end
   return raw >= 2
@@ -643,10 +695,12 @@ local function hit_get_ok(color_phrase)
   op.pulled = (op.pulled or 0) + 1
   local item = op.pull_queue[op.pull_idx]
   -- Keep the in-memory container model current so later cycles decide without re-looking: one stone of
-  -- this colour just left this container.
+  -- this colour just left this container. Also count down the known remaining for THIS queue entry so
+  -- gather_pull can bound the pull instead of firing a trailing miss-probe (BUG 2).
   if item and op.container_stones[item.kw] and op.container_stones[item.kw][item.color] then
     op.container_stones[item.kw][item.color] = op.container_stones[item.kw][item.color] - 1
   end
+  if item then item.remaining = (item.remaining or 1) - 1 end
   -- ...and APPEND it to the carried model (the game drops a gotten item at the end of inventory), so we
   -- forge straight from memory with NO re-inventory. Trust the line's colour, fall back to what we asked.
   local color = tier_key(color_phrase) or (item and item.color)
@@ -807,6 +861,8 @@ _SF_TEST = {
   container_soulstone = container_soulstone,   -- parse a `look in` line -> (color, count)
   begin          = soulforge_start,      -- start an op (returns the promise)
   on_inv         = function() resync_and_plan() end,  -- the after-inv step (gather → or read → cast/finish)
+  inventory_ready = function() on_inventory() end,     -- the RESPONSE-DRIVEN inv completion hook (see on_inventory)
+  awaiting_inv   = function() return sf_op ~= nil and sf_op.awaiting_inv == true end,
   forge_result   = hit_forge_result,     -- (result_phrase, base_phrase) — updates the model, casts next
   fail           = hit_fail,
   recast         = resend_cmd,           -- fire the pending recast (the harness timer never auto-fires)
