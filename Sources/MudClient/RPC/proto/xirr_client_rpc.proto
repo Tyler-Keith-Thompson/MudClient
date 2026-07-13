@@ -1,0 +1,37 @@
+// AlterAeon dclient RPC — client_rpc payloads.
+// Package xirr_client_rpc, from xci_rpc_socket_generic.pb.cc in dclient_linux64 1.105-g64-rc2.
+syntax = "proto2";
+package xirr_client_rpc;
+
+// version_info. Parser 0x140440: f1,f2,f3 all string. These are OUR outbound identity fields
+// (always valid UTF-8, we set them) so they stay `string`.
+message version_info {
+  optional string client_version  = 1;   // exact
+  optional string client_uuid     = 2;   // exact
+  optional string client_protocol = 3;   // exact
+}
+
+// text_block. Parser 0x140200: f1 (main text), f2 extra_info. Carry raw game output (ANSI + Latin-1),
+// which is NOT valid UTF-8 — declared `bytes` so SwiftProtobuf won't reject the message.
+message text_block {
+  optional bytes text       = 1;   // NAME UNRECOVERED (field-1, block body)
+  optional bytes extra_info = 2;   // exact
+}
+
+// generic_kv_event. Parser 0x13dad0: f1,f2 string, f3 varint. May carry game text → bytes.
+message generic_kv_event {
+  optional bytes key    = 1;   // exact
+  optional bytes kvalue = 2;   // exact
+  optional int32 f3     = 3;   // varint
+}
+
+// channel_send_data. Parser 0x13dfc0: f1,f2 string. `sent_message` is chat text (ANSI/Latin-1) → bytes.
+message channel_send_data {
+  optional bytes channel_name = 1;   // exact
+  optional bytes sent_message = 2;   // exact
+}
+
+// audio_playout_data. Parser 0x13ddc0: single string field 1 (a filename; ASCII, but bytes for safety).
+message audio_playout_data {
+  optional bytes short_clip_filename = 1;   // exact
+}

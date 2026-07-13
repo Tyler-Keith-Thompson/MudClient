@@ -1,0 +1,37 @@
+// AlterAeon dclient RPC — framing + channel auth.
+// Package xirr_rpc, from xirr_proto_framer_frameinfo.pb.cc and the auth .pb.cc
+// in dclient_linux64 1.105-g64-rc2.
+syntax = "proto2";
+package xirr_rpc;
+
+// The per-message routing header. Sent as the FIRST of the two line-frames that
+// make up one logical RPC block (the "proto frame"); the SECOND line-frame ("data
+// frame") carries the serialized payload message selected by proto_name.
+// Parser 0x1623d0 (2-byte tags for high field numbers). String field names exact.
+message xirr_proto_framer_frameinfo {
+  optional string proto_name       = 1;    // routing key: payload message type
+  optional int32  f2               = 2;
+  optional string rpc_service_name = 10;   // exact (service key, e.g. "hpbar")
+  optional int32  f11              = 11;
+  optional int32  f20              = 20;
+  optional int64  f30              = 30;   // provided schema: int64
+  optional int32  f31              = 31;
+  optional int32  f90              = 90;
+  optional string failure_message  = 91;   // exact
+  optional int32  f99              = 99;
+}
+
+// Channel authentication handshake. Parser 0x164130 VERIFIED: every tag confirmed
+// (0x08,0x52,0x5a,0x62,0xa2,0xaa,0xb2,0xf0,0xfa) => the field numbers below.
+// (Auth semantics owned by another agent; schema included for completeness.)
+message xirr_rpc_channel_auth {
+  optional int32  f1                = 1;
+  optional string client_nonce      = 10;   // exact
+  optional string client_hash       = 11;   // exact
+  optional string client_public_key = 12;   // exact
+  optional string server_nonce      = 20;   // exact
+  optional string server_hash       = 21;   // exact
+  optional string server_public_key = 22;   // exact
+  optional int32  f30               = 30;
+  optional string server_fail_string = 31;  // exact
+}

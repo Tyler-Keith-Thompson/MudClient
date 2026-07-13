@@ -1,5 +1,5 @@
 {
-  "originHash" : "55b9eca6e2ec7e4f60e720da03803b06abcda82563e8e9385b2d38861531f708",
+  "originHash" : "0b874563108baad1fa4ff966053eeadcdfb80f99242c1cb8055632cb6605346d",
   "pins" : [
     {
       "identity" : "afluent",
@@ -17,6 +17,15 @@
       "state" : {
         "revision" : "7304779400c58d9bad6b974de48ae40ab38b1f39",
         "version" : "0.0.10"
+      }
+    },
+    {
+      "identity" : "mockable",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Kolos65/Mockable.git",
+      "state" : {
+        "revision" : "0b239389c5fa6666fb30dc97fbb23fc3ca851a85",
+        "version" : "0.6.4"
       }
     },
     {
@@ -65,6 +74,24 @@
       }
     },
     {
+      "identity" : "swift-nio-ssl",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-nio-ssl.git",
+      "state" : {
+        "revision" : "0cc3528ff48129d64ab9cab0b1cd621634edfc6b",
+        "version" : "2.29.3"
+      }
+    },
+    {
+      "identity" : "swift-protobuf",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-protobuf.git",
+      "state" : {
+        "revision" : "55d7a1cc5666b85c13464aea1c4b4a90feccb4c8",
+        "version" : "1.38.1"
+      }
+    },
+    {
       "identity" : "swift-service-context",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-service-context",
@@ -74,12 +101,30 @@
       }
     },
     {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax",
+      "state" : {
+        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
+        "version" : "603.0.2"
+      }
+    },
+    {
       "identity" : "swift-system",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-system.git",
       "state" : {
         "revision" : "d2ba781702a1d8285419c15ee62fd734a9437ff5",
         "version" : "1.3.2"
+      }
+    },
+    {
+      "identity" : "xctest-dynamic-overlay",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/xctest-dynamic-overlay",
+      "state" : {
+        "revision" : "dfd70507def84cb5fb821278448a262c6ff2bbad",
+        "version" : "1.9.0"
       }
     }
   ],

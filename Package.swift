@@ -16,6 +16,8 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.70.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.27.0"),
+        .package(url: "https://github.com/apple/swift-protobuf.git", from: "1.38.1"),
         .package(url: "https://github.com/Tyler-Keith-Thompson/Afluent.git", from: "0.6.2"),
         .package(url: "git@github.com:Tyler-Keith-Thompson/DependencyInjection.git", from: "0.0.7"),
         .package(path: "../swift-parsing"),
@@ -38,6 +40,8 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "Afluent", package: "Afluent"),
                 .product(name: "DependencyInjection", package: "DependencyInjection"),
                 .product(name: "Parsing", package: "swift-parsing"),

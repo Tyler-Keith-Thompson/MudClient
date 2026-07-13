@@ -501,6 +501,13 @@ doc("is_connected", { sig = "is_connected() -> bool", group = "connection",
 doc("telnet_send", { sig = "telnet_send(option, payload)", group = "connection",
   text = "Send IAC SB <option> <payload> IAC SE, escaping IAC bytes. option is numeric; payload is a byte string.",
   example = "telnet_send(90, \"!!SOUND(ding)\")" })
+doc("on_stream", { sig = "on_stream(fn)", group = "connection",
+  text = "Register fn(chunk) -> string as a filter over the raw incoming server text stream, run BEFORE line assembly. The host displays whatever string fn returns; use it to peel out a custom in-band protocol (e.g. AlterAeon's `;`-framed dclient channel) that isn't newline-delimited. Only the most recently registered fn is active." })
+doc("rpc_connect", { sig = "rpc_connect(uuid)", group = "connection",
+  text = "Open the SECOND TLS connection (AlterAeon's dclient RPC/telemetry channel, www.alteraeon.com:3103) with the given client uuid, and run the version_info + RSA channel-auth handshake. Progress and every decoded RPC message are echoed as `[rpc] ...` lines while this is being worked out live; this is separate from the main game connection (connect()/disconnect()).",
+  example = "rpc_connect(\"6nxn1ftm5tbcyq3kteam\")" })
+doc("rpc_disconnect", { sig = "rpc_disconnect()", group = "connection",
+  text = "Close the RPC/telemetry connection opened by rpc_connect()." })
 
 -- terminal / input
 doc("bind", { sig = "bind(keyname, handler) -> id", group = "terminal",
@@ -580,9 +587,16 @@ if music then
     text = "All-Notes-Off panic on the live MIDI synth so a held note can't hang (e.g. on disconnect)." })
 end
 
+doc("sound_once", { sig = "sound_once(path[, volume])", group = "music",
+  text = "Play a ONE-SHOT sound effect from an absolute file path, via SoundService's AVAudioEngine "
+      .. "one-shot node pool (AVAudioPlayer can't play the soundpack's Ogg Vorbis files at all) — "
+      .. "unlike music.play/stop this is not channel-based or looping. The volume arg is accepted for "
+      .. "signature stability but ignored: effect volume is controlled globally via msp_volume/"
+      .. "volume('sfx N'), not per call." })
+
 -- Per-category audio masters (see the `volume` command in AlterAeon.lua, which drives these).
 doc("msp_volume", { sig = "msp_volume(pct)", group = "audio",
-  text = "Set the master volume for MSP sound effects from a 0-100 percentage. Scales every NEW effect; 0 silences them." })
+  text = "Set the master volume for one-shot sound effects from a 0-100 percentage. Scales every NEW effect; 0 silences them." })
 doc("speech_volume", { sig = "speech_volume(pct)", group = "audio",
   text = "Set the TTS voice volume from a 0-100 percentage. At 0 utterances are dropped entirely — never synthesized or played (true silence)." })
 

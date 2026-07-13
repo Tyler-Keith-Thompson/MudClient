@@ -26,8 +26,8 @@ local function music_channel_stop(ch)
   state.music[ch] = nil
   if music then music.stop(ch) end
 end
-trigger([[^kxwt_music channel_play (\S+) (\S+)]], function(_, ch, tr) music_channel_play(ch, tr) end)
-trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch) music_channel_stop(ch) end)
+trigger([[^kxw[tq]_music channel_play (\S+) (\S+)]], function(_, ch, tr) music_channel_play(ch, tr) end)
+trigger([[^kxw[tq]_music channel_stop (\S+)]], function(_, ch) music_channel_stop(ch) end)
 
 -- Live MIDI performances (kxwt_midi) — a bard/flute playing in REAL TIME, streamed as raw MIDI events
 -- (unlike kxwt_music, which just names a pre-authored soundtrack file to loop). Each line is ONE MIDI
@@ -38,7 +38,7 @@ trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch) music_channel_stop(c
 local function midi_event(payload)
   if music and music.midi then music.midi(payload) end
 end
-trigger([[^kxwt_midi (.+)]], function(_, payload) midi_event(payload) end)
+trigger([[^kxw[tq]_midi (.+)]], function(_, payload) midi_event(payload) end)
 
 -- Flush any held notes when the connection drops so a performance can't hang a note past the socket.
 if on_disconnect == nil then

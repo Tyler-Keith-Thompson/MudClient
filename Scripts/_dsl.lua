@@ -20,8 +20,8 @@ function M.flag(s) return tonumber(s) == 1 end
 
 -- field(pattern) — declare a kxwt/text line as a spec of "these captures go into these state fields".
 -- Replaces  trigger(pat, function(_, a) state.x = tonumber(a) end)  with a chain:
---     field [[^kxwt_gold (-?\d+)]] : into "gold" : as (number)
---     field [[^kxwt_prompt (\d+) (\d+) …]] : into("hp","maxhp",…) : as(number) : then_(on_vitals)
+--     field [[^kxw[tq]_gold (-?\d+)]] : into "gold" : as (number)
+--     field [[^kxw[tq]_prompt (\d+) (\d+) …]] : into("hp","maxhp",…) : as(number) : then_(on_vitals)
 -- One trigger is registered IMMEDIATELY (so its pattern keeps its place in specificity/registration
 -- order); the returned builder just mutates a config table the trigger closure reads at fire time, so the
 -- :into/:as/:then_ that follow all take effect before any line ever arrives. `:as` transforming to nil

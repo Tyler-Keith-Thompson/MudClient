@@ -7,7 +7,8 @@
 -- with the real kxwt_ protocol namespace) and pipe-delimit the vitals/position, with the fighting form
 -- appending the current target's health%/gender/name. The host surfaces every GA-terminated prompt to
 -- the optional `on_prompt(text)` global UPSTREAM of the trigger/gag pipeline, so this sees the prompt
--- even though our own `gag([[^kxw[qt]_hud]])` below hides it from the display. The PARSER accepts
+-- even though our own trigger below replaces it with a bare colour reset (hidden data, colour cleared at
+-- the prompt boundary — see there). The PARSER accepts
 -- either letter (`kxw[qt]_hud|`) — kxwq_ is what we send, but kxwt_hud is tolerated too (e.g. an old
 -- session's prompt format still configured server-side) since it's the same shape either way.
 --
@@ -40,16 +41,22 @@ end
 
 -- Mirrors AlterAeon.lua:67's `set kxwt` handshake trigger — a SEPARATE trigger on the same line, so both
 -- fire (multiple triggers per line are fine). Sets the three prompt formats once kxwt is confirmed live.
-trigger([[^kxwt_supported$]], set_prompt_formats)
+trigger([[^kxw[tq]_supported$]], set_prompt_formats)
 
 -- A #reload runs this file fresh, but the connect trigger above only fires on a NEW `set kxwt` handshake —
 -- which doesn't happen again mid-session. Re-apply immediately if we're already connected so the formats
 -- survive a reload without forcing a reconnect.
 if is_connected and is_connected() then set_prompt_formats() end
 
--- AlterAeon.lua's `gag([[^kxwt_]])` only catches the real protocol namespace — it does NOT match our
--- `kxwq_hud` sentinel, so without this the machine prompt would display. Gag both letters ourselves.
-gag([[^kxw[qt]_hud]])
+-- Hide the machine prompt from the display, but REPLACE it with a bare ANSI reset (ESC[0m) rather than
+-- dropping it outright. AlterAeon relies on the prompt to reset colour at the end of a turn — a lot of
+-- game lines set a colour and never reset it (e.g. "\27[35mOn the ground lies a book."), trusting the
+-- prompt that follows to clear it. A plain `gag` dropped that reset, so the leftover colour bled into the
+-- next output. The prompt carries no newline (GA-terminated) and `render` writes chunks verbatim, so the
+-- lone reset lands exactly at the prompt boundary — clearing colour there, adding NO blank line. This is
+-- "the prompt contains a reset" done client-side; do NOT reset every line, only here. (AlterAeon's own
+-- `^kxwt_` gag doesn't match our `kxwq_` sentinel, so we own this rule.)
+trigger([[^kxw[qt]_hud]], function() return "\27[0m" end)
 
 -- Parse a kxw[qt]_hud prompt into its fields, or nil if it's not one (or is too short/garbled to trust).
 -- Returns { hp, maxhp, mana, maxmana, stam, maxstam, position, fight_pct, fight_gender, fight_name } —
@@ -97,10 +104,6 @@ local function apply_prompt(p)
     state.fighting, state.fight_name, state.fight_pct = false, nil, nil
   end
 
-  -- AutoFight's kxwt_fighting-driven combat lifecycle never fires under nomelee (the server sends no
-  -- kxwt_fighting there) — this prompt is its only signal. __autofight_prompt is a no-op guarded on
-  -- AutoFight being loaded AND on kxwt having fired recently (see AutoFight.lua), so this call is always
-  -- safe to make and harmless when kxwt is the live source.
   if __autofight_prompt then
     if p.fight_name then __autofight_prompt(p.fight_pct, p.fight_name)
     else __autofight_prompt(nil, nil) end

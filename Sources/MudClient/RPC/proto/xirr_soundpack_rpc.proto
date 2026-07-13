@@ -1,0 +1,35 @@
+// AlterAeon dclient RPC — soundpack.
+// Package xirr_soundpack_rpc, from xirr_soundpack_rpc.pb.cc in dclient_linux64 1.105-g64-rc2.
+syntax = "proto2";
+package xirr_soundpack_rpc;
+
+// music_playout_data. Parser 0x133bb0 VERIFIED: tags 0x0a,0x10,0x18,0x20,0x28,0x52
+// => fields 1,2,3,4,5,10 exactly matching the provided schema.
+message music_playout_data {
+  optional string channel_name = 1;   // exact
+  optional int32  op           = 2;   // enum-valued (see MusicOp)
+  optional int32  fadein       = 3;
+  optional int32  fadeout      = 4;
+  optional int32  loop         = 5;
+  optional string filename     = 10;  // exact
+}
+
+// op enum values (from provided schema / SetSystemMusic dispatch). Not a proto
+// enum on the wire (field is a plain int32); listed for reference.
+enum MusicOp {
+  INVALID            = 0;
+  CHANNEL_CREATE     = 1;
+  CHANNEL_DELETE     = 2;
+  CONFIGURE          = 3;
+  HARD_START_PLAYOUT = 4;
+  HARD_STOP          = 5;
+  HARD_SUSPEND       = 6;
+  HARD_UNSUSPEND     = 7;
+  SOFT_START_PLAYOUT = 8;
+  SOFT_STOP          = 9;
+  SOFT_SUSPEND       = 10;
+  SOFT_UNSUSPEND     = 11;
+  SET_FADEIN         = 12;
+  SET_FADEOUT        = 13;
+  SET_LOOP           = 14;
+}

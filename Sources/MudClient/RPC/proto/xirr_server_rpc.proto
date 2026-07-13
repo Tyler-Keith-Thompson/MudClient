@@ -1,0 +1,9 @@
+// AlterAeon dclient RPC — server_rpc.
+// Package xirr_server_rpc, from xirr_rpc_keepalive.pb.cc in dclient_linux64 1.105-g64-rc2.
+syntax = "proto2";
+package xirr_server_rpc;
+
+// keepalive_info. Parser 0x165a00: single varint field 1 (latency/seq ms).
+message keepalive_info {
+  optional int32 f1 = 1;   // varint (see "keepalive latency of %d ms")
+}

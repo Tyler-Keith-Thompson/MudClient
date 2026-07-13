@@ -98,6 +98,7 @@ final class ConnectionManager: @unchecked Sendable {
         // in-flight MSP one-shots, and flush any queued speech.
         Container.musicService().stopAll()
         Container.mspService().stopAll()
+        Container.soundService().stopAll()
         Container.speechService().stop()
         Container.scriptInterpreter().engine.notifyDisconnect(reason: reason)
     }

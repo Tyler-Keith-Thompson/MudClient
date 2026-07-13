@@ -359,7 +359,7 @@ local GIVEUP   = {}                            -- rejection sentinel: "couldn't 
 local function capture_keep(line, cmd)
   local l = trim(line or "")
   if l == "" then return false end
-  if l:find("^kxwt_") then return false end                 -- protocol machinery
+  if l:find("^kxw[tq]_") then return false end                 -- protocol machinery
   if l:find("^%[event%]") then return false end             -- the trivia channel itself
   if cmd and l == trim(cmd) then return false end           -- our own echoed command
   return true

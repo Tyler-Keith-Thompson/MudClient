@@ -1,0 +1,78 @@
+// AlterAeon dclient RPC — telemetry payloads (HUD/state).
+// Package dclient_rpc, from dclient_rpc_messages.pb.cc in dclient_linux64 1.105-g64-rc2.
+// See alteraeon_rpc_NOTES.md for provenance. Scalar varints typed int32 (see notes);
+// numeric field names (fN) are NOT in the binary. String field names ARE exact.
+// Text-carrying fields are `bytes` (not `string`): AlterAeon game text is ANSI + Latin-1,
+// not valid UTF-8, and a `string` field would make SwiftProtobuf reject the whole message.
+syntax = "proto2";
+package dclient_rpc;
+
+// hpbar = player status bars. Parser 0x1088b0: fields 1..6 all varint.
+// Almost certainly the three AlterAeon bars: hit/spell/move points, current+max.
+message hpbar_data {
+  optional int32 f1 = 1;   // e.g. hp
+  optional int32 f2 = 2;   // e.g. maxhp
+  optional int32 f3 = 3;   // e.g. sp
+  optional int32 f4 = 4;   // e.g. maxsp
+  optional int32 f5 = 5;   // e.g. mv
+  optional int32 f6 = 6;   // e.g. maxmv
+}
+
+// enemy_hp = current target. Parser 0x10a090: exactly 2 fields.
+message enemy_hp_data {
+  optional bytes enemy_name = 1;   // exact name from .rodata; may carry ANSI colour → bytes
+  optional int32 f2 = 2;           // varint — HP value/percentage
+}
+
+// sky_and_time. Parser 0x109870: fields 1..5 varint, field 6 string.
+message sky_and_time {
+  optional int32 f1 = 1;
+  optional int32 f2 = 2;
+  optional int32 f3 = 3;
+  optional int32 f4 = 4;
+  optional int32 f5 = 5;
+  optional bytes printed_time_of_day_string = 6;   // exact name; bytes for safety
+}
+
+// exp_to_level. Parser 0x108560: single field 1, accepts packed+unpacked varint
+// => repeated int32 (plausibly XP-to-next-level per class in a multiclass MUD).
+message exp_to_level {
+  repeated int32 f1 = 1 [packed = true];
+}
+
+// icon_bar_data. Parser 0x108ca0: fields 1..6 all varint.
+message icon_bar_data {
+  optional int32 f1 = 1;
+  optional int32 f2 = 2;
+  optional int32 f3 = 3;
+  optional int32 f4 = 4;
+  optional int32 f5 = 5;
+  optional int32 f6 = 6;
+}
+
+// popup_window. Parser 0x109c70: f1,f2 string; f3,f4 varint; f5,f6 string.
+message popup_window {
+  optional bytes name = 1;           // exact
+  optional bytes display_name = 2;   // exact
+  optional int32 f3 = 3;             // varint
+  optional int32 f4 = 4;             // varint
+  optional bytes command = 5;        // exact
+  optional bytes options = 6;        // exact
+}
+
+// room_terrain_metadata. Parser 0x109090: fields 1..4, each packed+unpacked varint
+// => four repeated int32 arrays (terrain grid columns/rows).
+message room_terrain_metadata {
+  repeated int32 f1 = 1 [packed = true];
+  repeated int32 f2 = 2 [packed = true];
+  repeated int32 f3 = 3 [packed = true];
+  repeated int32 f4 = 4 [packed = true];
+}
+
+// button_configuration. Parser 0x10a300: f1 varint; f2,f3,f4 string.
+message button_configuration {
+  optional int32 f1 = 1;             // varint (button id/slot)
+  optional bytes display_string = 2; // exact
+  optional bytes action_string = 3;  // exact
+  optional bytes tt_string = 4;      // exact (tooltip)
+}

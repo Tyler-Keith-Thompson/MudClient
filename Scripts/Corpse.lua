@@ -335,12 +335,12 @@ local function corpse_tooth()       if corpse.active and toothS then toothS:onNe
 -- bails; the real start is when combat ENDS below). kxwt_fighting -1 fires when combat ends for ANY
 -- reason, so only walk corpses if a kill actually happened this fight — fleeing ends combat with no
 -- corpse of ours (and moves us), and must NOT trigger looting.
-trigger([[^kxwt_mdeath (.+)$]], function(_, name) corpse.killed = true; note_kill(name); corpse_start() end)
-trigger([[^kxwt_fighting -1$]], function() if corpse.killed then corpse_start() end end)
+trigger([[^kxw[tq]_mdeath (.+)$]], function(_, name) corpse.killed = true; note_kill(name); corpse_start() end)
+trigger([[^kxw[tq]_fighting -1$]], function() if corpse.killed then corpse_start() end end)
 
 -- Room change abandons this room's corpses (they don't follow you) -> stop, so we never target a corpse
 -- in the wrong room (e.g. after fleeing).
-trigger([[^kxwt_rvnum (-?\d+)]], function(_, vnum)
+trigger([[^kxw[tq]_rvnum (-?\d+)]], function(_, vnum)
   if corpse.room ~= nil and corpse.room ~= vnum then
     corpse_done()
     corpse.with_items = {}   -- has-loot knowledge is per-room; forget it when we leave

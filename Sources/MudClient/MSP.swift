@@ -114,7 +114,10 @@ enum MSP {
     
     nonisolated(unsafe) static var parser: some Parser<Substring, (FName, [MSP])> {
         Parse {
-            "!!SOUND"
+            OneOf {
+                "!!SOUND"
+                "!-SOUND" // dclient's non-standard MSP marker (bang-dash instead of bang-bang)
+            }
             "("
             fName
             Skip { Optionally { CharacterSet.whitespaces } }
@@ -153,9 +156,10 @@ final class MSPLineBuffer: @unchecked Sendable {
     /// How many leading characters of `carry` have already been emitted for display.
     private var carryEmitted = 0
 
-    /// A trimmed line could still become an `!!SOUND` directive if it is empty or a prefix of (or
-    /// already begins with) the directive marker.
-    private static let marker = "!!SOUND"
+    /// A trimmed line could still become an `!!SOUND`/`!-SOUND` directive if it is empty or a prefix of
+    /// (or already begins with) one of the directive markers. dclient uses the non-standard `!-SOUND`
+    /// marker (bang-dash) instead of the standard MSP `!!SOUND` (bang-bang).
+    private static let markers = ["!!SOUND", "!-SOUND"]
 
     @discardableResult
     func process(_ incoming: String) -> (output: String, directives: [(FName, [MSP])]) {
@@ -193,7 +197,7 @@ final class MSPLineBuffer: @unchecked Sendable {
             let trimmedLeading = pending.drop(while: { $0 == " " || $0 == "\t" })
             let trimmedFull = pending.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedFull.isEmpty,
-                trimmedLeading.hasPrefix(Self.marker),
+                Self.markers.contains(where: { trimmedLeading.hasPrefix($0) }),
                 let directive = try? MSP.parser.parse(trimmedFull)
             {
                 // A complete directive that simply hasn't been newline-terminated yet. Act on it
@@ -206,8 +210,7 @@ final class MSPLineBuffer: @unchecked Sendable {
             } else {
                 let couldBecomeDirective =
                     trimmedLeading.isEmpty
-                    || Self.marker.hasPrefix(trimmedLeading)
-                    || trimmedLeading.hasPrefix(Self.marker)
+                    || Self.markers.contains(where: { $0.hasPrefix(trimmedLeading) || trimmedLeading.hasPrefix($0) })
                 if !couldBecomeDirective {
                     output += pending
                     carryEmitted = carry.count

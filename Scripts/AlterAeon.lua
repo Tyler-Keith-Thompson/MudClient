@@ -23,7 +23,7 @@
 -- Loading this at startup (via load("Scripts")) opens the connection. The connect is top-level and
 -- guarded by is_connected() so a hot-reload() — which re-runs this file in the LIVE state — never
 -- drops or redials an already-open session.
-if not is_connected() then connect("alteraeon.com", 3002) end
+if not is_connected() then connect("alteraeon.com", 3102) end
 
 -- The shared world-state table. AlterAeon OWNS the schema, but fills it DEFENSIVELY (merge missing
 -- keys into whatever `state` already is) so load order doesn't matter: another script may create a
@@ -64,15 +64,38 @@ if not __persist then dofile("Scripts/_persist.lua") end
 local persist = __persist
 
 -- KXWT handshake: enable the protocol, hide the machinery lines.
-trigger([[^kxwt_supported$]], function() send("set kxwt") end)
-gag([[^kxwt_]])
+trigger([[^kxw[tq]_supported$]], function() send("set kxwt") end)
 
--- Ring buffer of the last N gagged kxwt_ lines. Triggers fire even on gagged lines, so this
--- catch-all records them all so kxwt.dump([n]) can show the machinery that's normally hidden.
+-- Gag the kxwt/kxwq telemetry lines — but PRESERVE any ANSI escape codes the server glued to the FRONT of
+-- one. AlterAeon sometimes emits a colour RESET (e.g. "\27[37m\27[0m") as the prefix of a machine line
+-- ("\27[37m\27[0mkxwq_sky 1 1 0") when that reset really terminates the PRECEDING visible line (e.g. a
+-- bold-blue "It is night..."). A plain `gag` dropped the whole raw line, taking the reset with it, so the
+-- colour bled forward into the room contents / exits. So instead of dropping, return just the leading
+-- escape run: the tag text is still hidden, but the reset survives. A tagline with no leading ANSI (the
+-- common case) returns "" — fully gagged, no blank line, exactly as before. The raw ANSI line is the last
+-- handler arg (CLAUDE.md); with no capture groups the run is `select`-able off the end.
+local function __leading_ansi(s)
+  local codes, rest = {}, s or ""
+  while true do
+    local c = rest:match("^(\27%[[%d;]*[A-Za-z])")   -- one CSI sequence, e.g. \27[0m / \27[1;34m
+    if not c then break end
+    codes[#codes + 1] = c
+    rest = rest:sub(#c + 1)
+  end
+  return table.concat(codes)
+end
+-- ONE catch-all does both jobs: (1) ring-buffer every kxwt_/kxwq_ line so kxwt.dump([n]) can show the
+-- machinery that's normally hidden, and (2) gag the tag from the display while PRESERVING any leading ANSI
+-- (the __leading_ansi return, per the note above). These MUST be a single handler: a trigger that returns
+-- ""/a string ENDS the line's handler chain (unlike a `gag()` rule), so a separate gag-returning trigger
+-- would short-circuit a later ring-capture trigger and leave the ring empty. Capture runs BEFORE the
+-- return, so the ring records every tag regardless of the gag.
 local kxwt_ring, KXWT_RING_MAX = {}, 300
-trigger([[^kxwt_]], function(line)
-  kxwt_ring[#kxwt_ring + 1] = line
+trigger([[^kxw[tq]_]], function(...)
+  local a = { ... }
+  kxwt_ring[#kxwt_ring + 1] = a[1]
   if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
+  return __leading_ansi(a[#a])
 end)
 
 -- The `kxwt` protocol-inspection surface: a documented, first-class table (Phase-2 migration off the
@@ -123,20 +146,20 @@ local function walk_name(code) return WALK[code] end
 -- Every trivial "one capture -> one state key" kxwt line, declared through the field() DSL so the whole
 -- flat-field surface reads as a spec: which line, which state key, what type. Richer fields (position,
 -- room coords, group, time, ...) keep their own triggers where the extra logic wouldn't read as a spec.
-field [[^kxwt_myname (.+)$]]        : into "name"
-field [[^kxwt_gold (-?\d+)]]        : into "gold"      : as (number)
+field [[^kxw[tq]_myname (.+)$]]        : into "name"
+field [[^kxw[tq]_gold (-?\d+)]]        : into "gold"      : as (number)
 -- exp is your unspent EXPERIENCE POOL; expcap the most you can earn from a SINGLE KILL (a static-ish
 -- ceiling) — NOT experience-to-level, which isn't a kxwt field (scraped from `level`/`score` below).
-field [[^kxwt_exp (-?\d+)]]         : into "exp"        : as (number)
-field [[^kxwt_expcap (-?\d+)]]      : into "expcap"     : as (number)
-field [[^kxwt_rshort (.+)$]]        : into "room_name"
-field [[^kxwt_area \d+ (.+)$]]      : into "area"
-field [[^kxwt_terrain (\d+)]]       : into "terrain"    : as (number)
-field [[^kxwt_precipitation (\d+)]] : into "precip"     : as (number)
+field [[^kxw[tq]_exp (-?\d+)]]         : into "exp"        : as (number)
+field [[^kxw[tq]_expcap (-?\d+)]]      : into "expcap"     : as (number)
+field [[^kxw[tq]_rshort (.+)$]]        : into "room_name"
+field [[^kxw[tq]_area \d+ (.+)$]]      : into "area"
+field [[^kxw[tq]_terrain (\d+)]]       : into "terrain"    : as (number)
+field [[^kxw[tq]_precipitation (\d+)]] : into "precip"     : as (number)
 -- action code (butchering, turning, ...). Per 'help kxwt', >= 50 PREVENTS spellcasting; a room change
 -- clears it (the separate kxwt_rvnum trigger below), since moving cancels most actions.
-field [[^kxwt_action (\d+)]]        : into "action"     : as (number)
-field [[^kxwt_walkdir (\d+)]]       : into "walkdir"    : via (walk_name)
+field [[^kxw[tq]_action (\d+)]]        : into "action"     : as (number)
+field [[^kxw[tq]_walkdir (\d+)]]       : into "walkdir"    : via (walk_name)
 
 -- Per-class level costs, scraped from the `level`/`score` table. Rows look like:
 --   "Mage          8                27000   (100%)   <- You can level!"
@@ -187,12 +210,12 @@ trigger([[^(Mage|Cleric|Thief|Warrior|Necromancer|Druid) +(\d+)(?: +(\d+)/ *(\d+
 
 -- Prompt: current/max for hp, mana, stamina — six numbers straight into the vitals, then hand off to the
 -- recovery machine (completion + lifetap, Recovery.lua). Reads as the spec it is.
-field [[^kxwt_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]]
+field [[^kxw[tq]_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]]
   : into("hp", "maxhp", "mana", "maxmana", "stam", "maxstam") : as (number)
   : then_(function() if __recovery_on_vitals then __recovery_on_vitals() end end)
 
 -- Position. Starting a recovery sits/sleeps as appropriate.
-trigger([[^kxwt_position (.+)$]], function(_, p)
+trigger([[^kxw[tq]_position (.+)$]], function(_, p)
   local changed = (state.position ~= p)
   state.position = p
   if __recovery_on_position then __recovery_on_position(p, changed) end   -- re-posture / refresh regen (Recovery.lua)
@@ -212,7 +235,7 @@ local function note_room(nid, nx, ny, nz, np)
 end
 
 -- Room. rvnum carries id + (x y z plane); rshort the name; area the zone.
-trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
+trigger([[^kxw[tq]_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
   note_room(tonumber(vnum), tonumber(x), tonumber(y), tonumber(z), tonumber(plane))
 end)
 if _AA_TEST then _AA_TEST.note_room = note_room end
@@ -252,12 +275,12 @@ local function maybe_maintain(s)
 end
 
 -- Spells up/down. Losing a spell while sleeping with mana to spare drops to resting.
-trigger([[^kxwt_spellup (.+)$]], function(_, s)
+trigger([[^kxw[tq]_spellup (.+)$]], function(_, s)
   state.spells[s] = true
   maybe_maintain(s)
   if __recovery_on_spellup then __recovery_on_spellup(s) end   -- release any "waiting for this recast" hold (Recovery.lua)
 end)
-trigger([[^kxwt_spelldown (.+)$]], function(_, s)
+trigger([[^kxw[tq]_spelldown (.+)$]], function(_, s)
   state.spells[s] = nil
   if state.maintained then state.maintained[s] = nil end   -- dropped: allow a re-maintain when it returns
   if __recovery_on_spelldown then __recovery_on_spelldown(s) end   -- drop to rest for the recast (Recovery.lua)
@@ -267,8 +290,8 @@ end)
 -- kxwt_group_start .. kxwt_group_end; each member line is "chp mhp cm mm cs ms <flags> <name>".
 -- Accumulate between start/end so a half-sent block never renders partial data.
 local group_capturing, group_buf = false, {}
-trigger([[^kxwt_group_start$]], function() group_capturing = true; group_buf = {} end)
-trigger([[^kxwt_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
+trigger([[^kxw[tq]_group_start$]], function() group_capturing = true; group_buf = {} end)
+trigger([[^kxw[tq]_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
   function(_, chp, mhp, cm, mm, cs, ms, flags, name)
     if not group_capturing then return end
     group_buf[#group_buf + 1] = {
@@ -278,7 +301,7 @@ trigger([[^kxwt_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
       flags = flags, name = name,
     }
   end)
-trigger([[^kxwt_group_end$]], function()
+trigger([[^kxw[tq]_group_end$]], function()
   if group_capturing then state.group = group_buf end
   group_capturing = false
   -- Fresh roster: while recovering, (re)pick the next minion to heal and re-check completion — minion HP
@@ -289,25 +312,25 @@ end)
 
 -- Environment: sky/time/weather. kxwt_time is "<mud-minutes> <daypart> <clock> <am/pm>";
 -- kxwt_precipitation is a 0-100ish intensity; kxwt_sky is "<outdoors> <sky-visible> <overcast>" (1/0).
-trigger([[^kxwt_time (\d+) (\S+) (\S+) (\S+)$]], function(_, _mins, part, clock, ampm)
+trigger([[^kxw[tq]_time (\d+) (\S+) (\S+) (\S+)$]], function(_, _mins, part, clock, ampm)
   state.daypart = part; state.clock = clock .. " " .. ampm
 end)
-field [[^kxwt_sky (\d+) (\d+) (\d+)]]
+field [[^kxw[tq]_sky (\d+) (\d+) (\d+)]]
   : into("outdoors", "sky_visible", "overcast") : as (flag)   -- three 1/0 flags -> booleans
 
 -- Moving cancels most actions, so clear the action code on a room change (the live value is parsed as a
 -- flat scalar field above).
-trigger([[^kxwt_rvnum ]], function() state.action = 0 end)
+trigger([[^kxw[tq]_rvnum ]], function() state.action = 0 end)
 
 -- Transient alerts: level-ups / quest completions (kxwt_event) and deaths of a player (pdeath), your
 -- own minion (ydeath), or a group member's minion (gdeath). kxwt_ lines are gagged, so we echo a short
 -- coloured banner into the output instead. (mob deaths, kxwt_mdeath, drive corpse automation below.)
-trigger([[^kxwt_event (\S+) ?(.*)$]], function(_, kw, data)
+trigger([[^kxw[tq]_event (\S+) ?(.*)$]], function(_, kw, data)
   echo("\27[1;33m★ " .. kw .. (data ~= "" and (": " .. data) or "") .. "\27[0m")
 end)
-trigger([[^kxwt_pdeath (.+)$]], function(_, n) echo("\27[1;31m☠ " .. n .. " has DIED!\27[0m") end)
-trigger([[^kxwt_ydeath (.+)$]], function(_, n) echo("\27[31m☠ your " .. n .. " has died.\27[0m") end)
-trigger([[^kxwt_gdeath (.+)$]], function(_, n) echo("\27[31m☠ " .. n .. " (a group minion) has died.\27[0m") end)
+trigger([[^kxw[tq]_pdeath (.+)$]], function(_, n) echo("\27[1;31m☠ " .. n .. " has DIED!\27[0m") end)
+trigger([[^kxw[tq]_ydeath (.+)$]], function(_, n) echo("\27[31m☠ your " .. n .. " has died.\27[0m") end)
+trigger([[^kxw[tq]_gdeath (.+)$]], function(_, n) echo("\27[31m☠ " .. n .. " (a group minion) has died.\27[0m") end)
 
 
 -- Timed self-effects (spell/skill durations), e.g. "kxwt_spst mana shield, two hours, 20 minutes".
@@ -316,7 +339,7 @@ trigger([[^kxwt_gdeath (.+)$]], function(_, n) echo("\27[31m☠ " .. n .. " (a g
 -- `spells` widget, driven by kxwt_spellup/spelldown, is the authoritative "what's up on you" display);
 -- we still capture the duration text here for scripting/AI use, and clear it on reconnect (on_connect).
 state.effects = state.effects or {}
-trigger([[^kxwt_spst (.+)$]], function(_, s)
+trigger([[^kxw[tq]_spst (.+)$]], function(_, s)
   local name, rest = s:match("^(.-),%s*(.+)$")
   if name then state.effects[name] = rest else state.effects[s] = "" end
 end)
@@ -555,7 +578,7 @@ trigger([[.*]], function(line)
   if not inv_capturing then return end
   local t = (line:gsub("^%s+", ""):gsub("%s+$", ""))
   if t:match("^You are carrying") then return end            -- the header itself; keep going
-  if t == "" or t:match("^<%d+hp") or t:match("^kxwt_")
+  if t == "" or t:match("^<%d+hp") or t:match("^kxw[tq]_")
      or t:match("^You are using") or t:match("^You are wearing") or t:match("^You can't carry") then
     inv_capturing = false
     -- The block just closed: state.inventory is now current. Bump a monotonic marker and fire an
@@ -579,7 +602,7 @@ trigger([[.*]], function(line)
   if not eq_capturing then return end
   local t = (line:gsub("^%s+", ""):gsub("%s+$", ""))
   if t:match("^You are using") or t:match("^You are wearing") then return end   -- the header
-  if t == "" or t:match("^<%d+hp") or t:match("^kxwt_") or t:match("^You are carrying") then
+  if t == "" or t:match("^<%d+hp") or t:match("^kxw[tq]_") or t:match("^You are carrying") then
     eq_capturing = false; return
   end
   local low = t:lower()

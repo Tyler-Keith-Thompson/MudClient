@@ -333,7 +333,7 @@ end
 local function parse_item_line(line)
   local L = trim(strip_ansi(line))
   if L == "" then return nil end
-  if L:match("^<%d+hp") or L:match("^kxwt_") or L:match("^%[the human typed%]") or L:match("BLOCKSEP") then return nil end
+  if L:match("^<%d+hp") or L:match("^kxw[tq]_") or L:match("^%[the human typed%]") or L:match("BLOCKSEP") then return nil end
   if L:match("^You are ") or L:find("contains:", 1, true) or L:match("items? total%.?$") then return nil end
   L = L:gsub("^%(%s*%d+%s*%)%s*", "")               -- drop a "(    1)" count prefix
   local flags
@@ -841,8 +841,8 @@ local function id_feed(line)
   local cap = S.id_cap
   if not cap then return end
   local L = strip_ansi(line)
-  if L:match("^kxwt_id_end") then cap.body_done = true; return end   -- body done; display line follows
-  if L:match("^kxwt_") then return end                               -- interleaved protocol line: skip
+  if L:match("^kxw[tq]_id_end") then cap.body_done = true; return end   -- body done; display line follows
+  if L:match("^kxw[tq]_") then return end                               -- interleaved protocol line: skip
   -- The definitive end AND the display-name binding: "You are (wearing|carrying|wielding) <display>."
   local disp = L:match("^You are wearing (.+)$") or L:match("^You are wielding (.+)$")
     or (L:match("^You are carrying (.+)$") and not L:match("^You are carrying %d") and L:match("^You are carrying (.+)$"))
@@ -853,14 +853,14 @@ local function id_feed(line)
   cap.lines[#cap.lines + 1] = L
   if #cap.lines > 60 then finalize_id() end   -- safety: never grow unbounded on a missed terminator
 end
-trigger([[^kxwt_id_start]], function() id_begin() end)
+trigger([[^kxw[tq]_id_start]], function() id_begin() end)
 trigger([[^Item: '(.+)']], function() if not S.id_cap then id_begin() end end)  -- replay/#test have no kxwt_
 trigger([[.*]], function(line) id_feed(line) end)
 
 -- Test helper: faithfully replays the processLine dispatch of the id-capture triggers over a line list.
 local function feed_id_stream(lines)
   for _, line in ipairs(lines) do
-    if line:match("^kxwt_id_start") then id_begin()
+    if line:match("^kxw[tq]_id_start") then id_begin()
     elseif line:match("^Item: '") and not S.id_cap then id_begin() end
     id_feed(line)
   end
@@ -1153,7 +1153,7 @@ local function scan_feed(line)
   local sc = S.scan
   if not sc or not sc.mode then return end
   local L = strip_ansi(line)
-  if L:match("^kxwt_") then return end   -- interleaved protocol line: skip, don't end the section
+  if L:match("^kxw[tq]_") then return end   -- interleaved protocol line: skip, don't end the section
   if L:match("^<%d+hp") or trim(L) == "" or L:match("^%[the human typed%]") then
     sc.mode = nil; return
   end

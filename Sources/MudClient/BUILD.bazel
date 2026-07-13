@@ -18,6 +18,8 @@ _DEPS = [
     "@swiftpkg_shellout//:ShellOut",
     "@swiftpkg_swift_argument_parser//:ArgumentParser",
     "@swiftpkg_swift_nio//:NIO",
+    "@swiftpkg_swift_nio_ssl//:NIOSSL",
+    "@swiftpkg_swift_protobuf//:SwiftProtobuf",
 ]
 
 # The full module, including the `@main` entry point (MudClient.swift), compiled

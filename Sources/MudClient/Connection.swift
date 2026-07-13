@@ -7,6 +7,7 @@
 
 import Foundation
 import NIO
+import NIOSSL
 import Parsing
 import Afluent
 import DependencyInjection
@@ -46,6 +47,10 @@ actor Connection: AsyncSequence {
         stream.captureRaw()
             .handleIACCommunication(writeToStream: send)
             .normalizeLineEndings()
+            // Peel any script-owned in-band protocol (e.g. dclient's `;s..;e..;` framing) FIRST, so the
+            // downstream line assembler sees clean text. dclient bytes interleaved mid-line otherwise
+            // break line assembly / MSP's `!!SOUND` line detection (the directive leaks to the display).
+            .filterServerStream()
             .assembleLines()
             .processMSP()
             .processServerOutputForScripts()
@@ -58,13 +63,32 @@ actor Connection: AsyncSequence {
             throw Error.alreadyConnected
         }
 
+        // AlterAeon's dclient port (3102) speaks TLS; the plain port (3002) only gives a
+        // degraded dclient stream. Encryption is transparent to everything downstream of
+        // TCPClientHandler in the pipeline.
+        let useTLS = port == 3102
+        var tlsConfig = TLSConfiguration.makeClientConfiguration()
+        tlsConfig.certificateVerification = .none
+        let sslContext = useTLS ? try NIOSSLContext(configuration: tlsConfig) : nil
+
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let bootstrap = ClientBootstrap(group: group)
             .channelOption(.socketOption(.so_reuseaddr), value: 1)
             .channelInitializer { channel in
-                channel.pipeline.addHandler(TCPClientHandler(continuation: self.continuation,
-                                                             onActive: self.onChannelActive,
-                                                             onInactive: self.onChannelInactive))
+                let tcpHandler = TCPClientHandler(continuation: self.continuation,
+                                                   onActive: self.onChannelActive,
+                                                   onInactive: self.onChannelInactive)
+                if let sslContext {
+                    do {
+                        let sslHandler = try NIOSSLClientHandler(context: sslContext, serverHostname: self.host)
+                        return channel.pipeline.addHandler(sslHandler).flatMap {
+                            channel.pipeline.addHandler(tcpHandler)
+                        }
+                    } catch {
+                        return channel.eventLoop.makeFailedFuture(error)
+                    }
+                }
+                return channel.pipeline.addHandler(tcpHandler)
             }
 
         let clientChannel = try await bootstrap.connect(host: host, port: Int(port))

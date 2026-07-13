@@ -827,7 +827,7 @@ function pilot_observe(line)
   if wpe then P.waypoints = P.waypoints or {}; P.waypoints[wpe.num] = wpe; schedule_save() end
   -- Never feed gagged protocol lines or blanks to the model. kxwt facts reach it once per turn via
   -- the state block (describe_state), not as raw lines.
-  if t == "" or t:match("^kxwt_") then return end
+  if t == "" or t:match("^kxw[tq]_") then return end
   table.insert(P.transcript, t)
   P.input_seq = P.input_seq + 1
   trim_transcript()
@@ -2722,20 +2722,20 @@ doc("ai", { sig = "ai(args)", group = "pilot",
 -- from its handler, so every line still displays exactly as before. A permanent subscribe keeps the
 -- trigger registered for the session, identical to a plain trigger().
 if rx then
-  rx.fromTrigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]]):subscribe(function(c)
+  rx.fromTrigger([[^kxw[tq]_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]]):subscribe(function(c)
     pilot_room_change(tonumber(c[1]), { tonumber(c[2]), tonumber(c[3]), tonumber(c[4]), tonumber(c[5]) })
   end)
-  rx.fromTrigger([[^kxwt_rshort (.+)$]]):subscribe(function(c) pilot_room_name(c[1]) end)
+  rx.fromTrigger([[^kxw[tq]_rshort (.+)$]]):subscribe(function(c) pilot_room_name(c[1]) end)
   -- Tag the current room with its terrain type (kxwt_terrain arrives just after rvnum, so current_room
   -- is already set). Persisted, so the minimap can colour each room by terrain.
-  rx.fromTrigger([[^kxwt_terrain (\d+)]]):subscribe(function(c)
+  rx.fromTrigger([[^kxw[tq]_terrain (\d+)]]):subscribe(function(c)
     local id = P.current_room
     if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(c[1]) then
       P.rooms[id].terrain = tonumber(c[1]); schedule_save()
     end
   end)
   -- kxwt_waypoint marks the current room as a travel waypoint; remember it so the minimap can flag it.
-  rx.fromTrigger([[^kxwt_waypoint]]):subscribe(function()
+  rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function()
     local id = P.current_room
     if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
   end)
@@ -2747,17 +2747,17 @@ if rx then
 else
   -- No reactive core (shouldn't happen — _rx loads at the top): fall back to plain triggers so the pilot
   -- still wires up its room parsing/observe.
-  trigger([[^kxwt_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
+  trigger([[^kxw[tq]_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]], function(_, vnum, x, y, z, plane)
     pilot_room_change(tonumber(vnum), { tonumber(x), tonumber(y), tonumber(z), tonumber(plane) })
   end)
-  trigger([[^kxwt_rshort (.+)$]], function(_, n) pilot_room_name(n) end)
-  trigger([[^kxwt_terrain (\d+)]], function(_, t)
+  trigger([[^kxw[tq]_rshort (.+)$]], function(_, n) pilot_room_name(n) end)
+  trigger([[^kxw[tq]_terrain (\d+)]], function(_, t)
     local id = P.current_room
     if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(t) then
       P.rooms[id].terrain = tonumber(t); schedule_save()
     end
   end)
-  trigger([[^kxwt_waypoint]], function()
+  trigger([[^kxw[tq]_waypoint]], function()
     local id = P.current_room
     if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
   end)

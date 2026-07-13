@@ -9,7 +9,7 @@
 --   spellLanded:map(function(c) return c[1] end)                        -- capture 1 = the target
 --             :filter(function(t) return t ~= "" end)
 --             :subscribe(function(target) --[[ react ]] end)
---   rx.fromTrigger([[^kxwt_fighting (\d+)]]):first():toPromise()        -- await the next event, to chain
+--   rx.fromTrigger([[^kxw[tq]_fighting (\d+)]]):first():toPromise()        -- await the next event, to chain
 --
 -- Everything is pure Lua over the host primitives already present: `trigger`/`rule_remove` (the event
 -- source), `after`/`cancel` (time), `__promise` (the promise bridge). Hot-reloadable; `_`-prefixed so

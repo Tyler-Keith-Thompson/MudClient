@@ -113,6 +113,13 @@ extension AsyncSequence where Self: Sendable, Element == OutboundCommand {
 }
 
 extension AsyncSequence where Self: Sendable, Element == String {
+    /// Pass each server text chunk through the script's `on_stream` filter (a script may peel out an
+    /// in-band protocol like the dclient channel). No filter registered → chunk passes through unchanged.
+    func filterServerStream() -> AnyAsyncSequence<String> {
+        map { Container.scriptInterpreter().engine.filterStream($0) }
+            .eraseToAnyAsyncSequence()
+    }
+
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
         map { output in
             let lines = output

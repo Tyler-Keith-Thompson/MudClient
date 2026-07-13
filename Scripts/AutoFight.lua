@@ -1194,8 +1194,8 @@ if rx then
   -- The enemy health bar (kxwt_fighting — many ticks/second; the winner-probe signal, and it NEVER casts)
   -- and the two combat boundaries. enemyDead ends the fight from any phase; combatEnd (kxwt -1) resolves
   -- the fight promise + zeroes the crowd estimate.
-  local combatBar = T([[^kxwt_fighting (\d+) \S+ (.+)$]])
-  local combatEnd = T([[^kxwt_fighting -1$]])
+  local combatBar = T([[^kxw[tq]_fighting (\d+) \S+ (.+)$]])
+  local combatEnd = T([[^kxw[tq]_fighting -1$]])
   local enemyDead = T([[^.+ is DEAD!$]])
   combatBar:subscribe(function(c) on_kxwt_fight(tonumber(c[1]), c[2]) end)
   combatEnd:subscribe(function()  on_kxwt_end() end)
@@ -1215,7 +1215,7 @@ if rx then
   -- without waiting for a kill. Each enemy death (kxwt_mdeath) counts the estimate down — that's what
   -- drops us back to single target on the last one.
   local roomFighter = T([[^(.+) is here, fighting .+$]])
-  local enemyDeath  = T([[^kxwt_mdeath (.+)$]])
+  local enemyDeath  = T([[^kxw[tq]_mdeath (.+)$]])
   roomFighter:subscribe(function(c) note_room_fighter(c[1]) end)
   enemyDeath:subscribe(function(c)  note_mdeath(c[1]) end)
 
@@ -1223,8 +1223,8 @@ if rx then
   -- it was the tank (our remembered tank is now gone) and, if so, triggers the rescue; a clay man
   -- rejoining stops the re-summon loop. The group_end subscriber runs AFTER AlterAeon's (which fills
   -- state.group; AlterAeon loads first), so the roster is fresh when refresh_tank reads it.
-  T([[^kxwt_ydeath ]]):subscribe(function() tank_ydeath() end)
-  T([[^kxwt_group_end$]]):subscribe(function() refresh_tank() end)
+  T([[^kxw[tq]_ydeath ]]):subscribe(function() tank_ydeath() end)
+  T([[^kxw[tq]_group_end$]]):subscribe(function() refresh_tank() end)
   T([[^You add .*clay man to your group\.$]]):subscribe(function() tank_resummoned() end)
   T([[^You already have .*clay man at your side\.$]]):subscribe(function() tank_resummoned() end)
   -- (No rvnum reset: the server re-sends rvnum on a plain `look`, so resetting here would flicker us out

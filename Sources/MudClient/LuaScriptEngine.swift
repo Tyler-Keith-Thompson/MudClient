@@ -155,6 +155,10 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// Monotonic id source for `bind`; never reset so a stale id from before a reload can't collide.
     private var nextBindId = 1
 
+    /// Script-registered raw server-stream filter (via `on_stream`). Given a text chunk, returns the
+    /// text to actually display — a script uses it to peel out an in-band protocol it alone understands.
+    private var streamFilter: LuaFunctionRef?
+
     /// Host sinks. The integration layer wires these to the real services.
     var onSend: (String) -> Void = { _ in }
     var onEcho: (String) -> Void = { _ in }
@@ -358,6 +362,17 @@ final class LuaScriptEngine: @unchecked Sendable {
     func notifyConnect() {
         lock.lock(); defer { lock.unlock() }
         try? lua.callGlobal("on_connect", [])
+    }
+
+    /// Run an incoming server text chunk through the script's on_stream filter; returns the text to
+    /// display. Falls back to the chunk unchanged when no filter is registered or it errors.
+    func filterStream(_ chunk: String) -> String {
+        lock.lock(); defer { lock.unlock() }
+        guard let fn = streamFilter,
+              let result = try? lua.callReturning(fn, [.string(chunk)]),
+              case .string(let filtered) = result
+        else { return chunk }
+        return filtered
     }
 
     /// The socket went down. No-op unless the script defines `on_disconnect(reason)`.
@@ -668,6 +683,21 @@ final class LuaScriptEngine: @unchecked Sendable {
         lua.register("is_connected") { _ in
             [.bool(Container.connectionManager().isConnected)]
         }
+        // rpc_connect(uuid) — open the second (RPC/telemetry) TLS connection to :3103 and run the
+        // version_info + RSA channel-auth handshake. Verbose [rpc] progress lines are echoed as it goes.
+        lua.register("rpc_connect") { args in
+            guard case .string(let uuid)? = args.first else {
+                Container.terminalService().print("usage: rpc_connect(uuid) — e.g. rpc_connect(\"6nxn1ftm5tbcyq3kteam\")")
+                return []
+            }
+            Container.rpcConnection().connect(uuid: uuid)
+            return []
+        }
+        // rpc_disconnect() — close the RPC connection.
+        lua.register("rpc_disconnect") { _ in
+            Container.rpcConnection().disconnect()
+            return []
+        }
         // telnet_send(option, payload) — send `IAC SB <option> <payload> IAC SE`, escaping IAC bytes in
         // the payload. `option` is numeric; `payload` is a (byte) string.
         lua.register("telnet_send") { [weak self] args in
@@ -686,6 +716,14 @@ final class LuaScriptEngine: @unchecked Sendable {
             }
             data.append(contentsOf: [255, 240])                  // IAC SE
             Container.connectionManager().sendRaw(Data(data))
+            return []
+        }
+        // Raw server-stream filter. A script registers `on_stream(fn)`; the host hands each incoming
+        // text chunk to `fn(chunk)` and displays whatever string it returns. Lets a script strip and act
+        // on a custom in-band protocol (e.g. AlterAeon's `;`-framed dclient channel) without the client
+        // knowing anything about it — the client only knows "a script may rewrite the stream".
+        lua.register("on_stream") { [weak self] args in
+            if case .function(let fn)? = args.first { self?.streamFilter = fn }
             return []
         }
         installLogReplay()
@@ -811,21 +849,21 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self?.usage(#"music.play: expected (channel, track) strings — e.g. music.play("ambient", "forest")"#)
                 return []
             }
-            Container.musicService().play(channel: ch, track: track)
+            Container.soundService().play(channel: ch, track: track)
             return []
         }
         lua.register("music_stop") { args in
-            if case .string(let ch)? = args.first { Container.musicService().stop(channel: ch) }
+            if case .string(let ch)? = args.first { Container.soundService().stop(channel: ch) }
             return []
         }
         // music.volume(pct) — set the master volume for all channels from a 0-100 percentage.
         lua.register("music_volume") { args in
-            if let pct = args.first.flatMap(Self.doubleArg) { Container.musicService().setVolume(percent: pct) }
+            if let pct = args.first.flatMap(Self.doubleArg) { Container.soundService().setMusicVolume(percent: pct) }
             return []
         }
-        // msp_volume(pct) — master for MSP sound effects (0-100); scales every NEW effect, 0 silences.
+        // msp_volume(pct) — master for one-shot sound effects (0-100); scales every NEW effect, 0 silences.
         lua.register("msp_volume") { args in
-            if let pct = args.first.flatMap(Self.doubleArg) { Container.mspService().setVolume(percent: pct) }
+            if let pct = args.first.flatMap(Self.doubleArg) { Container.soundService().setEffectVolume(percent: pct) }
             return []
         }
         // speech_volume(pct) — TTS voice volume (0-100); at 0 utterances are dropped (no synth/playback).
@@ -851,6 +889,23 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         try? lua.run("music = { play = music_play, stop = music_stop, volume = music_volume, "
                      + "midi = music_midi, midi_reset = music_midi_reset }")
+
+        // sound_once(path[, volume]) — a ONE-SHOT effect player, distinct from the looping `music.*`
+        // above. Routed through SoundService's AVAudioEngine one-shot node pool (see SoundService.swift)
+        // so dclient's framed `;ssound;` one-shots (which never arrive as MSP directives — see
+        // DClientProbe.lua) actually play — AVAudioPlayer, which the old mspService pipeline used, cannot
+        // play the soundpack's Ogg Vorbis files at all. `path` is resolved by SoundService itself (an
+        // absolute filesystem path, as DClientProbe.lua builds). The `volume` arg is accepted for
+        // signature stability but ignored: one-shot effect volume is controlled globally via
+        // `msp_volume`/`volume('sfx N')`, not per call.
+        lua.register("sound_once") { [weak self] args in
+            guard case .string(let path)? = args.first else {
+                self?.usage(#"sound_once: expected (path[, volume]) — e.g. sound_once("/path/to/effect.ogg")"#)
+                return []
+            }
+            Container.soundService().playOnce(track: path)
+            return []
+        }
     }
 
     /// Terminal/input capabilities (TinTin++-style): key macros, input-line access, scrollback reads,

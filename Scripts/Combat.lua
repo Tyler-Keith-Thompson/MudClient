@@ -268,7 +268,7 @@ if rx then
   -- signal. Sets the fighting flag/name/pct, lands the exact reading in the tracker, and cancels any
   -- recovery (a fight rejects it). (Folds together the old two same-line triggers: fighting-state and
   -- the exact opponent_note.)
-  T([[^kxwt_fighting (\d+) \S+ (.+)$]])
+  T([[^kxw[tq]_fighting (\d+) \S+ (.+)$]])
     :map(function(c) return { pct = tonumber(c[1]), name = c[2] } end)
     :subscribe(function(f)
       state.fighting, state.fight_pct, state.fight_name = true, f.pct, f.name
@@ -281,7 +281,7 @@ if rx then
   -- kxwt_fighting -1 handler runs — Corpse gates its post-kill looting on in_combat(), and Combat loads
   -- (and so subscribes/registers this trigger) before Corpse. Also resets the assist debounce so the
   -- NEXT fight can assist immediately. (Folds the old two same-line triggers into one.)
-  T([[^kxwt_fighting -1$]]):subscribe(function()
+  T([[^kxw[tq]_fighting -1$]]):subscribe(function()
     state.fighting, state.fight_name, state.fight_pct = false, nil, nil
     state.opponents = {}
     state.engaged_until = nil
@@ -366,10 +366,10 @@ if rx then
   -- Room change abandons the engagement; a mob's death drops its bar immediately (and, if it was the
   -- last opponent with no kxwt melee target left, ends the engaged window NOW so corpse looting — gated
   -- on in_combat() — isn't stalled for the TTL tail).
-  T([[^kxwt_rvnum ]]):subscribe(function()
+  T([[^kxw[tq]_rvnum ]]):subscribe(function()
     state.opponents = {}; state.engaged_until = nil
   end)
-  T([[^kxwt_mdeath (.+)$]]):subscribe(function(c)
+  T([[^kxw[tq]_mdeath (.+)$]]):subscribe(function(c)
     local name = c[1]
     state.opponents[name:lower()] = nil
     if not state.fighting and not next(state.opponents) then state.engaged_until = nil end
