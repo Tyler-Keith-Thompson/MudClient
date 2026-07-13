@@ -1132,15 +1132,17 @@ test("tank rescue can be disabled: autofight.tank('off') suppresses the response
 end)
 
 -- ---- prompt bridge (nomelee) ------------------------------------------------------------------------
--- Under `nomelee` the server never sends kxwt_fighting, so AutoFight's whole combat lifecycle would
--- otherwise never fire. Prompt.lua's apply_prompt calls __autofight_prompt (exposed here as
--- AF.prompt_bridge) with the parsed fight_pct/fight_name — but ONLY as a fallback: it must stay silent
--- whenever kxwt_fighting has fired recently (AF.mark_kxwt sets that "last seen" clock directly, since the
--- live subscribers stamp it with os.time() on every kxwt_fighting line).
+-- The fighting PROMPT is the game's authoritative answer: Prompt.lua's apply_prompt calls
+-- __autofight_prompt (exposed here as AF.prompt_bridge) with the parsed fight_pct/fight_name, and it
+-- ALWAYS drives combat, stamping "the prompt is live" as it goes. kxwt_fighting (AF.kxwt_fight/kxwt_end)
+-- is only a FALLBACK, and is ignored while the prompt is live — this is what stops a flaky tank-rescue
+-- kxwt_fighting -1 flip from prematurely ending a fight the prompt still says is ongoing (nomelee bug).
+-- When the prompt never fires at all (normal play, no custom kxwq prompt), last_prompt stays stale and
+-- kxwt drives exactly as before — no regression.
 
-test("prompt bridge starts and ends a fight when kxwt is stale (nomelee)", function()
+test("prompt bridge starts and ends a fight (prompt is authoritative)", function()
   AF.reset()
-  AF.mark_kxwt(0)                                     -- kxwt hasn't fired — long stale
+  AF.mark_prompt(0)
   AF.prompt_bridge(90, ENEMY)                         -- fresh engagement, prompt-driven
   expect_seq(seq(), { "c tarrants" })                 -- same opener a kxwt-driven start_fight would send
   land_opener()
@@ -1148,10 +1150,20 @@ test("prompt bridge starts and ends a fight when kxwt is stale (nomelee)", funct
   expect(AF.state().fighting):eq(false)
 end)
 
-test("prompt bridge is a no-op when kxwt is fresh (normal play stays authoritative)", function()
+test("a stray kxwt_fighting -1 (tank-rescue flip) is ignored while the prompt is live", function()
   AF.reset()
-  AF.mark_kxwt(os.time())                             -- kxwt just fired
-  AF.prompt_bridge(90, ENEMY)
-  expect(#seq()):eq(0)                                -- ignored — nothing sent, no fight started
-  expect(AF.state().fighting):eq(false)
+  AF.mark_prompt(0)
+  AF.prompt_bridge(90, ENEMY)                         -- prompt starts the fight, stamps last_prompt = now
+  land_opener()
+  expect(AF.state().fighting):eq(true)
+  AF.kxwt_end()                                       -- the rescue flip's spurious "kxwt_fighting -1"
+  expect(AF.state().fighting):eq(true)                -- still live — the stray kxwt end was ignored
+end)
+
+test("kxwt drives as a fallback when the prompt is stale (normal play, no nomelee prompt)", function()
+  AF.reset()
+  AF.mark_prompt(0)                                   -- prompt never fired — stale
+  AF.kxwt_fight(90, ENEMY)
+  expect_seq(seq(), { "c tarrants" })                  -- kxwt drove the engagement directly
+  expect(AF.state().fighting):eq(true)
 end)

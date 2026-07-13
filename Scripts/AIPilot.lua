@@ -1409,7 +1409,12 @@ function execute(actions, thoughts, scripts, mems)
   for _, a in ipairs(actions) do
     if type(a.cmd) == "string" and trim(a.cmd) ~= "" then
       local cmd = a.cmd
-      if in_combat() then
+      local verb = (cmd:match("^(%S+)") or ""):lower()
+      local is_melee_cmd = (verb == "kill" or verb == "attack" or verb == "k")
+      -- Also applied OUT of combat for a melee-INITIATION command: the "attack" tool builds a raw `kill`
+      -- to engage, and for a caster that must become a target + spellcast, never a melee opener (a melee
+      -- open under nomelee can trigger a tank "rescue" flip — see AutoFight's prompt/kxwt bridge).
+      if in_combat() or is_melee_cmd then
         local sub = combat_substitute(cmd, state.spells_known, state.mana)
         if sub ~= cmd then echo("[ai] (cast real spell: `" .. cmd .. "` -> `" .. sub .. "`)"); cmd = sub end
       end

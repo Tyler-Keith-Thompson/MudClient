@@ -835,11 +835,11 @@ local function note_mdeath(name)
   reeval_pack()
 end
 
--- Timestamp of the last kxwt_fighting line seen (either the health-bar tick or the -1 end), set by the
--- live subscribers below. Module-level (NOT on the per-fight F table, which start_fight/end_fight reset)
--- so it survives across fights and simply tracks "is kxwt still the live source right now?" — see
--- __autofight_prompt just past on_fight_end.
-local last_kxwt_fight = 0
+-- Timestamp of the last game PROMPT seen (via __autofight_prompt), set by the bridge below. Module-level
+-- (NOT on the per-fight F table, which start_fight/end_fight reset) so it survives across fights and
+-- simply tracks "is the prompt still the live/authoritative source right now?" — the fighting PROMPT is
+-- the game's authoritative answer; kxwt_fighting is only a FALLBACK for when the prompt isn't firing.
+local last_prompt = 0
 
 -- kxwt_fighting <pct> <gender> <name> — the enemy health bar. Combat start = not-fighting → fighting.
 -- A health-% change is BOTH a pacing resolution AND the winner-comparison signal: while a probe is the
@@ -896,13 +896,26 @@ local function on_fight_end()
   end
 end
 
--- Prompt-driven combat signal for nomelee, where kxwt_fighting never arrives. Ignored whenever kxwt has
--- fired recently (normal play) so the well-tested kxwt path stays the sole driver there.
-local KXWT_FRESH = 5   -- seconds; if kxwt_fighting fired within this window, the prompt bridge stays quiet
+-- Prompt-driven combat signal: the game's fighting PROMPT is authoritative when it's around (nomelee
+-- setups where kxwt_fighting flips flaky — see on_kxwt_fight/on_kxwt_end below). When the prompt isn't
+-- firing at all (normal play without the custom kxwq prompt), last_prompt stays 0/stale and kxwt drives
+-- exactly as before — no regression.
+local PROMPT_FRESH = 10   -- seconds; kxwt is ignored while the prompt fired within this window
 function __autofight_prompt(pct, name)   -- pct+name when fighting; both nil when the prompt says not-fighting
-  if os.time() - last_kxwt_fight < KXWT_FRESH then return end   -- kxwt is live → ignore the prompt
+  last_prompt = os.time()                               -- the machine prompt is live → authoritative
   if pct and name and name ~= "" then on_fight(pct, name)       -- start/refresh the fight from the prompt
   else on_fight_end() end                                        -- prompt says not fighting → end it
+end
+
+-- kxwt_fighting subscribers: FALLBACK only. Ignored while the prompt is live (a stray kxwt -1 from a
+-- tank "rescue" flip must not end a fight the authoritative prompt still says is ongoing).
+local function on_kxwt_fight(pct, name)
+  if os.time() - last_prompt < PROMPT_FRESH then return end   -- prompt live → it's authoritative; ignore kxwt
+  on_fight(pct, name)
+end
+local function on_kxwt_end()
+  if os.time() - last_prompt < PROMPT_FRESH then return end   -- ignore a stray kxwt -1 (rescue flip) while the prompt says fighting
+  on_fight_end()
 end
 
 -- ---- combat line resolutions ---------------------------------------------------------------------
@@ -1184,8 +1197,8 @@ if rx then
   local combatBar = T([[^kxwt_fighting (\d+) \S+ (.+)$]])
   local combatEnd = T([[^kxwt_fighting -1$]])
   local enemyDead = T([[^.+ is DEAD!$]])
-  combatBar:subscribe(function(c) last_kxwt_fight = os.time(); on_fight(tonumber(c[1]), c[2]) end)
-  combatEnd:subscribe(function()  last_kxwt_fight = os.time(); on_fight_end() end)
+  combatBar:subscribe(function(c) on_kxwt_fight(tonumber(c[1]), c[2]) end)
+  combatEnd:subscribe(function()  on_kxwt_end() end)
   enemyDead:subscribe(function()  hit_dead() end)
 
   -- Near-death latch: the game tells us OUR TARGET is nearly dead → switch to soulsteal at the next frame
@@ -1528,7 +1541,9 @@ _AF_TEST = {
   settle_promise = settle_fight_promise,
   fight_promise = function() return F.fight_promise end,
   prompt_bridge = function(pct, name) return __autofight_prompt(pct, name) end,
-  mark_kxwt     = function(t) last_kxwt_fight = t end,      -- set kxwt "last seen" for freshness-guard tests
+  mark_prompt   = function(t) last_prompt = t end,          -- set prompt "last seen" for freshness-guard tests
+  kxwt_fight    = on_kxwt_fight,                            -- kxwt_fighting fallback handler (ignored while prompt is live)
+  kxwt_end      = on_kxwt_end,                              -- kxwt_fighting -1 fallback handler (ditto)
   reset = function()                                      -- clean pre-fight state, armed, for a test
     F.on = true
     end_fight()

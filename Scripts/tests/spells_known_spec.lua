@@ -171,3 +171,15 @@ test("combat_substitute never touches a NON-caster's commands (no offensive spel
   expect(combat_substitute("flee", KNOWN, 100)):eq("flee")
   expect(combat_substitute("get corpse", KNOWN, 100)):eq("get corpse")
 end)
+
+-- execute()'s gate now applies this rewrite to a melee-INITIATION command even OUT of combat (the
+-- "attack" tool builds a raw `kill <target>`), so a caster never opens with melee (which can trigger a
+-- nomelee tank-rescue kxwt flip). combat_substitute itself doesn't key off combat state, so the rewrite
+-- is identical whether the fight has started or not — this documents that the initiation case is covered.
+test("combat_substitute rewrites an OUT-of-combat melee INITIATION for a caster; a non-caster is untouched", function()
+  local out = combat_substitute("kill goblin", KNOWN, 100)
+  local spell, tgt = out:match("^cast '([^']+)' (.+)$")
+  expect(OFF_SET[spell]):truthy()        -- engaged via a real known spell, not melee
+  expect(tgt):eq("goblin")               -- target preserved
+  expect(combat_substitute("kill goblin", BUFFS_ONLY, 100)):eq("kill goblin")   -- non-caster: melee left as-is
+end)
