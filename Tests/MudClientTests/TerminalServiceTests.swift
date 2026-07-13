@@ -155,6 +155,91 @@ private typealias E = TerminalService.InputEvent
   }
 }
 
+// MARK: - Kitty CSI-u decoding (Shift+Enter detection without regressing ctrl-A/E/backspace/macros)
+//
+// With the kitty "disambiguate escape codes" flag pushed, modified/special keys arrive as CSI-u
+// (`ESC[<code>;<mod>u`) instead of legacy bytes. `decodeKey`/`decodeCSI` must name them, and the token
+// stream must fold the editor-owned ones back to the SAME events the legacy bytes produced.
+
+@Test func decodeCSIuNamesModifiedAndSpecialKeys() {
+  try withTestContainer {
+    #expect(TerminalService.decodeKey("\u{1B}[13;2u")?.name == "shift-enter")   // Shift+Enter
+    #expect(TerminalService.decodeKey("\u{1B}[13u")?.name == "enter")           // unmodified Enter as CSI-u
+    #expect(TerminalService.decodeKey("\u{1B}[97;5u")?.name == "ctrl-a")        // Ctrl+A
+    #expect(TerminalService.decodeKey("\u{1B}[101;5u")?.name == "ctrl-e")       // Ctrl+E
+    #expect(TerminalService.decodeKey("\u{1B}[98;5u")?.name == "ctrl-b")        // Ctrl+B (bind macro)
+    #expect(TerminalService.decodeKey("\u{1B}[127u")?.name == "backspace")      // Backspace
+    #expect(TerminalService.decodeKey("\u{1B}[65;5u")?.name == "ctrl-a")        // uppercase codepoint folds
+    #expect(TerminalService.decodeKey("\u{1B}[13;2u")?.length == 7)
+  }
+}
+
+@Test func tokenizeCSIuRoutesToTheSameEditorEvents() {
+  try withTestContainer {
+    // Shift+Enter becomes the new insert-newline event; ctrl-A/E fold back to cursor start/end;
+    // backspace folds back to backspace; a bound ctrl-letter stays a `.key`; plain text still `.text`.
+    #expect(TerminalService.tokenize("\u{1B}[13;2u").events == [E.insertNewline])
+    #expect(TerminalService.tokenize("\u{1B}[13u").events == [E.enter])
+    #expect(TerminalService.tokenize("\u{1B}[97;5u").events == [E.cursorStart])
+    #expect(TerminalService.tokenize("\u{1B}[101;5u").events == [E.cursorEnd])
+    #expect(TerminalService.tokenize("\u{1B}[127u").events == [E.backspace])
+    #expect(TerminalService.tokenize("\u{1B}[98;5u").events == [E.key("ctrl-b")])
+    #expect(TerminalService.tokenize("a").events == [E.text("a")])
+    // ctrl-C under the protocol arrives as a key (no SIGINT) → must fold to the interrupt/exit event.
+    #expect(TerminalService.tokenize("\u{1B}[99;5u").events == [E.interrupt])
+    #expect(TerminalService.tokenize("\u{03}").events == [E.interrupt])   // raw byte too, if ISIG is off
+    // Legacy bytes still decode identically (graceful degradation on terminals ignoring the flag).
+    #expect(TerminalService.tokenize("\u{01}").events == [E.cursorStart])
+    #expect(TerminalService.tokenize("\n").events == [E.enter])
+  }
+}
+
+// MARK: - Multi-line input model (Shift+Enter grows the input; Enter splits & sends per line)
+
+@Test func visualLineCountCountsEmbeddedNewlines() {
+  try withTestContainer {
+    #expect(TerminalService.visualLineCount("") == 1)
+    #expect(TerminalService.visualLineCount("north") == 1)
+    #expect(TerminalService.visualLineCount("a\nb") == 2)
+    #expect(TerminalService.visualLineCount("a\nb\nc") == 3)
+    #expect(TerminalService.visualLineCount("a\n") == 2)          // trailing newline → a blank second row
+  }
+}
+
+@Test func visualPositionMapsFlatIndexToRowAndColumn() {
+  try withTestContainer {
+    let buf = "ab\ncde\nf"
+    #expect(TerminalService.visualPosition(of: 0, in: buf) == (0, 0))   // start
+    #expect(TerminalService.visualPosition(of: 2, in: buf) == (0, 2))   // end of line 0 (before the \n)
+    #expect(TerminalService.visualPosition(of: 3, in: buf) == (1, 0))   // start of line 1 (after the \n)
+    #expect(TerminalService.visualPosition(of: 5, in: buf) == (1, 2))
+    #expect(TerminalService.visualPosition(of: 7, in: buf) == (2, 0))
+    #expect(TerminalService.visualPosition(of: 8, in: buf) == (2, 1))   // end of buffer
+    #expect(TerminalService.visualPosition(of: 999, in: buf) == (2, 1)) // clamped
+  }
+}
+
+@Test func lineStartAndEndBoundTheCurrentVisualLine() {
+  try withTestContainer {
+    let buf = "ab\ncde\nf"
+    #expect(TerminalService.lineStart(of: 5, in: buf) == 3)   // within "cde" → back to after first \n
+    #expect(TerminalService.lineEnd(of: 4, in: buf) == 6)     // within "cde" → up to the next \n
+    #expect(TerminalService.lineStart(of: 1, in: buf) == 0)   // first line → buffer start
+    #expect(TerminalService.lineEnd(of: 7, in: buf) == 8)     // last line → buffer end
+  }
+}
+
+@Test func splitCommandsBreaksBufferPerLine() {
+  try withTestContainer {
+    #expect(TerminalService.splitCommands("a\nb\nc") == ["a", "b", "c"])
+    #expect(TerminalService.splitCommands("north") == ["north"])
+    #expect(TerminalService.splitCommands("a\n\nb") == ["a", "", "b"])   // empty lines preserved in order
+    // An empty buffer is ONE blank command, not zero: a bare Enter must send a lone newline so the game's
+    // "Press <return>…" pagers advance (regression guard for the blank-Enter pagination fix).
+    #expect(TerminalService.splitCommands("") == [""])
+  }
+}
+
 @Test func bracketedPasteInsertsAsLiteralText() {
   try withTestContainer {
     // Single-line paste: markers stripped, content extracted, nothing passed to key decoding.

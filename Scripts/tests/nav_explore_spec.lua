@@ -121,6 +121,7 @@ end)
 -- ---- noexit: manual per-room direction blocking (locked doors / guards explore should skip) --------
 
 local noexit       = _AIP_TEST.noexit_command
+local addexit      = _AIP_TEST.addexit_command
 local has_frontier = _AIP_TEST.has_frontier
 
 -- Capture noexit's echo confirmations (its observable acknowledgement) alongside the routing effect.
@@ -176,5 +177,48 @@ test("a room whose only untaken exit is blocked is no longer a frontier", functi
   expect(has_frontier("A")):eq(false)
   P.rooms.A.blocked = nil
   expect(has_frontier("A")):eq(true)
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+-- ---- addexit: manual per-room HIDDEN exits (secret doors the game never advertises) ----------------
+test("addexit <dir> adds a hidden exit the room never advertised, and explore will route through it", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = {}, moves = {} } }   -- the room advertises NO exits
+  P.current_room = "A"
+  expect(best_explore_dir()):eq(nil)             -- nothing to explore yet
+  with_echo(function(msgs)
+    addexit("down")                              -- there's an unlisted trapdoor down
+    expect(table.concat(msgs, "\n"):find("added down", 1, true) ~= nil):truthy()
+  end)
+  expect(P.rooms.A.exits.down):eq(true)          -- now a real exit for routing
+  expect(best_explore_dir()):eq("down")          -- ...and explore takes it
+  expect(untaken_exit("A")):eq("down")
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("addexit un-blocks a direction you'd previously noexit'd", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = { north = true }, moves = {}, blocked = { north = true } } }
+  P.current_room = "A"
+  expect(best_explore_dir()):eq(nil)             -- north advertised but blocked → nothing to explore
+  addexit("north")                               -- adding the exit clears the block
+  expect(P.rooms.A.blocked):eq(nil)
+  expect(best_explore_dir()):eq("north")
+  P.rooms, P.current_room = saved_rooms, saved_cur
+end)
+
+test("addexit clear <dir> removes one added exit; addexit clear removes them all", function()
+  local saved_rooms, saved_cur = P.rooms, P.current_room
+  P.rooms = { A = { exits = {}, moves = {} } }
+  P.current_room = "A"
+  addexit("north"); addexit("east")
+  addexit("clear north")
+  expect(P.rooms.A.exits.north):eq(nil); expect(P.rooms.A.exits.east):eq(true)
+  addexit("clear")
+  expect(P.rooms.A.exits.east):eq(nil); expect(P.rooms.A.added):eq(nil)
+  with_echo(function(msgs)
+    addexit("banana")                            -- not a direction → refused
+    expect(table.concat(msgs, "\n"):find("isn't a direction", 1, true) ~= nil):truthy()
+  end)
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)

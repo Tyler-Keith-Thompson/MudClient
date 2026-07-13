@@ -62,6 +62,11 @@ if state.music_volume ~= nil then
   state.music_volume = nil
 end
 
+-- Always start a session at 20% master — the level the player sets by hand every game start, so bake it
+-- in. Applied on every load/reload (overriding the default/persisted master); the categories keep their
+-- own levels. Adjust live any time with volume('N'); a fresh load resets it back to 20.
+state.volumes.master = 20
+
 -- Accepted category words (aliases fold onto the three canonical keys). `master` is accepted too so
 -- `volume('master 80')` works alongside the bare-number shorthand.
 local VOLUME_ALIASES = {

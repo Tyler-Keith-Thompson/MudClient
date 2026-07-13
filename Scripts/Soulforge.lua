@@ -287,13 +287,9 @@ local function resync_and_plan()
   local op = sf_op; if not op then return end
   op.inv_timer = nil
   op.model = parse_soulstones(state.inventory)
-  -- A recycle after a stow: run another pull/forge/stow pass from the IN-MEMORY container model — we looked
-  -- in each container ONCE at the start and have tracked its contents through every pull/stow since, so
-  -- there's no need to look again. (op.model is fresh from the re-inv above; the containers live in memory.)
-  if op.recycle then op.recycle, op.forged_this_cycle = false, 0; return done_looking() end
-  -- FIRST read of the run: before forging, sweep any carried containers and pull their soulstones into
-  -- inventory (the good stash is usually in a pocket dimension / sack). start_gather re-inventories when
-  -- it's done, which re-enters here with op.gathered set, and we fall through to forging.
+  -- FIRST read of the run: look in the carried containers (once) and pull their soulstones. After that the
+  -- whole run is memory-driven — this resync is reached again only on a desync re-inventory (see
+  -- hit_forge_result / hit_bad_selection), where op.gathered is already set and we resume forging.
   if not op.gathered then return start_gather() end
   plan_and_cast()
 end
@@ -394,6 +390,7 @@ end
 -- stash) where they are.
 done_looking = function()
   local op = sf_op; if not op then return end
+  op.phase = "gather"   -- a new pass may be entered from the stow phase (next_cycle) — back to gathering
   -- Combined multiset (carried model + every container's contents) → the is_raw decision context.
   local combined = {}
   for _, s in ipairs(op.model or {}) do if s.color then combined[#combined + 1] = { color = s.color } end end
@@ -442,12 +439,9 @@ finish_gather = function()
   if op.gather_timer and cancel then cancel(op.gather_timer); op.gather_timer = nil end
   op.capturing = false
   op.gathered, op.phase = true, "forge"
-  if (op.pulled or 0) > 0 then
-    say(string.format("pulled %d soulstone(s) out — forging.", op.pulled))
-    kick_inventory()    -- re-read so the model includes what we pulled, then forge
-  else
-    plan_and_cast()     -- nothing pulled; the model from the initial read is still current
-  end
+  if (op.pulled or 0) > 0 then say(string.format("pulled %d soulstone(s) out — forging.", op.pulled)) end
+  -- The carried model already reflects what we pulled (appended in hit_get_ok) — no re-inventory needed.
+  plan_and_cast()
 end
 
 -- Look at the carried containers and, if any, start LOOKING (then decide + pull); otherwise straight to
@@ -512,13 +506,28 @@ forge_done = function()
   report_done(); sf_settle(true)
 end
 
--- After stowing: if THIS pass forged anything, the container may still hold stones worth forging — recycle
--- (re-inventory → re-look → pull → forge → stow). If it forged nothing, we've converged; settle.
+-- Are there still at least TWO raw stones in the whole (in-memory) picture — i.e. another forge is
+-- possible? Requires two so a lone unpairable stone doesn't trigger a wasted pull-and-stow pass.
+local function container_has_raw(op)
+  local combined = {}
+  for _, s in ipairs(op.model or {}) do if s.color then combined[#combined + 1] = { color = s.color } end end
+  for _, counts in pairs(op.container_stones or {}) do
+    for color, n in pairs(counts) do for _ = 1, n do combined[#combined + 1] = { color = color } end end
+  end
+  local raw = 0
+  for _, s in ipairs(combined) do if is_raw(s.color, combined) then raw = raw + 1 end end
+  return raw >= 2
+end
+
+-- After stowing: if THIS pass forged anything AND a container still holds stones worth forging, run another
+-- pass — decided straight from the in-memory model (pulled/forged/stowed are all tracked), so NO re-look and
+-- NO re-inventory. Otherwise we've converged; settle. (This is why soulforge no longer re-reads inventory
+-- between passes or at the end.)
 next_cycle = function()
   local op = sf_op; if not op then return end
-  if (op.forged_this_cycle or 0) > 0 then
-    op.recycle = true
-    kick_inventory()   -- re-read carried (now emptied by the stow), then re-look the containers
+  if (op.forged_this_cycle or 0) > 0 and container_has_raw(op) then
+    op.forged_this_cycle = 0     -- new pass
+    done_looking()               -- decide + pull from memory — no `inv`, no `look in`
   else
     report_done(); sf_settle(true)
   end
@@ -629,14 +638,22 @@ end
 -- PULL sub-phase: a soulstone came OUT of a container ("You get a X soulstone from Y.") → count it and
 -- pull the NEXT of the same colour/container. Guarded to the pull sub-phase so a loot line from anything
 -- else (or the look sub-phase) can't drive us.
-local function hit_get_ok()
+local function hit_get_ok(color_phrase)
   local op = sf_op; if not op or op.phase ~= "gather" or op.gphase ~= "pull" then return end
   op.pulled = (op.pulled or 0) + 1
+  local item = op.pull_queue[op.pull_idx]
   -- Keep the in-memory container model current so later cycles decide without re-looking: one stone of
   -- this colour just left this container.
-  local item = op.pull_queue[op.pull_idx]
   if item and op.container_stones[item.kw] and op.container_stones[item.kw][item.color] then
     op.container_stones[item.kw][item.color] = op.container_stones[item.kw][item.color] - 1
+  end
+  -- ...and APPEND it to the carried model (the game drops a gotten item at the end of inventory), so we
+  -- forge straight from memory with NO re-inventory. Trust the line's colour, fall back to what we asked.
+  local color = tier_key(color_phrase) or (item and item.color)
+  if color then
+    op.model = op.model or {}
+    op.model[#op.model + 1] = { color = color }
+    renumber(op.model)
   end
   sf_touch()
   gather_pull()   -- re-fires the SAME `get` → the next stone of this colour, until the container's empty
@@ -665,6 +682,13 @@ local function hit_put_ok(color_phrase)
   if color and op.stow_kw then
     op.container_stones[op.stow_kw] = op.container_stones[op.stow_kw] or {}
     op.container_stones[op.stow_kw][color] = (op.container_stones[op.stow_kw][color] or 0) + 1
+  end
+  -- ...and REMOVE it from the carried model (this stone just left our pack for the container), so the next
+  -- cycle decides from memory with no re-inventory. Drop the first carried entry of that colour.
+  if color and op.model then
+    for i, s in ipairs(op.model) do
+      if s.color == color then table.remove(op.model, i); renumber(op.model); break end
+    end
   end
   sf_touch()
   stow_next()
@@ -702,7 +726,7 @@ if trigger then
   trigger([[^\s*(?:\(\s*\d+\s*\)\s*)?an? .+ soulstone\.?\s*$]], function(line) hit_look_soulstone(line) end)
   -- GATHER/PULL: a soulstone pulled from a container, an empty/no-match container, or a full pack. The
   -- handlers self-guard on op.phase/op.gphase, so these are inert during the look and forge phases.
-  trigger([[^You get a (.+) soulstone from ]], function() hit_get_ok() end)
+  trigger([[^You get a (.+) soulstone from ]], function(_, color) hit_get_ok(color) end)
   trigger([[^You don't see anything named '.-' in ]], function() hit_get_empty() end)
   trigger([[^You can't carry that many items]], function() hit_carry_full() end)
   -- GATHER/STOW: a soulstone put back into the container, or nothing left to put. Handlers self-guard on

@@ -294,14 +294,16 @@ test("gather: LOOKS IN the container, understands contents, then pulls ONLY the 
   SF.look_soulstone("a deep blue soulstone")  -- deep blue is the GOAL, not fuel — must be left alone
   SF.look_done()                              -- block quiet → decide + start pulling
   expect(SF.sent[#SF.sent]):eq("get red soulstone sack")     -- raw red first (never `get deep …`)
-  SF.get_ok(); SF.get_empty()                 -- one red out, reds drained → next raw colour
+  SF.get_ok("red"); SF.get_empty()            -- one red out (appended to the model), reds drained → next
   expect(SF.sent[#SF.sent]):eq("get green soulstone sack")
-  SF.get_ok(); SF.get_empty()                 -- green out, drained → queue done → re-inv → forge
-  expect(SF.sent[#SF.sent]):eq("inv")
-  for _, c in ipairs(seq()) do expect(c:find("get deep", 1, true) == nil):eq(true) end   -- deep left in the sack
-  state.inventory = inv("red", "green")
-  SF.on_inv()
-  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
+  SF.get_ok("green"); SF.get_empty()          -- green out → queue done → forge STRAIGHT from memory (no inv)
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- the pulled red + green
+  local invs = 0
+  for _, c in ipairs(seq()) do
+    expect(c:find("get deep", 1, true) == nil):eq(true)      -- deep blue left in the sack
+    if c == "inv" then invs = invs + 1 end
+  end
+  expect(invs):eq(1)                          -- only the initial read; the pull → forge was all in memory
 end)
 
 test("gather: an EMPTY container is looked in, reported, and not pulled — loose stones forge, no extra inv", function()
@@ -330,19 +332,16 @@ test("gather: a container of ONLY deep blue is looked in but nothing is pulled (
   for _, c in ipairs(seq()) do expect(c:find("get ", 1, true) == nil):eq(true) end
 end)
 
-test("gather: a full pack during pulling stops the sweep and forges what we have", function()
+test("gather: a full pack during pulling stops the sweep and forges what we have (no inv)", function()
   SF.reset()
   state.inventory = { "a pocket dimension" }
   SF.begin(); SF.on_inv()
   expect(SF.sent[#SF.sent]):eq("look in dimension")
-  SF.look_soulstone("(  2) a red soulstone")  -- count-prefixed grouping
+  SF.look_soulstone("(  3) a red soulstone")  -- count-prefixed grouping
   SF.look_done()
   expect(SF.sent[#SF.sent]):eq("get red soulstone dimension")
-  SF.get_ok()                                 -- pulled one…
-  SF.carry_full()                             -- "You can't carry that many items." → stop
-  expect(SF.sent[#SF.sent]):eq("inv")         -- finish_gather re-inventories (pulled > 0)
-  state.inventory = inv("red", "red")
-  SF.on_inv()
+  SF.get_ok("red"); SF.get_ok("red")          -- pulled two (both appended to the model)…
+  SF.carry_full()                             -- "You can't carry that many items." → stop, forge from memory
   expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
 end)
 
@@ -354,36 +353,41 @@ test("stow: after a forge pass, PUTS the results back into the source container"
   SF.look_soulstone("a red soulstone"); SF.look_soulstone("a red soulstone")
   SF.look_done()                                -- red is raw → pull
   expect(SF.sent[#SF.sent]):eq("get red soulstone sack")
-  SF.get_ok(); SF.get_ok(); SF.get_empty()      -- pulled 2 reds → re-inv
-  state.inventory = inv("red", "red"); SF.on_inv()
+  SF.get_ok("red"); SF.get_ok("red"); SF.get_empty()   -- pulled 2 reds → forge from memory (no inv)
   expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
   SF.forge_result("yellow", "red")              -- red+red→yellow; pass done → STOW the leftover back
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
 end)
 
-test("cycle: LOOKS ONCE, then decides every later pass from the in-memory container model; converges", function()
+test("cycle: LOOKS ONCE and never re-inventories between passes — memory-driven, two batches, converges", function()
+  -- 4 greens in the sack, but the pack only holds 2 at a time → it takes TWO pull/forge/stow batches. The
+  -- whole thing runs off the in-memory model: exactly ONE `look in` and ONE `inv` (the initial) all run.
   SF.reset()
   state.inventory = { "a small sack" }
   SF.begin(); SF.on_inv()
-  expect(SF.sent[#SF.sent]):eq("look in sack")           -- the ONE look
-  SF.look_soulstone("a red soulstone"); SF.look_soulstone("a red soulstone"); SF.look_done()
-  SF.get_ok(); SF.get_ok(); SF.get_empty()               -- pulled 2 reds (memory: sack red 2→0)
-  state.inventory = inv("red", "red"); SF.on_inv()
-  SF.forge_result("yellow", "red")                        -- forged → stow
+  expect(SF.sent[#SF.sent]):eq("look in sack")            -- the ONE look
+  SF.look_soulstone("(  4) a green soulstone"); SF.look_done()
+  -- BATCH 1: pull two greens (pack fills), forge the pair, stow the result — all from memory.
+  expect(SF.sent[#SF.sent]):eq("get green soulstone sack")
+  SF.get_ok("green"); SF.get_ok("green"); SF.carry_full()
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
+  SF.forge_result("pale", "green")                        -- green+green→pale (lone pale can't re-forge)
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
-  SF.put_ok("yellow"); SF.put_empty()                     -- yellow back (memory: sack yellow 0→1); forged → recycle
-  expect(SF.sent[#SF.sent]):eq("inv")                     -- recycle re-INVENTORIES carried — does NOT re-look
-  state.inventory = { "a small sack" }                    -- carried empty; the yellow is only in the sack now
-  SF.on_inv()                                             -- recycle → decide from memory → pull straight away
-  expect(SF.sent[#SF.sent]):eq("get yellow soulstone sack")   -- NO second "look in"
-  SF.get_ok(); SF.get_empty()
-  state.inventory = inv("yellow"); SF.on_inv()            -- 1 stone, can't pair → pass done → stow
+  SF.put_ok("pale"); SF.put_empty()                       -- pale stowed; 2 greens still in the sack → BATCH 2
+  expect(SF.sent[#SF.sent]):eq("get green soulstone sack")   -- straight to pulling — NO inv, NO second look
+  SF.get_ok("green"); SF.get_ok("green"); SF.get_empty()
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
+  SF.forge_result("pale", "green")
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
-  SF.put_ok("yellow"); SF.put_empty()                     -- yellow back; this pass forged NOTHING → settle
-  expect(SF.active()):eq(false)                           -- converged
-  local looks = 0
-  for _, c in ipairs(seq()) do if c == "look in sack" then looks = looks + 1 end end
-  expect(looks):eq(1)                                     -- looked in the container EXACTLY once all run
+  SF.put_ok("pale"); SF.put_empty()                       -- now sack = 2 pale (not surplus) → nothing raw → done
+  expect(SF.active()):eq(false)
+  local looks, invs = 0, 0
+  for _, c in ipairs(seq()) do
+    if c == "look in sack" then looks = looks + 1 end
+    if c == "inv" then invs = invs + 1 end
+  end
+  expect(looks):eq(1)                                     -- looked EXACTLY once
+  expect(invs):eq(1)                                      -- inventoried EXACTLY once (the initial read)
 end)
 
 -- ---- (e) safety: bounded no-progress -------------------------------------------------------------

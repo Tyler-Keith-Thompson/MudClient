@@ -86,4 +86,27 @@ struct InputServiceTests {
         try svc.parse(input: "!")                                // → north again, not "!"
         #expect(try await drain(svc, &it, count: 1) == ["north"])
     }
+
+    @Test func blankLineEmitsABareNewlineToDrivePagers() async throws {
+        let svc = InputService()
+        var it = svc.commandStream.makeAsyncIterator()
+
+        try svc.parse(input: "")                                 // Enter on empty input → bare newline
+        #expect(try await drain(svc, &it, count: 1) == [""])
+
+        try svc.parse(input: "   ")                              // whitespace-only counts as blank too
+        #expect(try await drain(svc, &it, count: 1) == [""])
+    }
+
+    @Test func blankLineDoesNotClobberTheBangHistory() async throws {
+        let svc = InputService()
+        var it = svc.commandStream.makeAsyncIterator()
+
+        try svc.parse(input: "north")
+        _ = try await drain(svc, &it, count: 1)
+        try svc.parse(input: "")                                 // a blank submit in between…
+        _ = try await drain(svc, &it, count: 1)
+        try svc.parse(input: "!")                                // …still repeats "north", not the blank
+        #expect(try await drain(svc, &it, count: 1) == ["north"])
+    }
 }

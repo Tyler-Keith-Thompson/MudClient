@@ -1766,6 +1766,69 @@ end
 alias([[^noexit$]], function() noexit_command("") end)
 alias([[^noexit (.+)$]], function(_, rest) noexit_command(rest) end)
 
+-- addexit(dir) — the INVERSE of noexit: mark a direction out of the current room as a REAL exit the game
+-- HIDES (doesn't list in the room's exits), so explore()/navigate WILL route through it. The map only
+-- learns exits the room advertises (parse_exits), so a purposefully-hidden passage — a secret door, an
+-- unlisted way — never gets added and the pilot never tries it; this adds it by hand. Per-room, persists
+-- with the map (r.added is serialized in P.rooms), and un-blocks the direction if you'd noexit'd it.
+-- addexit() lists this room's added exits; addexit('clear <dir>') / addexit('-n') removes one;
+-- addexit('clear') removes them all. Not an AlterAeon command, so the typed aliases are safe.
+function addexit(args) return addexit_command(args) end
+doc(addexit, { name = "addexit", sig = "addexit([dir])", group = "map",
+  text = "Add a HIDDEN exit out of the current room so explore()/navigate will route through it — for the "
+      .. "secret doors and unlisted passages the game doesn't advertise (the opposite of noexit). "
+      .. "addexit() lists this room's added exits; addexit('clear <dir>') removes one; addexit('clear') "
+      .. "removes them all here. Per-room, persists with the map; also clears any noexit on that direction.",
+  example = "addexit('down')   -- an unlisted trapdoor leads down; let explore route through it" })
+function addexit_command(args)
+  args = trim(args or "")
+  local id = P.current_room
+  local r = id and P.rooms[id]
+  if not r then echo("[addexit] no current room yet — move once so the map knows where you are."); return end
+  -- list
+  if args == "" then
+    local dirs = {}
+    for d in pairs(r.added or {}) do dirs[#dirs + 1] = d end
+    if #dirs == 0 then echo("[addexit] no hidden exits added here. `addexit <dir>` adds one (e.g. addexit down).")
+    else table.sort(dirs); echo("[addexit] added exits out of " .. (r.name or "this room") .. ": " .. table.concat(dirs, ", ")) end
+    return
+  end
+  -- clear ALL added exits in this room
+  local low = args:lower()
+  if low == "clear" or low == "reset" or low == "clear all" then
+    if r.added then
+      for d in pairs(r.added) do if r.exits then r.exits[d] = nil end end
+      r.added = nil; schedule_save(); echo("[addexit] removed every added exit in " .. (r.name or "this room") .. ".")
+    else echo("[addexit] nothing added here.") end
+    return
+  end
+  -- remove ONE:  clear <dir> | remove <dir> | -<dir>
+  local un = args:match("^clear%s+(.+)$") or args:match("^remove%s+(.+)$") or args:match("^%-%s*(.+)$")
+  if un then
+    local d = CANON[trim(un):lower()]
+    if not d then echo("[addexit] '" .. trim(un) .. "' isn't a direction."); return end
+    if r.added and r.added[d] then
+      r.added[d] = nil; if not next(r.added) then r.added = nil end
+      if r.exits then r.exits[d] = nil end     -- a still-advertised exit re-adds itself on the next room entry
+      schedule_save(); echo("[addexit] removed the added " .. d .. " exit here.")
+    else echo("[addexit] " .. d .. " wasn't an added exit here.") end
+    return
+  end
+  -- add ONE
+  local d = CANON[low]
+  if not d then echo("[addexit] '" .. args .. "' isn't a direction. Use n/s/e/w/u/d/ne/nw/se/sw (or 'clear <dir>')."); return end
+  r.added = r.added or {}
+  if r.added[d] then echo("[addexit] " .. d .. " is already added here."); return end
+  r.added[d] = true
+  r.exits = r.exits or {}
+  r.exits[d] = true                                    -- treat it as a real exit for routing/explore
+  if r.blocked then r.blocked[d] = nil; if not next(r.blocked) then r.blocked = nil end end   -- adding un-blocks it
+  schedule_save()
+  echo("[addexit] added " .. d .. " out of " .. (r.name or "this room") .. " — explore may route that way now. `addexit clear " .. d .. "` to undo.")
+end
+alias([[^addexit$]], function() addexit_command("") end)
+alias([[^addexit (.+)$]], function(_, rest) addexit_command(rest) end)
+
 -- mark(label) tags the CURRENT room with a landmark label (e.g. mark('trainer')) so you can
 -- travel('<label>') back to it later and the pilot can navigate('<label>') to it. mark() with no args
 -- lists every tagged room; mark('del <label>') (or mark('-<label>')) removes one. Marks persist with
@@ -2722,6 +2785,7 @@ _AIP_TEST = {
   parse_exits = parse_exits, cmd_ends_turn = cmd_ends_turn, untaken_exit = untaken_exit,
   path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,
   best_explore_dir = best_explore_dir, block_last_move = block_last_move, noexit_command = noexit_command,
+  addexit_command = addexit_command,
   arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
   save_map = save_map, load_map = load_map,
   extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,

@@ -47,6 +47,7 @@ OUT_DIR = os.environ.get("TRACE_ART_OUT",
 IMAGES_DIR = os.path.join(OUT_DIR, "images")
 CURSOR_PATH = os.path.join(OUT_DIR, ".cursor.json")
 GALLERY_PATH = os.path.join(OUT_DIR, "gallery.jsonl")
+PICK_STATE = os.path.join(OUT_DIR, ".badass_pick.json")  # last wallpaper pick, so we rotate to newer art
 
 COMFY = os.environ.get("COMFY_HOST", "http://127.0.0.1:8188")
 
@@ -384,6 +385,27 @@ def _badass_heuristic_key(rec):
     return (1 if m.get("mine") else 0, m.get("freak") or 0, m.get("level") or 0)
 
 
+def _read_last_pick():
+    """The image_path of the wallpaper we showed last time (str), or None."""
+    try:
+        with open(PICK_STATE) as f:
+            return (json.load(f) or {}).get("last")
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _write_last_pick(image_path):
+    """Record the just-shown wallpaper so the next pick rotates past it. Best-effort (never fatal)."""
+    tmp = PICK_STATE + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump({"last": image_path,
+                       "updated": datetime.now().isoformat(timespec="seconds")}, f, indent=2)
+        os.replace(tmp, PICK_STATE)
+    except OSError:
+        pass
+
+
 def pick_badass(last_n=5):
     """Of the last `last_n` gallery images that still exist on disk, return the path to the single most
     'badass' one — judged by the local LM Studio model from each moment's text (no vision model needed),
@@ -410,41 +432,56 @@ def pick_badass(last_n=5):
         log("no gallery images on disk yet")
         return None
 
-    recent = records[-last_n:]
+    # Rotate to NEW art: judge among the images added SINCE the one we last showed, not the whole recent
+    # window. Otherwise the LLM keeps re-picking its lingering favourite and the wallpaper never changes as
+    # fresh moments arrive. `.badass_pick.json` remembers the last pick; candidates are the gallery entries
+    # after it (capped at last_n so a burst of new art still judges a bounded set). Fallbacks keep it robust:
+    # if the last pick is gone or nothing is newer, use the recent window but still avoid re-picking the very
+    # same image when there's any alternative.
+    last_path = _read_last_pick()
+    idx = next((i for i, r in enumerate(records) if r.get("image_path") == last_path), None)
+    if idx is not None and idx + 1 < len(records):
+        recent = records[idx + 1:][-last_n:]               # only art newer than the last wallpaper
+    else:
+        recent = [r for r in records[-last_n:] if r.get("image_path") != last_path] or records[-last_n:]
+
     if len(recent) == 1:
-        return recent[0].get("image_path")
+        pick = 0
+    else:
+        pick = None
+        if llm_available():
+            listing = "\n".join(
+                "{i}: [{ev}] {detail}  (yours={mine}, freak={freak}, level={level})".format(
+                    i=i, ev=r.get("event_type", "?"), detail=(r.get("detail") or "").strip(),
+                    mine=bool((r.get("meta") or {}).get("mine")),
+                    freak=(r.get("meta") or {}).get("freak"),
+                    level=(r.get("meta") or {}).get("level"))
+                for i, r in enumerate(recent))
+            messages = [
+                {"role": "system", "content":
+                    "You curate a terminal wallpaper. Pick the single MOST badass, epic, dramatic moment — "
+                    "brutal kills, rare soul steals (high freak), your own feats, narrow escapes. "
+                    'Reply with ONLY compact JSON: {"pick": <index integer>}.'},
+                {"role": "user", "content": "Choose the most badass moment by index:\n" + listing},
+            ]
+            obj = _llm_json(messages, max_tokens=40)
+            if obj is not None:
+                try:
+                    cand = int(obj.get("pick"))
+                    if 0 <= cand < len(recent):
+                        pick = cand
+                except (TypeError, ValueError):
+                    pass
+            if pick is None:
+                log("LLM pick unusable; falling back to heuristic")
 
-    pick = None
-    if llm_available():
-        listing = "\n".join(
-            "{i}: [{ev}] {detail}  (yours={mine}, freak={freak}, level={level})".format(
-                i=i, ev=r.get("event_type", "?"), detail=(r.get("detail") or "").strip(),
-                mine=bool((r.get("meta") or {}).get("mine")),
-                freak=(r.get("meta") or {}).get("freak"),
-                level=(r.get("meta") or {}).get("level"))
-            for i, r in enumerate(recent))
-        messages = [
-            {"role": "system", "content":
-                "You curate a terminal wallpaper. Pick the single MOST badass, epic, dramatic moment — "
-                "brutal kills, rare soul steals (high freak), your own feats, narrow escapes. "
-                'Reply with ONLY compact JSON: {"pick": <index integer>}.'},
-            {"role": "user", "content": "Choose the most badass moment by index:\n" + listing},
-        ]
-        obj = _llm_json(messages, max_tokens=40)
-        if obj is not None:
-            try:
-                cand = int(obj.get("pick"))
-                if 0 <= cand < len(recent):
-                    pick = cand
-            except (TypeError, ValueError):
-                pass
         if pick is None:
-            log("LLM pick unusable; falling back to heuristic")
+            pick = max(range(len(recent)), key=lambda i: _badass_heuristic_key(recent[i]))
 
-    if pick is None:
-        pick = max(range(len(recent)), key=lambda i: _badass_heuristic_key(recent[i]))
-    log(f"picked #{pick} of last {len(recent)}: {recent[pick].get('detail','')}")
-    return recent[pick].get("image_path")
+    chosen = recent[pick].get("image_path")
+    _write_last_pick(chosen)                               # remember it so the next run rotates past it
+    log(f"picked #{pick} of {len(recent)} candidate(s): {recent[pick].get('detail','')}")
+    return chosen
 
 
 def llm_prompt(moment, state, snippet):

@@ -94,10 +94,18 @@ final class InputService: @unchecked Sendable {
     }
 
     func parse(input: String) throws {
+        // Enter on an empty input line is a DELIBERATE bare newline: the game's pagers ("Press <return>
+        // or 'cont' to continue…") advance on a lone `\n`. Emit an empty command so it reaches the wire
+        // instead of being swallowed. Leave `lastLine` untouched so a later `!` still repeats the last
+        // real command, not this blank.
+        if input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            continuation.yield(OutboundCommand(text: "", origin: .user))
+            return
+        }
         // Resolve `!` to the last full line BEFORE any splitting, so `!` repeats the WHOLE thing (all its
         // `;` commands, all its pipe stages) — a whole-line `!` or a `!` pipe stage alike.
         let resolved = InputService.resolveBang(input, last: lastLine)
-        // A bare `!` with nothing typed yet resolves to nothing — drop it rather than sending a blank line.
+        // A bare `!` with a non-empty history that still resolves to nothing shouldn't happen; guard anyway.
         guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         // Remember what actually ran (already `!`-resolved, so a later `!` never chases another `!`).
         lastLine = resolved

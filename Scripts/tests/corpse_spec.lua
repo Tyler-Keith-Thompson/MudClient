@@ -51,13 +51,14 @@ local function pass(cfg, drive)
   local hm = _AA_TEST.corpse_harvest()
   for _, k in ipairs(cfg.no_teeth or {}) do hm.no_teeth[k] = true end
   for _, k in ipairs(cfg.no_spellcomps or {}) do hm.no_spellcomps[k] = true end
+  for _, k in ipairs(cfg.no_bsac or {}) do hm.no_bsac[k] = true end
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
   for k in pairs(corpse) do corpse[k] = nil end
   corpse.on, corpse.active, corpse.killed = true, false, true
   corpse.kills, corpse.kill_count, corpse.with_items, corpse.room = {}, 0, {}, nil
   corpse.idx = 1
   for k, v in pairs(cfg) do
-    if k ~= "no_teeth" and k ~= "no_spellcomps" then corpse[k] = v end
+    if k ~= "no_teeth" and k ~= "no_spellcomps" and k ~= "no_bsac" then corpse[k] = v end
   end
   state = { opponents = {}, engaged_until = nil, fighting = false, action = 0 }
   send = function(c) sent[#sent + 1] = c end
@@ -68,6 +69,10 @@ local function pass(cfg, drive)
     contents     = function(n) corpse.with_items[n] = true end,  -- "(on ground) the corpse of X contains:"
     harvest_done = function() corpse_harvest_done() end,         -- a harvest terminal / spellcomps yield line
     bsac_reply   = function() corpse_sac() end,                  -- "You sacrifice blood from …"
+    cant_bsac    = function()  -- "You can only blood sacrifice fresh, intact corpses of known provenance."
+      if corpse.active then _AA_TEST.learn_no_bsac(_AA_TEST.corpse_kind_key(corpse.cur_name) or _AA_TEST.batch_kind()) end
+      corpse_sac()
+    end,
     sac_reply    = function(r) corpse_sac_done(r) end,           -- "… appreciates your sacrifice" / "too big …"
     miss         = function() corpse_done() end,                 -- "You don't see anything named 'N.corpse'"
     harvesting   = harvesting,
@@ -111,6 +116,27 @@ test("a corpse holding loot is BSAC'd (blood only) but never SAC'd (removed)", f
   expect(has_send(sent, "bsac 1.corpse")):eq(true)   -- blood is safe to take from a loot corpse
   expect(sacs(sent)):eq(0)                           -- but it is NEVER removed (would destroy the loot)
   expect(harvesting()):eq(false)                     -- one corpse, left intact → pass wrapped up
+end)
+
+test("an un-bsac-able corpse ('only blood sacrifice … known provenance') is LEARNED by kind", function()
+  local hm = _AA_TEST.corpse_harvest()
+  local sent = pass({ kill_count = 1 }, function(api)
+    api.name("a raised skeleton")
+    api.harvest_done(); api.harvest_done()   -- teeth → spellcomps → decide → bsac
+    api.cant_bsac()                          -- rejected: can't bsac this one → resolve + LEARN the kind
+  end)
+  expect(has_send(sent, "bsac 1.corpse")):eq(true)   -- it still TRIED once (that's how it learned)
+  expect(hm.no_bsac["raised skeleton"]):eq(true)     -- ...and remembered the kind
+end)
+
+test("a KNOWN un-bsac-able kind SKIPS the wasted bsac and goes straight to the sac decision", function()
+  local sent = pass({ kill_count = 1, no_bsac = { "raised skeleton" } }, function(api)
+    api.name("a raised skeleton")
+    api.harvest_done(); api.harvest_done()   -- teeth → spellcomps → decide
+    api.sac_reply("ok")                      -- empty → sac directly (no bsac reply to feed — none was sent)
+  end)
+  expect(bsacs(sent)):eq(0)                  -- the bsac was skipped entirely
+  expect(has_send(sent, "sac 1.corpse")):eq(true)   -- but the empty corpse is still removed
 end)
 
 test("an EMPTY corpse (no auto-printed contents) is blood-sacrificed AND removed", function()

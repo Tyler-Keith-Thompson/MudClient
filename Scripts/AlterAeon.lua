@@ -228,13 +228,38 @@ trigger([=[^\[Exits: (.*?)\]]=], function(_, list)
   state.exits = set
 end)
 
+-- Spells that the mage "maintaining spells" skill can keep up continuously (from
+-- `help maintaining spells` — the game's authoritative list). When one of these comes up we
+-- auto-issue `maintain <spell>` so it never expires and we stop re-casting it. Set for O(1) lookup,
+-- keyed by the exact lowercase spell name kxwt reports.
+local MAINTAINABLE = {}
+for _, name in ipairs({
+  "armor aegis", "detect invisibility", "detect evil", "infravision", "sense life", "fly",
+  "water breathing", "darken", "detect undead", "dread portent", "unburden", "walk on water",
+  "feather fall",
+}) do MAINTAINABLE[name] = true end
+
+-- Auto-maintain a spell the moment it lands, if the mage "maintaining spells" skill can hold it.
+-- Guard with `state.maintained` so a re-up (or a fresh score reconcile) doesn't spam `maintain` —
+-- the flag is cleared on spelldown and on reconnect. Pure so it's unit-testable (the trigger regex
+-- that feeds it runs in Swift and isn't).
+local function maybe_maintain(s)
+  state.maintained = state.maintained or {}
+  if MAINTAINABLE[(s or ""):lower()] and not state.maintained[s] then
+    state.maintained[s] = true
+    send("maintain " .. s)
+  end
+end
+
 -- Spells up/down. Losing a spell while sleeping with mana to spare drops to resting.
 trigger([[^kxwt_spellup (.+)$]], function(_, s)
   state.spells[s] = true
+  maybe_maintain(s)
   if __recovery_on_spellup then __recovery_on_spellup(s) end   -- release any "waiting for this recast" hold (Recovery.lua)
 end)
 trigger([[^kxwt_spelldown (.+)$]], function(_, s)
   state.spells[s] = nil
+  if state.maintained then state.maintained[s] = nil end   -- dropped: allow a re-maintain when it returns
   if __recovery_on_spelldown then __recovery_on_spelldown(s) end   -- drop to rest for the recast (Recovery.lua)
 end)
 
@@ -306,6 +331,7 @@ function on_connect()
   state.spells = {}
   state.effects = {}
   state.opponents = {}
+  state.maintained = {}   -- clear auto-maintain memory; the server re-pushes spellups on connect
 end
 
 -- ===== Authoritative spell membership from the `score`/affects block =============================
@@ -366,6 +392,8 @@ end)
 _AA_TEST.parse_affect_row = parse_affect_row
 _AA_TEST.affects_to_spells = affects_to_spells
 _AA_TEST.parse_levels = parse_levels
+_AA_TEST.maybe_maintain = maybe_maintain
+_AA_TEST.MAINTAINABLE = MAINTAINABLE
 
 -- ===== Known spells from the `spells` command ====================================================
 -- The AI combat pilot must cast the character's REAL spells, not melee or hallucinate one it lacks. To

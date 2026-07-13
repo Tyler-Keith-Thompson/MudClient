@@ -593,13 +593,24 @@ end
 
 load_regen_cache()   -- warm the cache from disk (stale/level-mismatched entries are filtered at lookup)
 
--- Warm state.regen once shortly after connecting, so the rates are known (and shown in the model's STATE
--- block) BEFORE the first recovery — not only after one. ensure_regen is cache-backed + the query is
--- gagged/debounced, so this is a single silent `show regen` at most. Chains any existing on_connect.
+-- Warm state.regen once we're actually IN THE GAME, so the rates are known (and shown in the model's
+-- STATE block) BEFORE the first recovery — not only after one. This must NOT run on a blind post-connect
+-- timer: `on_connect` fires at socket open, which on AlterAeon is the login screen, so a timed `show
+-- regen` lands on the name/password prompt and gets sent as a bad password (forcing a reconnect — the
+-- exact bug). Instead ARM on connect and fire the single warm-up query on the FIRST in-game vitals
+-- (kxwt_prompt → __recovery_on_vitals below), which only flow once we're logged in. ensure_regen is
+-- cache-backed + the query gagged/debounced, so this is a single silent `show regen` at most.
+local regen_warm_armed = false
 local _prev_on_connect_regen = on_connect
 function on_connect(...)
   if _prev_on_connect_regen then _prev_on_connect_regen(...) end
-  if after then after(4, function() if not state.fighting then ensure_regen() end end) end
+  regen_warm_armed = true
+end
+-- Fire the armed warm-up (once) on the first in-game vitals. Called from __recovery_on_vitals.
+local function warm_regen_on_first_vitals()
+  if not regen_warm_armed then return end
+  regen_warm_armed = false
+  if not state.fighting then ensure_regen() end
 end
 
 -- Skeletal/undead constructs the player raises: no natural regen, must be spell-healed. Matched by name
@@ -1354,7 +1365,7 @@ if rx then
   end)
 end
 
-function __recovery_on_vitals()   if vitalsS   then vitalsS:onNext() end end
+function __recovery_on_vitals()   warm_regen_on_first_vitals(); if vitalsS   then vitalsS:onNext() end end
 function __recovery_on_position(p, changed) if positionS then positionS:onNext({ posn = p, changed = changed }) end end
 function __recovery_on_group()    if groupS    then groupS:onNext() end end
 function __recovery_on_spellup(s)   if spellupS   then spellupS:onNext(s) end end

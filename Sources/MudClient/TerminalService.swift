@@ -50,9 +50,11 @@ final class TerminalService {
         case text(String)      // printable characters (incl. multi-byte UTF-8) to insert at the cursor
         case key(String)       // a recognised special/macro key name (offered to bindings, else editor)
         case enter
+        case insertNewline     // Shift+Enter: insert a literal newline, growing the input area
         case backspace
         case cursorStart       // ctrl-A
         case cursorEnd         // ctrl-E
+        case interrupt         // ctrl-C — normally a SIGINT, but the kitty protocol reports it as a key
     }
 
     /// How far a marker (bracketed-paste start/end) matches at a position.
@@ -85,6 +87,10 @@ final class TerminalService {
     /// (now part of the scrolling output region) instead of leaving stale panel text behind. -1 = none.
     private var lastTopHeight = -1
     private var lastOutputBottom = -1
+    /// Whether we've pushed the kitty keyboard protocol's "disambiguate escape codes" flag (`ESC[>1u`).
+    /// Pushed once at first setup so Shift+Enter is reported distinctly (`ESC[13;2u`) rather than as a
+    /// bare `\n`; popped (`ESC[<u`) on teardown. Guarded so a resize re-setup doesn't stack pushes.
+    private var kittyPushed = false
 
     // MARK: - Scrollback state
     //
@@ -159,14 +165,20 @@ final class TerminalService {
             insertText(s)
         case .enter:
             handleEnter()
+        case .insertNewline:
+            insertNewlineAtCursor()
         case .backspace:
             handleBackspace()
         case .cursorStart:
-            cursor.moveToStartOfLine()
+            cursor.update(column: Self.lineStart(of: cursor.column - 1, in: lineBuffer) + 1)
             refreshDisplay(cursorColumn: cursor.column)
         case .cursorEnd:
-            cursor.moveToEndOf(line: lineBuffer)
+            cursor.update(column: Self.lineEnd(of: cursor.column - 1, in: lineBuffer) + 1)
             refreshDisplay(cursorColumn: cursor.column)
+        case .interrupt:
+            // ctrl-C: with the kitty keyboard protocol active the terminal delivers this as a key instead
+            // of raising SIGINT, so drive the same clear-then-quit path the SIGINT handler uses.
+            handleSigInt()
         case .key(let name):
             if engine.handleKey(name) { return }         // a bound macro consumed the key
             switch name {
@@ -237,19 +249,19 @@ final class TerminalService {
                 Prefix { $0.asciiValue.map { (0x20...0x2F).contains($0) } ?? false }   // intermediate bytes
                 First()                                                                // final byte
             }.map { (params: Substring, inter: Substring, final: Character) -> InputEvent? in
-                Self.decodeKey("\u{1B}[" + params + inter + String(final)).map { InputEvent.key($0.name) }
+                Self.decodeKey("\u{1B}[" + params + inter + String(final)).map { Self.event(forKey: $0.name) }
             }
             Parse {                                   // SS3: ESC O <final>
                 "\u{1B}O"
                 First()
             }.map { (final: Character) -> InputEvent? in
-                Self.decodeKey("\u{1B}O" + String(final)).map { InputEvent.key($0.name) }
+                Self.decodeKey("\u{1B}O" + String(final)).map { Self.event(forKey: $0.name) }
             }
             Parse {                                   // two-byte escape: ESC <byte> (e.g. alt-<letter>)
                 "\u{1B}"
                 First()
             }.map { (byte: Character) -> InputEvent? in
-                Self.decodeKey("\u{1B}" + String(byte)).map { InputEvent.key($0.name) }
+                Self.decodeKey("\u{1B}" + String(byte)).map { Self.event(forKey: $0.name) }
             }
         }
         return OneOf {
@@ -263,11 +275,28 @@ final class TerminalService {
             // text. This alternative always consumes one character, so the grammar never fails.
             First().map { (c: Character) -> InputEvent? in
                 if let a = c.asciiValue, (0x01...0x1A).contains(a) {
-                    return Self.decodeKey(String(c)).map { InputEvent.key($0.name) }   // names non-reserved ctrl
+                    return Self.decodeKey(String(c)).map { Self.event(forKey: $0.name) }   // names non-reserved ctrl
                 }
                 if let a = c.asciiValue, a < 0x20 { return nil }   // stray C0 control byte → drop
                 return .text(String(c))
             }
+        }
+    }
+
+    /// Map a decoded key NAME to the concrete editor event it drives. Under the kitty keyboard protocol
+    /// (see `setup`) the editor-owned keys arrive as CSI-u sequences that `decodeKey` names, so their
+    /// canonical names must fold back onto the same events the legacy raw bytes produce — otherwise
+    /// enabling the protocol would regress ctrl-A/ctrl-E/backspace/Enter and drop Shift+Enter. Every
+    /// other recognised key stays a `.key(name)` offered to `bind` macros then the built-in editor.
+    static func event(forKey name: String) -> InputEvent {
+        switch name {
+        case "shift-enter": return .insertNewline
+        case "enter":       return .enter
+        case "ctrl-a":      return .cursorStart
+        case "ctrl-e":      return .cursorEnd
+        case "ctrl-c":      return .interrupt
+        case "backspace":   return .backspace
+        default:            return .key(name)
         }
     }
 
@@ -338,6 +367,14 @@ final class TerminalService {
         // so we can insert it as literal, editable characters instead of having every pasted line
         // interpreted as typed keystrokes (and multi-line pastes fire off as commands). See extractPaste.
         writeToStandardOut(data: Data("\u{1B}[?2004h".utf8))
+        // Push the kitty keyboard protocol's "disambiguate escape codes" flag so Shift+Enter arrives as a
+        // distinct CSI-u sequence (ESC[13;2u) instead of a bare newline. Modified/special keys (ctrl-A/E,
+        // backspace, …) now also arrive as CSI-u; `decodeCSI`/`event(forKey:)` fold them back to their
+        // existing events so nothing regresses. Terminals that ignore this leave Shift+Enter == Enter.
+        if !kittyPushed {
+            writeToStandardOut(data: Data("\u{1B}[>1u".utf8))
+            kittyPushed = true
+        }
         setupScreen()
     }
 
@@ -361,17 +398,20 @@ final class TerminalService {
     private struct Layout {
         let height, width, topHeight, bottomHeight: Int
         let topDividerRow, regionTop, outputBottom, scrollDividerRow: Int
-        let bottomPanelTop, inputDividerRow, inputRow: Int
+        let bottomPanelTop, inputDividerRow, inputTop, inputHeight: Int
     }
 
     private func layout() -> Layout? {
         guard let h = getTerminalHeight(), let w = getTerminalWidth() else { return nil }
         let topHeight = Container.topPanelHost().height
         let bottomHeight = Container.panelHost().height
+        // The input grows to fit its visual line count (Shift+Enter adds lines), clamped so a giant paste
+        // can't eat the screen — beyond the clamp the input area scrolls internally to the cursor.
+        let inputHeight = min(inputVisualLineCount(), max(1, h / 2))
         // top band: group panel + one divider framing the scroll's top edge.
         let topReserved = topHeight + 1
-        // bottom band: scroll-frame divider + status panel + input divider + input line.
-        let bottomReserved = bottomHeight + 3
+        // bottom band: scroll-frame divider + status panel + input divider + the input rows.
+        let bottomReserved = bottomHeight + 2 + inputHeight
         let regionTop = topReserved + 1
         let outputBottom = max(regionTop, h - bottomReserved)
         return Layout(height: h, width: w, topHeight: topHeight, bottomHeight: bottomHeight,
@@ -380,13 +420,57 @@ final class TerminalService {
                       outputBottom: outputBottom,
                       scrollDividerRow: outputBottom + 1,         // divider below the scroll region
                       bottomPanelTop: outputBottom + 2,           // status panel below that divider
-                      inputDividerRow: h - 1,                     // divider directly above the input
-                      inputRow: h)
+                      inputDividerRow: h - inputHeight,           // divider directly above the input rows
+                      inputTop: h - inputHeight + 1,              // first input row
+                      inputHeight: inputHeight)
     }
 
-    /// A compact signature of the band geometry; when it changes (panel heights, top panel appearing)
-    /// the scroll region must be re-established.
-    private func signature(_ l: Layout) -> String { "\(l.topHeight):\(l.bottomHeight)" }
+    /// A compact signature of the band geometry; when it changes (panel heights, top panel appearing, or
+    /// the input growing/shrinking with embedded newlines) the scroll region must be re-established.
+    private func signature(_ l: Layout) -> String { "\(l.topHeight):\(l.bottomHeight):\(l.inputHeight)" }
+
+    /// The number of visual rows the input buffer needs: one per embedded-newline segment, at least one.
+    private func inputVisualLineCount() -> Int { Self.visualLineCount(lineBuffer) }
+
+    /// The number of visual lines a buffer occupies (split on embedded `\n`, empty segments kept), min 1.
+    static func visualLineCount(_ s: String) -> Int {
+        max(1, s.split(separator: "\n", omittingEmptySubsequences: false).count)
+    }
+
+    /// The (0-based visual row, 0-based column-within-line) of character `index` in `buffer`, treating
+    /// embedded `\n` as line breaks. Clamped to the buffer bounds.
+    static func visualPosition(of index: Int, in buffer: String) -> (row: Int, col: Int) {
+        let chars = Array(buffer)
+        let clamped = max(0, min(index, chars.count))
+        var row = 0, col = 0
+        for i in 0..<clamped {
+            if chars[i] == "\n" { row += 1; col = 0 } else { col += 1 }
+        }
+        return (row, col)
+    }
+
+    /// The character index of the start of the visual line containing `index` (scan back to after the
+    /// previous `\n`, or the buffer start). Used so ctrl-A goes to the start of the CURRENT visual line.
+    static func lineStart(of index: Int, in buffer: String) -> Int {
+        let chars = Array(buffer)
+        var i = min(max(0, index), chars.count)
+        while i > 0 && chars[i - 1] != "\n" { i -= 1 }
+        return i
+    }
+
+    /// The character index of the end of the visual line containing `index` (scan forward to the next
+    /// `\n`, or the buffer end). Used so ctrl-E goes to the end of the CURRENT visual line.
+    static func lineEnd(of index: Int, in buffer: String) -> Int {
+        let chars = Array(buffer)
+        var i = min(max(0, index), chars.count)
+        while i < chars.count && chars[i] != "\n" { i += 1 }
+        return i
+    }
+
+    /// Split a submitted input buffer into the individual commands to send, one per visual line.
+    static func splitCommands(_ buffer: String) -> [String] {
+        buffer.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
 
     /// A subtle (dim) full-width horizontal rule used to frame the scroll region.
     private func dividerLine(width: Int) -> String {
@@ -544,6 +628,7 @@ final class TerminalService {
     func teardownScreen() {
         var out = "\u{1B}[?1000l\u{1B}[?1006l"              // disable mouse reporting (restore native wheel/selection)
         out += "\u{1B}[?2004l"                              // disable bracketed paste
+        if kittyPushed { out += "\u{1B}[<u"; kittyPushed = false }   // pop kitty keyboard protocol flag
         out += "\u{1B}[r"                                   // reset scroll region to the full screen
         out += "\u{1B}[?25h"                                // make sure the cursor is visible again
         out += "\u{1B}[\(getTerminalHeight() ?? 24);1H"
@@ -570,7 +655,24 @@ final class TerminalService {
     /// Exposed to Lua as `__term_cols` so the help renderer can pack output to the real width.
     func terminalColumns() -> Int { getTerminalWidth() ?? 80 }
     
+    /// Move the cursor to (0-based `row`, 0-based `col`) within the multi-line buffer and redraw. `col`
+    /// is clamped to the target line's length. Used for Up/Down movement between visual lines.
+    private func moveCursorToVisual(row: Int, col: Int) {
+        let lines = lineBuffer.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard row >= 0, row < lines.count else { return }
+        var idx = 0
+        for r in 0..<row { idx += lines[r].count + 1 }   // +1 for each consumed newline
+        idx += min(col, lines[row].count)
+        cursor.update(column: idx + 1)
+        refreshDisplay(cursorColumn: cursor.column)
+    }
+
     private func handleUpArrow() {
+        // In a multi-line buffer, Up moves between visual lines until the top line, then falls to history.
+        if lineBuffer.contains("\n") {
+            let (row, col) = TerminalService.visualPosition(of: cursor.column - 1, in: lineBuffer)
+            if row > 0 { moveCursorToVisual(row: row - 1, col: col); return }
+        }
         guard !commandHistory.isEmpty else { return }
         if historyAnchor == nil { historyAnchor = lineBuffer }   // start a search anchored on the typed text
         let anchor = historyAnchor!
@@ -581,6 +683,12 @@ final class TerminalService {
     }
 
     private func handleDownArrow() {
+        // In a multi-line buffer, Down moves between visual lines until the bottom line, then history.
+        if lineBuffer.contains("\n") {
+            let lineCount = TerminalService.visualLineCount(lineBuffer)
+            let (row, col) = TerminalService.visualPosition(of: cursor.column - 1, in: lineBuffer)
+            if row < lineCount - 1 { moveCursorToVisual(row: row + 1, col: col); return }
+        }
         guard !commandHistory.isEmpty, let anchor = historyAnchor else { return }
         let from = currentCommandIndex + 1
         if let idx = TerminalService.nextHistoryMatch(commandHistory, query: anchor, from: from, direction: 1) {
@@ -622,20 +730,16 @@ final class TerminalService {
         resetHistorySearch()
         if cursor.column > 1 {
             let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 2)
+            let removedNewline = lineBuffer[index] == "\n"
             lineBuffer.remove(at: index)
-            
-            // Calculate the necessary visibleStartColumn to keep the end aligned with the terminal width
-            let terminalWidth = getTerminalWidth() ?? 80
-            if lineBuffer.count <= terminalWidth {
-                visibleStartColumn = 0  // If the entire input fits, no need to scroll
-            } else {
-                // Keep the end of the visible text aligned with the right edge of the terminal
-                visibleStartColumn = max(0, lineBuffer.count - terminalWidth)
-            }
-            
-            // Refresh display and update cursor position
-            refreshDisplay(cursorColumn: cursor.column - 1)
+
+            // Reset horizontal scroll when the current visual line now fits (multiline: only the current
+            // line's width matters, not the whole buffer's character count).
+            visibleStartColumn = 0
+
             cursor.update(column: cursor.column - 1)
+            if removedNewline { ensureInputGeometry() }   // a visual line went away → shrink the input band
+            refreshDisplay(cursorColumn: cursor.column)
         }
     }
     
@@ -643,23 +747,43 @@ final class TerminalService {
         resetHistorySearch()
         snapToLive()   // if you were reading history, sending a command jumps you back to the live tail
         // Typed text has already been inserted into `lineBuffer` as `.text` events by the time this
-        // Enter event fires, so the buffer is the command to send — nothing to pull off `partialInput`.
+        // Enter event fires, so the buffer is the command(s) to send — a multi-line buffer (Shift+Enter)
+        // submits each visual line as its own command, in order.
         cursor.moveToStartOfLine()
         let echo = lineBuffer
         lineBuffer = ""
         visibleStartColumn = 0
         print("\n\(echo)".utf8)
         cursor.moveToStartOfLine()
-        let trimmed = echo.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty && trimmed != commandHistory.last {
-            commandHistory.append(trimmed)
+        ensureInputGeometry()   // the input collapsed back to one row → re-establish the layout
+        // An empty buffer is still one (empty) visual line — `splitCommands("")` is `[""]` — so a bare
+        // Enter submits a single blank command, sending a lone newline. The game's pagers ("Press
+        // <return>…") advance on exactly that, so this must not be short-circuited to send nothing.
+        let commands = TerminalService.splitCommands(echo)
+        for line in commands {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty && trimmed != commandHistory.last {
+                commandHistory.append(trimmed)
+            }
         }
         currentCommandIndex = commandHistory.count
-        do {
-            try Container.inputService().parse(input: echo)
-        } catch {
-            print(sanitizedMessage(String(describing: error)))
+        for line in commands {
+            do {
+                try Container.inputService().parse(input: line)
+            } catch {
+                print(sanitizedMessage(String(describing: error)))
+            }
         }
+    }
+
+    /// Insert a literal newline at the cursor (Shift+Enter): the input area grows to fit the new line.
+    private func insertNewlineAtCursor() {
+        resetHistorySearch()
+        let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
+        lineBuffer.insert("\n", at: index)
+        cursor.update(column: cursor.column + 1)
+        ensureInputGeometry()   // one more visual line → grow the input band before redrawing
+        refreshDisplay(cursorColumn: cursor.column)
     }
     
     /// Insert literal text into the input line at the cursor and redraw it, advancing the cursor.
@@ -669,8 +793,9 @@ final class TerminalService {
         resetHistorySearch()
         let index = lineBuffer.index(lineBuffer.startIndex, offsetBy: cursor.column - 1)
         lineBuffer.insert(contentsOf: text, at: index)
+        cursor.update(column: cursor.column + text.count)
+        ensureInputGeometry()   // pasted text may carry newlines (grows the band)
         refreshDisplay(cursorColumn: cursor.column)
-        cursor.moveRightBy(amount: text.count)
     }
 
     /// Redraw just the input line (used by the keystroke handlers). Looks up the current layout so the
@@ -680,28 +805,59 @@ final class TerminalService {
         drawInputLine(l, cursorColumn: cursorColumn)
     }
 
-    /// Draw the input buffer on the absolute input row, horizontally scrolled to keep the cursor in
-    /// view, and leave the physical cursor at the typing column. Never touches the saved output cursor.
+    /// Draw the input buffer across the input rows (one visual line per row), horizontally scrolled to
+    /// keep the cursor in view on its line and vertically scrolled when the buffer has more visual lines
+    /// than rows (a clamped giant paste). Leaves the physical cursor at the typing position. Uses only
+    /// absolute moves — it never touches the saved output cursor.
     private func drawInputLine(_ l: Layout, cursorColumn: Int) {
-        let terminalWidth = l.width
+        let width = l.width
+        let lines = lineBuffer.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let (curRow, curCol) = TerminalService.visualPosition(of: cursorColumn - 1, in: lineBuffer)
 
-        // Scroll the visible window so the cursor stays on screen.
-        if cursorColumn < visibleStartColumn + 1 {
-            visibleStartColumn = max(0, cursorColumn - 1)
-        } else if cursorColumn > visibleStartColumn + terminalWidth - 1 {
-            visibleStartColumn = cursorColumn - terminalWidth + 1
+        // Vertical scroll: when the buffer needs more visual lines than we have rows, keep the cursor's
+        // line visible by pinning it to the bottom of the input area.
+        var firstLine = 0
+        if lines.count > l.inputHeight {
+            firstLine = min(max(0, curRow - l.inputHeight + 1), lines.count - l.inputHeight)
         }
 
-        let start = min(visibleStartColumn, lineBuffer.count)
-        let visibleStartIndex = lineBuffer.index(lineBuffer.startIndex, offsetBy: start)
-        let length = min(terminalWidth - 1, lineBuffer.distance(from: visibleStartIndex, to: lineBuffer.endIndex))
-        let cursorOffset = cursorColumn - visibleStartColumn
-        var out = "\u{1B}[\(l.inputRow);1H\u{1B}[2K"        // to input row, clear it
-        out += TerminalService.highlightedVisibleSlice(lineBuffer, visibleStart: start, visibleLength: max(0, length),
-                                                        matchStart: historyMatchStart, matchLength: historyMatchLength,
-                                                        highlight: "\u{1B}[45m")
-        out += "\u{1B}[\(l.inputRow);\(cursorOffset)H"      // park cursor at the typing column
+        // Horizontal scroll follows the cursor's column within its own line (0-based).
+        if curCol < visibleStartColumn {
+            visibleStartColumn = max(0, curCol)
+        } else if curCol > visibleStartColumn + width - 1 {
+            visibleStartColumn = curCol - width + 1
+        }
+
+        var out = ""
+        for r in 0..<l.inputHeight {
+            let screenRow = l.inputTop + r
+            out += "\u{1B}[\(screenRow);1H\u{1B}[2K"        // to this input row, clear it
+            let lineIndex = firstLine + r
+            guard lineIndex < lines.count else { continue }
+            let line = lines[lineIndex]
+            let chars = Array(line)
+            let hstart = (lineIndex == curRow) ? min(visibleStartColumn, chars.count) : 0
+            let length = min(width - 1, chars.count - hstart)
+            // The history-search highlight only applies to a single-line recalled command.
+            if lines.count == 1, historyMatchStart != nil {
+                out += TerminalService.highlightedVisibleSlice(line, visibleStart: hstart, visibleLength: max(0, length),
+                                                               matchStart: historyMatchStart, matchLength: historyMatchLength,
+                                                               highlight: "\u{1B}[45m")
+            } else if length > 0 {
+                out += String(chars[hstart..<hstart + length])
+            }
+        }
+        let cursorScreenRow = l.inputTop + (curRow - firstLine)
+        let cursorScreenCol = curCol - visibleStartColumn + 1
+        out += "\u{1B}[\(cursorScreenRow);\(cursorScreenCol)H"   // park cursor at the typing position
         writeToStandardOut(data: Data(out.utf8))
+    }
+
+    /// Re-establish the scroll region when the input's visual-line count changed the band geometry (the
+    /// input grew or shrank). A no-op when nothing moved. Uses the same signature-driven path as a resize.
+    private func ensureInputGeometry() {
+        guard let l = layout() else { return }
+        if lastSignature != signature(l) { setupScreen() }
     }
 
     // MARK: - Scrollback buffer & mouse-wheel scrolling
@@ -1141,6 +1297,7 @@ final class TerminalService {
             partialInput = ""
             visibleStartColumn = 0
             lastEmptySigInt = nil
+            ensureInputGeometry()   // a multi-line buffer collapses back to one row
             refreshDisplay(cursorColumn: cursor.column)   // clear + redraw the (now empty) input line
             return
         }
@@ -1177,6 +1334,7 @@ final class TerminalService {
         lineBuffer = text
         visibleStartColumn = 0
         cursor.moveToEndOf(line: lineBuffer)
+        ensureInputGeometry()   // `text` may contain newlines → resize the input band
         refreshDisplay(cursorColumn: cursor.column)
     }
 
@@ -1251,7 +1409,7 @@ final class TerminalService {
     /// If `s` begins with a recognised special key, return its canonical name and the number of
     /// characters it occupies; otherwise nil. Only FULLY-formed sequences match — a lone/partial
     /// escape returns nil so the existing line-editor path handles it exactly as before.
-    private static func decodeKey(_ s: String) -> (name: String, length: Int)? {
+    static func decodeKey(_ s: String) -> (name: String, length: Int)? {
         let c = Array(s)
         guard let first = c.first else { return nil }
         if first == "\u{1B}" { return decodeEscape(c) }
@@ -1288,6 +1446,16 @@ final class TerminalService {
         let final = c[i]
         let length = i + 1
         let params = paramChars.split(separator: ";").map { Int($0) ?? 0 }
+        // Kitty keyboard-protocol CSI-u: `ESC [ <codepoint> ; <modifier> u`. Under the "disambiguate escape
+        // codes" flag we pushed in `setup`, modified/special keys report this way instead of legacy bytes.
+        // Fold them back to canonical names (`shift-enter`, `ctrl-a`, `backspace`, …) so `event(forKey:)`
+        // routes them to the same events the legacy bytes did — keeping ctrl-A/E, backspace and `bind`
+        // macros working while giving us the distinct `shift-enter` we need.
+        if final == "u" {
+            guard let base = kittyBaseName(params.first ?? 0) else { return nil }
+            let modifier = params.count >= 2 ? params[1] : 1
+            return (modifierPrefix(modifier) + base, length)
+        }
         let base: String?
         switch final {
         case "A": base = "up"
@@ -1327,6 +1495,20 @@ final class TerminalService {
         guard let base else { return nil }
         let modifier = params.count >= 2 ? params[1] : 1      // xterm "1;<mod>" or "<n>;<mod>~"
         return (modifierPrefix(modifier) + base, length)
+    }
+
+    /// The base key name for a kitty CSI-u codepoint: the named special keys plus a-z (uppercase folded to
+    /// lowercase so ctrl-A and shift-A share the letter). nil for anything we don't route from CSI-u.
+    private static func kittyBaseName(_ cp: Int) -> String? {
+        switch cp {
+        case 13: return "enter"
+        case 9: return "tab"
+        case 27: return "escape"
+        case 8, 127: return "backspace"
+        case 97...122: return String(Character(UnicodeScalar(cp)!))          // a-z
+        case 65...90: return String(Character(UnicodeScalar(cp + 32)!))      // A-Z → lowercase
+        default: return nil
+        }
     }
 
     /// Turn an xterm modifier code (2…16) into a canonical prefix ("ctrl-", "alt-", "shift-", "meta-"

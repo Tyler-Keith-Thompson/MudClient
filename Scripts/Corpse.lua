@@ -69,8 +69,8 @@ local function save_corpse_harvest()
     local p = {}; for k in pairs(t) do p[#p + 1] = string.format("[%q]=true", k) end
     return table.concat(p, ",")
   end
-  persist.write(CORPSE_HARVEST_FILE, string.format("return {no_teeth={%s},no_spellcomps={%s}}",
-    set_parts(_CORPSE_HARVEST.no_teeth), set_parts(_CORPSE_HARVEST.no_spellcomps)))
+  persist.write(CORPSE_HARVEST_FILE, string.format("return {no_teeth={%s},no_spellcomps={%s},no_bsac={%s}}",
+    set_parts(_CORPSE_HARVEST.no_teeth), set_parts(_CORPSE_HARVEST.no_spellcomps), set_parts(_CORPSE_HARVEST.no_bsac)))
 end
 local corpse_save_timer
 local function schedule_corpse_save()   -- debounce a burst of learns into one write (like the winners file)
@@ -78,18 +78,25 @@ local function schedule_corpse_save()   -- debounce a burst of learns into one w
   corpse_save_timer = after and after(2, save_corpse_harvest) or nil
 end
 if not _CORPSE_HARVEST then             -- load ONCE per session (a live reload keeps the in-memory table)
-  _CORPSE_HARVEST = { no_teeth = {}, no_spellcomps = {} }
+  _CORPSE_HARVEST = { no_teeth = {}, no_spellcomps = {}, no_bsac = {} }
   local t = persist.load(CORPSE_HARVEST_FILE)
   if type(t) == "table" then
     if type(t.no_teeth) == "table" then for k in pairs(t.no_teeth) do _CORPSE_HARVEST.no_teeth[k] = true end end
     if type(t.no_spellcomps) == "table" then for k in pairs(t.no_spellcomps) do _CORPSE_HARVEST.no_spellcomps[k] = true end end
+    if type(t.no_bsac) == "table" then for k in pairs(t.no_bsac) do _CORPSE_HARVEST.no_bsac[k] = true end end
   end
 end
+_CORPSE_HARVEST.no_bsac = _CORPSE_HARVEST.no_bsac or {}   -- belt: a live reload from an older in-memory table
 local function learn_no_teeth(key)
   if key and not _CORPSE_HARVEST.no_teeth[key] then _CORPSE_HARVEST.no_teeth[key] = true; schedule_corpse_save() end
 end
 local function learn_no_spellcomps(key)
   if key and not _CORPSE_HARVEST.no_spellcomps[key] then _CORPSE_HARVEST.no_spellcomps[key] = true; schedule_corpse_save() end
+end
+-- A KIND whose corpses can't be blood-sacrificed — "You can only blood sacrifice fresh, intact corpses of
+-- known provenance." (raised/summoned/aged corpses). Learned so the next one skips the wasted bsac.
+local function learn_no_bsac(key)
+  if key and not _CORPSE_HARVEST.no_bsac[key] then _CORPSE_HARVEST.no_bsac[key] = true; schedule_corpse_save() end
 end
 
 -- The corpse-automation state. `on` = armed; `active` = a loot pass is currently running; the batch inputs
@@ -122,6 +129,7 @@ if _AA_TEST then
   _AA_TEST.corpse_kind_key = corpse_kind_key
   _AA_TEST.learn_no_teeth = learn_no_teeth          -- what the barren-line triggers call
   _AA_TEST.learn_no_spellcomps = learn_no_spellcomps
+  _AA_TEST.learn_no_bsac = learn_no_bsac
 end
 local CORPSE_MAX = 20   -- safety cap on how many corpse indices we'll walk (guards a missed terminator)
 -- Stall watchdog. Pacing stays STREAM-DRIVEN (each step awaits a real game line); this is only a
@@ -206,6 +214,11 @@ local function skip_spellcomps()
   local key = corpse_kind_key(corpse.cur_name) or batch_kind()
   return (key and _CORPSE_HARVEST.no_spellcomps[key]) and true or false
 end
+-- A known un-bsac-able kind → don't even send the `bsac` (it'd just be rejected). Keyed like spellcomps.
+local function skip_bsac()
+  local key = corpse_kind_key(corpse.cur_name) or batch_kind()
+  return (key and _CORPSE_HARVEST.no_bsac[key]) and true or false
+end
 
 local process   -- fwd (recursive)
 
@@ -232,8 +245,8 @@ end
 local function bsac_then_sac(idx)
   if not corpse.active then return end
   local empty = corpse_is_empty()                 -- decided BEFORE bsac (cur_name won't change now)
-  send("bsac " .. idx .. ".corpse")               -- blood is safe to take from ANY corpse
-  return await_event(bsacReplyS):andThen(function()
+  -- The sac decision, after the bsac (or after skipping it): empty → remove (await the god), else leave intact.
+  local function after_bsac()
     if not corpse.active then return end
     if not empty then return process(idx + 1) end          -- held items → drained but NOT removed → next
     send("sac " .. idx .. ".corpse")                       -- empty → remove — but WAIT for the god's reply
@@ -243,7 +256,12 @@ local function bsac_then_sac(idx)
       if corpse.remaining then corpse.remaining = corpse.remaining - 1 end   -- confirmed gone → one fewer
       return process(idx)                                   -- next corpse shifted into THIS index
     end)
-  end)
+  end
+  -- A learned un-bsac-able kind (raised/summoned/aged): skip the wasted `bsac` and go straight to the sac
+  -- decision. Otherwise blood-sacrifice it (safe on ANY bsac-able corpse) and await the reply.
+  if skip_bsac() then return after_bsac() end
+  send("bsac " .. idx .. ".corpse")
+  return await_event(bsacReplyS):andThen(after_bsac)
 end
 
 -- Harvest + dispose the corpse at `idx`, then move on. Returns a promise for the REST of the pass.
@@ -383,7 +401,13 @@ trigger([[^You .+ tie off the ends]], corpse_spell_yield)
 
 -- Blood-sacrifice result (success OR the undead/"not intact" refusal) -> drives the sac decision.
 trigger([[^You sacrifice blood from]], corpse_sac)
-trigger([[^You can only blood sacrifice]], corpse_sac)
+-- Un-bsac-able corpse ("You can only blood sacrifice fresh, intact corpses of known provenance."): resolve
+-- the in-flight bsac await (so the flow continues to the sac decision) AND learn the kind so we skip the
+-- wasted bsac on the next one.
+trigger([[^You can only blood sacrifice]], function()
+  if corpse.active then learn_no_bsac(corpse_kind_key(corpse.cur_name) or batch_kind()) end
+  corpse_sac()
+end)
 
 -- The `sac` result. The god's acceptance comes in a few shapes — a god/pantheon "appreciates your
 -- sacrifice of <…>" or a "You receive N gold coins for your sacrifice of <…>" — all meaning the corpse is
