@@ -41,8 +41,9 @@ local cfg = {
   keep_pale       = 2,    -- ...but never merge pale below this many on hand (a working stash)
   inv_wait        = 0.6,  -- seconds after sending `inv` before we read the repopulated state.inventory
   recast_wait     = 0.4,  -- seconds to wait before re-sending the SAME cast after a fizzle (anti-spam)
-  gather_wait     = 1.0,  -- backstop: quiet time after a container `get` with no reply before moving on
+  gather_wait     = 1.0,  -- backstop: quiet time after a container `get`/`put` with no reply before moving on
   max_no_progress = 3,    -- bail after this many re-inventories that DON'T reduce the soulstone count
+  stow            = true, -- after each forge pass, PUT the soulstones back into the source container
 }
 
 -- Idle seconds with no progress before the watchdog force-settles the op (so a widget row can't leak if a
@@ -292,7 +293,7 @@ local function sf_touch()
   end) end
 end
 
-local plan_and_cast, start_gather   -- fwd
+local plan_and_cast, start_gather, forge_done   -- fwd
 
 -- Read the freshly-repopulated inventory INTO the model, then plan. Used only for the INITIAL read and a
 -- desync resync — NOT after every forge (the model is maintained in memory from forge-result feedback).
@@ -300,6 +301,8 @@ local function resync_and_plan()
   local op = sf_op; if not op then return end
   op.inv_timer = nil
   op.model = parse_soulstones(state.inventory)
+  -- A recycle after a stow: re-look the containers and run another pull/forge/stow pass on what's left.
+  if op.recycle then op.recycle = false; return start_gather() end
   -- FIRST read of the run: before forging, sweep any carried containers and pull their soulstones into
   -- inventory (the good stash is usually in a pocket dimension / sack). start_gather re-inventories when
   -- it's done, which re-enters here with op.gathered set, and we fall through to forging.
@@ -323,26 +326,12 @@ plan_and_cast = function()
   local op = sf_op; if not op then return end
   local model = op.model or {}
 
-  -- Fewer than two on hand: nothing more to merge. Two very different endings, though — if we already
-  -- forged this run, we're DONE (we walked the pile down to its last stone); if we never forged, the bag
-  -- is genuinely thin (we already swept carried containers in the gather phase).
-  if #model < 2 then
-    if op.forged then
-      say(string.format("done — %d soulstone(s) on hand.", #model))
-    else
-      say("fewer than two soulstones to merge (checked your inventory and carried containers).")
-    end
-    sf_settle(true); return
-  end
-
+  -- Nothing more to merge on hand (either <2 stones, or none of them pair up under the policy). This forge
+  -- PASS is done — hand off to forge_done, which stows the results back into the container and, if this
+  -- pass forged anything, runs another pull/forge/stow cycle until the stash is fully worked.
+  if #model < 2 then return forge_done() end
   local pair = plan_next_forge(model)
-  if not pair then
-    -- Nothing worth merging: we're done. Report where we ended up.
-    local target = TIER_LABEL[target_tier(model) == TIER.deep and "deep" or "pale"]
-    say(string.format("done — forged up to %s; %d soulstone(s) on hand (%d pale, %d deep).",
-        target, #model, count_color(model, "pale"), count_color(model, "deep")))
-    sf_settle(true); return
-  end
+  if not pair then return forge_done() end
 
   op.pair = pair
   op.cmd = forge_cmd(pair)
@@ -365,14 +354,15 @@ end
 -- items." ends the pull early (forging frees slots).
 local gather_look, gather_look_done, done_looking, gather_pull, gather_pull_advance, finish_gather
 
--- Arm the quiet-time backstop for the current step: if the game draws no recognised reply within
--- gather_wait, run `cb` (advance) so we never hang waiting on a line that isn't coming.
+-- Arm the quiet-time backstop for the current step (look / pull / stow): if the game draws no recognised
+-- reply within gather_wait, run `cb` (advance) so we never hang waiting on a line that isn't coming. The
+-- callback is step-appropriate, so no phase check is needed beyond "the op is still alive."
 local function arm_gather_backstop(cb)
   local op = sf_op; if not op then return end
   if op.gather_timer and cancel then cancel(op.gather_timer) end
   op.gather_timer = after and after(cfg.gather_wait, function()
     op.gather_timer = nil
-    if sf_op == op and op.phase == "gather" then cb() end
+    if sf_op == op then cb() end
   end) or nil
 end
 
@@ -476,11 +466,74 @@ end
 -- forging the carried stones.
 start_gather = function()
   local op = sf_op; if not op then return end
-  op.containers = carried_containers(state.inventory)
+  op.phase, op.containers = "gather", carried_containers(state.inventory)
   op.cont_idx, op.pulled, op.container_stones, op.gphase = 1, 0, {}, "look"
+  op.forged_this_cycle = 0                 -- fresh pass: did THIS look/pull/forge/stow cycle make progress?
+  op.stow_kw = op.containers[1]            -- where finished stones go back (the first carried container)
   if #op.containers == 0 then op.gathered, op.phase = true, "forge"; return plan_and_cast() end
   say(string.format("looking in %d carried container(s) for soulstones…", #op.containers))
   gather_look()
+end
+
+-- ---- stow phase: put the forged soulstones back into the source container -------------------------
+-- After a forge PASS finishes we put the soulstones back into the container we pulled from — so the stash
+-- lives in the container, not your pack, AND it frees slots to pull the next batch. If the pass actually
+-- forged something, we loop (re-look → pull → forge → stow) until the container has nothing left worth
+-- forging. `put soulstone <kw>` is response-driven: a "You put a X soulstone in Y." puts the next; a
+-- "not carrying" reply / a quiet gap ends it.
+local next_cycle, stow_next
+
+-- Final report at the very end of the run (once, at settle).
+local function report_done()
+  local op = sf_op; if not op then return end
+  local back = (op.stowed_total and op.stowed_total > 0 and op.stow_kw)
+    and string.format(" — put %d back in %s", op.stowed_total, op.stow_kw) or ""
+  if (op.forged_total or 0) > 0 then
+    say(string.format("done — forged %d time(s)%s.", op.forged_total, back))
+  elseif back ~= "" then
+    say("done" .. back .. " (nothing needed forging).")
+  else
+    say("nothing to forge (checked your inventory and carried containers).")
+  end
+end
+
+local function stow_done()
+  local op = sf_op; if not op then return end
+  if op.gather_timer and cancel then cancel(op.gather_timer); op.gather_timer = nil end
+  next_cycle()
+end
+
+stow_next = function()
+  local op = sf_op; if not op or not op.stow_kw then return stow_done() end
+  sf_touch()
+  sf_send("put soulstone " .. op.stow_kw)
+  arm_gather_backstop(stow_done)   -- quiet gap = nothing left to put
+end
+
+local function begin_stow()
+  local op = sf_op; if not op then return end
+  op.phase = "stow"
+  stow_next()
+end
+
+-- A forge pass finished. If stowing is on and there's a container + carried stones, put them back; then
+-- next_cycle decides whether to run another pass. Otherwise report and settle.
+forge_done = function()
+  local op = sf_op; if not op then return end
+  if cfg.stow and op.stow_kw and #(op.model or {}) > 0 then return begin_stow() end
+  report_done(); sf_settle(true)
+end
+
+-- After stowing: if THIS pass forged anything, the container may still hold stones worth forging — recycle
+-- (re-inventory → re-look → pull → forge → stow). If it forged nothing, we've converged; settle.
+next_cycle = function()
+  local op = sf_op; if not op then return end
+  if (op.forged_this_cycle or 0) > 0 then
+    op.recycle = true
+    kick_inventory()   -- re-read carried (now emptied by the stow), then re-look the containers
+  else
+    report_done(); sf_settle(true)
+  end
 end
 
 -- Begin an op: supersede any running one, create+track the promise, wire sf_op, arm the watchdog, then
@@ -517,6 +570,8 @@ end
 local function hit_forge_result(result_phrase, base_phrase)
   local op = sf_op; if not op then return end
   op.forged = true       -- we produced at least one stone this run — a later <2 is "done", not "too thin"
+  op.forged_total = (op.forged_total or 0) + 1        -- run total (reporting)
+  op.forged_this_cycle = (op.forged_this_cycle or 0) + 1   -- per-cycle (did this pass make progress?)
   op.no_progress = 0     -- a real forge clears the bad-selection streak
   sf_touch()
   local ok = op.pair and apply_forge(op.model or {}, op.pair.a, op.pair.b,
@@ -606,6 +661,20 @@ local function hit_carry_full()
   finish_gather()
 end
 
+-- STOW sub-phase: a soulstone went back into the container ("You put a X soulstone in Y.") → put the next.
+local function hit_put_ok()
+  local op = sf_op; if not op or op.phase ~= "stow" then return end
+  op.stowed_total = (op.stowed_total or 0) + 1
+  sf_touch()
+  stow_next()
+end
+-- Nothing left to put back ("You aren't carrying …" / "You don't have …") → the stow is finished.
+local function hit_put_empty()
+  local op = sf_op; if not op or op.phase ~= "stow" then return end
+  sf_touch()
+  stow_done()
+end
+
 -- ---- live wire -> handlers ------------------------------------------------------------------------
 -- Trigger REGEXES run in Swift (not unit-tested); each just calls the matching hit_* handler, which the
 -- _SF_TEST seam also calls — one path, no second matcher to drift. All anchored so another player's
@@ -634,6 +703,10 @@ if trigger then
   trigger([[^You get a (.+) soulstone from ]], function() hit_get_ok() end)
   trigger([[^You don't see anything named '.-' in ]], function() hit_get_empty() end)
   trigger([[^You can't carry that many items]], function() hit_carry_full() end)
+  -- GATHER/STOW: a soulstone put back into the container, or nothing left to put. Handlers self-guard on
+  -- op.phase == "stow", so they're inert outside the stow step.
+  trigger([[^You put a (.+) soulstone in ]], function() hit_put_ok() end)
+  trigger([[^You aren't carrying ]], function() hit_put_empty() end)
 end
 
 -- ---- control surface ------------------------------------------------------------------------------
@@ -718,6 +791,8 @@ _SF_TEST = {
   get_ok         = hit_get_ok,           -- gather/pull: a soulstone came out of a container
   get_empty      = hit_get_empty,        -- gather/pull: this colour/container drained → next queued pull
   carry_full     = hit_carry_full,       -- gather: pack full → stop gathering, forge what we have
+  put_ok         = hit_put_ok,           -- stow: a soulstone went back into the container
+  put_empty      = hit_put_empty,        -- stow: nothing left to put → stow done
   active         = function() return sf_op ~= nil end,
   reset          = function()
     if sf_op and sf_op.promise then sf_op.promise.cancel() end   -- settles+clears any lingering op

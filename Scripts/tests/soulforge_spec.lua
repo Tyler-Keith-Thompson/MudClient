@@ -336,6 +336,44 @@ test("gather: a full pack during pulling stops the sweep and forges what we have
   expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
 end)
 
+-- ---- (g) stow: put the forged stones back, and batch through a big stash -------------------------
+test("stow: after a forge pass, PUTS the results back into the source container", function()
+  SF.reset()
+  state.inventory = { "a small sack" }
+  SF.begin(); SF.on_inv()                       -- look in sack
+  SF.look_soulstone("a red soulstone"); SF.look_soulstone("a red soulstone")
+  SF.look_done()                                -- red is raw → pull
+  expect(SF.sent[#SF.sent]):eq("get red soulstone sack")
+  SF.get_ok(); SF.get_ok(); SF.get_empty()      -- pulled 2 reds → re-inv
+  state.inventory = inv("red", "red"); SF.on_inv()
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")
+  SF.forge_result("yellow", "red")              -- red+red→yellow; pass done → STOW the leftover back
+  expect(SF.sent[#SF.sent]):eq("put soulstone sack")
+end)
+
+test("cycle: stow then re-look, batching through the stash; converges when a pass forges nothing", function()
+  SF.reset()
+  state.inventory = { "a small sack" }
+  SF.begin(); SF.on_inv()
+  SF.look_soulstone("a red soulstone"); SF.look_soulstone("a red soulstone"); SF.look_done()
+  SF.get_ok(); SF.get_ok(); SF.get_empty()      -- pulled 2 reds
+  state.inventory = inv("red", "red"); SF.on_inv()
+  SF.forge_result("yellow", "red")              -- forged → stow
+  expect(SF.sent[#SF.sent]):eq("put soulstone sack")
+  SF.put_ok(); SF.put_empty()                   -- stone back; this pass forged → RECYCLE (re-inv)
+  expect(SF.sent[#SF.sent]):eq("inv")
+  state.inventory = { "a small sack" }          -- carried empty now (the yellow lives in the sack)
+  SF.on_inv()                                   -- recycle → re-look
+  expect(SF.sent[#SF.sent]):eq("look in sack")
+  SF.look_soulstone("a yellow soulstone"); SF.look_done()   -- one lone yellow → raw → pull
+  expect(SF.sent[#SF.sent]):eq("get yellow soulstone sack")
+  SF.get_ok(); SF.get_empty()
+  state.inventory = inv("yellow"); SF.on_inv()  -- 1 stone, can't pair → pass done → stow
+  expect(SF.sent[#SF.sent]):eq("put soulstone sack")
+  SF.put_ok(); SF.put_empty()                   -- yellow back; this pass forged NOTHING → settle
+  expect(SF.active()):eq(false)                 -- converged, not looping forever
+end)
+
 -- ---- (e) safety: bounded no-progress -------------------------------------------------------------
 test("bails after max_no_progress consecutive rejected selections (no forge in between)", function()
   SF.reset()
