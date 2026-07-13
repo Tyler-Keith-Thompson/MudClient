@@ -252,6 +252,49 @@ local function remember_winner(name, spell)
   end
 end
 
+-- ---- learned "unstealable" targets (per target NAME) ---------------------------------------------
+-- Some creatures can NEVER be soul-stolen: undead, constructs, and already-dead bodies have no soul, so
+-- the game rejects the cast with "You can only soulsteal from living things." Casting soulsteal at one is
+-- a wasted round EVERY fight against that type. Once we learn a name is soulless we persist it (a bare
+-- name→true set, keyed by the same normalized winner_key as the winners table) and SKIP the soulsteal
+-- stage entirely for that name forever after — just nuke it down. Survives a relaunch and a live reload
+-- (kept on _AUTOFIGHT) exactly like the winners memory.
+local UNSTEALABLE_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/autofight_unstealable.lua"
+local function save_unstealable()
+  local parts = {}
+  for name in pairs(_AUTOFIGHT.unstealable) do parts[#parts + 1] = string.format("[%q]=true", name) end
+  persist.write(UNSTEALABLE_FILE, "return {" .. table.concat(parts, ",") .. "}")
+end
+-- Debounce writes: coalesce a burst into one save 2s after the last (same trick as the winners file).
+local unstealable_save_timer
+local function schedule_unstealable_save()
+  if cancel and unstealable_save_timer then cancel(unstealable_save_timer) end
+  unstealable_save_timer = after and after(2, save_unstealable) or nil
+end
+-- Load ONCE per session (not on a live reload, where _AUTOFIGHT.unstealable already holds the current table).
+if not _AUTOFIGHT.unstealable then
+  _AUTOFIGHT.unstealable = {}
+  local t = persist.load(UNSTEALABLE_FILE)
+  if type(t) == "table" then for name, v in pairs(t) do if v then _AUTOFIGHT.unstealable[name] = true end end end
+end
+
+-- Do we already know this target's name has no soul (skip soulsteal outright)?
+local function is_unstealable(name)
+  local key = winner_key(name)
+  return (key and _AUTOFIGHT.unstealable[key]) or false
+end
+
+-- Record (and persist) that a target NAME can't be soul-stolen. Only writes on a real change.
+local function remember_unstealable(name)
+  local key = winner_key(name)
+  if not key then return end
+  if not _AUTOFIGHT.unstealable[key] then
+    _AUTOFIGHT.unstealable[key] = true
+    schedule_unstealable_save()
+    say(string.format("learned: %s has no soul — won't try to soulsteal it again", key))
+  end
+end
+
 -- Per-fight state, as DECLARED DEFAULTS instead of a wall of inline assignments in start_fight. Each key
 -- is reset to its value at the start of every fight; a factory function value yields a FRESH table (never
 -- a shared one), and the NIL sentinel means "clear to nil" (pairs() skips real nil values, so a plain
@@ -585,10 +628,11 @@ local function fightLoop(winner)
         return step()
       end)
     end
-    -- finish range → soulsteal, UNLESS a dormant steal is latched or a post-resist re-nuke is owed.
-    -- The near-death LATCH (F.finish_ready) is authoritative alongside the numeric pct gate.
+    -- finish range → soulsteal, UNLESS a dormant steal is latched or a post-resist re-nuke is owed, or the
+    -- target is KNOWN soulless (persisted from a prior "can only soulsteal from living things" — never cast
+    -- it at this name again). The near-death LATCH (F.finish_ready) is authoritative alongside the pct gate.
     if winner and (F.finish_ready or (F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct))
-       and not F.soul_latched and not F.renuke_pending then
+       and not F.soul_latched and not F.renuke_pending and not F.known_unstealable then
       F.phase = "soulsteal"
       return soulstealStep():andThen(function(r)
         if r == "pulled"  then return resolved() end            -- soul taken → stop; DEAD ends the fight
@@ -681,6 +725,10 @@ local function start_fight(pct, name)
     F.winner, F.winner_spell = cfg[F.known_winner .. "_cmd"], F.known_winner
     say(string.format("%s known → %s (skipping probe)", key, F.known_winner))
   end
+  -- Known soulless (undead/construct/dead body)? Never enter the soulsteal stage this fight — just nuke it
+  -- down. Set BEFORE reset_fight_state (which doesn't touch this key), fresh per engagement.
+  F.known_unstealable = is_unstealable(name)
+  if F.known_unstealable then say(string.format("%s has no soul → skipping soulsteal, nuking it down", key)) end
   reset_fight_state()                                                  -- declared defaults (see FIGHT_RESET)
   F.engaging, F.engage_busy = false, false
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
@@ -868,6 +916,8 @@ local function hit_soul_unstealable()
   -- then behave exactly like a dormant latch: F.soul_latched stops us re-casting soulsteal and the loop
   -- keeps nuking the winner until it dies normally. A visible note so it never just looks stuck.
   say("target can't be soul-stolen (not living) — nuking it down instead")
+  remember_unstealable(F.name)   -- persist: future fights vs this name skip the soulsteal stage entirely
+  F.known_unstealable = true     -- ...and don't re-cast for the rest of THIS fight (belt with soul_latched)
   if soulLatchS then soulLatchS:onNext() end   -- same "latched" outcome → keep nuking, don't re-steal
 end
 
@@ -1217,6 +1267,38 @@ doc(autofight.forget, { name = "autofight.forget", sig = "autofight.forget([name
   text = "Forget a learned winner so it re-probes next time: pass a target name to drop just that one, "
       .. "or call with no argument to clear the whole memory. Persists the change." })
 
+-- unstealable([name]) — the persisted "no soul, never soulsteal" memory (undead/constructs/dead bodies
+-- the game rejected with "You can only soulsteal from living things"). No arg LISTS it; a name FORGETS that
+-- entry (it'll try soulsteal again, re-learning if still rejected); 'all'/'clear' wipes the whole memory.
+function autofight.unstealable(name)
+  if name == nil then
+    if not echo then return end
+    local keys = {}
+    for k in pairs(_AUTOFIGHT.unstealable) do keys[#keys + 1] = k end
+    table.sort(keys)
+    if #keys == 0 then echo("[autofight] no known soulless targets yet"); return end
+    echo(string.format("[autofight] soulless targets (%d) — soulsteal is skipped for these:", #keys))
+    for _, k in ipairs(keys) do echo("  " .. k) end
+    return
+  end
+  local arg = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if arg == "all" or arg == "clear" then
+    _AUTOFIGHT.unstealable = {}; schedule_unstealable_save(); say("forgot ALL soulless targets"); return
+  end
+  local key = winner_key(name)
+  if key and _AUTOFIGHT.unstealable[key] then
+    _AUTOFIGHT.unstealable[key] = nil; schedule_unstealable_save()
+    say("forgot soulless '" .. key .. "' — will try soulsteal again")
+  else
+    say("'" .. (key or arg) .. "' isn't marked soulless")
+  end
+end
+doc(autofight.unstealable, { name = "autofight.unstealable", sig = "autofight.unstealable([name])",
+  group = "combat", text = "The persisted 'no soul — never soulsteal' memory: targets the game rejected "
+      .. "with \"You can only soulsteal from living things\" (undead, constructs, dead bodies). The routine "
+      .. "skips the soulsteal stage for these and just nukes them down. No arg lists them; a target name "
+      .. "forgets that one (it'll try soulsteal again); 'all' clears the whole memory. Persists." })
+
 -- winner(name[, spell]) — manually SET (override) the learned attack for a target NAME. Use it when the
 -- probe mislearned: it picked the element the enemy RESISTS, or — worse — one that HEALS it (a cold mob
 -- healed by icebolt, a fire one by scorch). `spell` is one of PROBE_SPELLS ('icebolt' cold / 'scorch' fire
@@ -1367,6 +1449,8 @@ _AF_TEST = {
   winner_key    = winner_key,
   winners       = function() return _AUTOFIGHT.winners end,
   remember      = remember_winner,
+  unstealable   = function() return _AUTOFIGHT.unstealable end,
+  is_unstealable = is_unstealable,
   expire_resume = function()
     if F.suspend_timer and cancel then cancel(F.suspend_timer) end
     F.suspend_timer, F.suspended = nil, false
@@ -1384,6 +1468,7 @@ _AF_TEST = {
     F.room_burst_timer = nil
     clear_sent()
     _AUTOFIGHT.winners = {}   -- hermetic tests: no learned winners bleeding across cases
+    _AUTOFIGHT.unstealable = {}   -- ...nor learned soulless targets
   end,
 }
 

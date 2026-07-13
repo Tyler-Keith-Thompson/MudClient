@@ -64,3 +64,30 @@ test("a repeated same-track channel_play re-issues music.play (no dedupe)", func
   expect(#rec.plays):eq(2)                                   -- both fire; the second is NOT suppressed
   expect(rec.plays[2].path):eq(T.SOUNDPACK .. "soundtrack/boss.ogg")
 end)
+
+-- ---- kxwt_midi live performances (Audio.lua midi_event router) -----------------------------------
+-- The trigger REGEX runs in Swift, so we drive the plain router midi_event() the trigger body calls and
+-- assert the OBSERVABLE output: the raw hex-byte payload handed to music.midi (Swift parses + synthesises
+-- it). The router forwards the payload verbatim — MIDI byte interpretation is the synth's job, not Lua's.
+local function capture_midi(fn)
+  local rec, orig = {}, music.midi
+  music.midi = function(payload) rec[#rec + 1] = payload end
+  local ok, err = pcall(fn, rec)
+  music.midi = orig
+  if not ok then error(err, 2) end
+  return rec
+end
+
+test("midi_event forwards the raw MIDI-byte payload verbatim to music.midi", function()
+  local rec = capture_midi(function()
+    T.midi_event("C0 49")        -- Program Change (Flute)
+    T.midi_event("90 4d 32")     -- Note On
+    T.midi_event("80 4d 00")     -- Note Off
+    T.midi_event("B0 7B 00")     -- All Notes Off
+  end)
+  expect(#rec):eq(4)
+  expect(rec[1]):eq("C0 49")
+  expect(rec[2]):eq("90 4d 32")
+  expect(rec[3]):eq("80 4d 00")
+  expect(rec[4]):eq("B0 7B 00")   -- forwarded byte-for-byte; no parsing/dedupe in the Lua layer
+end)

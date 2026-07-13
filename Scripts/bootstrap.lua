@@ -573,6 +573,11 @@ if music then
     text = "Stop playback on a channel." })
   doc(music.volume, { name = "music.volume", sig = "music.volume(pct)", group = "music",
     text = "Set master volume from a 0-100 percentage." })
+  doc(music.midi, { name = "music.midi", sig = "music.midi(hexbytes)", group = "music",
+    text = "Feed ONE live MIDI message (space-separated hex bytes, e.g. \"90 4d 32\") to the real-time "
+        .. "synth — for AlterAeon's kxwt_midi performance stream. Played as it arrives (no timing)." })
+  doc(music.midi_reset, { name = "music.midi_reset", sig = "music.midi_reset()", group = "music",
+    text = "All-Notes-Off panic on the live MIDI synth so a held note can't hang (e.g. on disconnect)." })
 end
 
 -- Per-category audio masters (see the `volume` command in AlterAeon.lua, which drives these).

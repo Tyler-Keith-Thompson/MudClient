@@ -1286,16 +1286,20 @@ alias([[^recover minions off$]], function()
   else echo("Not recovering.") end
 end)
 
--- `recover hp|health|mana|mp|stamina|sp|...` — recover just ONE vital (ignores the others, no minion
--- casts). More specific than `^recover$`, so it wins the alias match. `recover off` still stops it.
-alias([[^recover (hp|health|hitpoints|mana|mp|stamina|stam|sta|sp)$]], function(_, word)
+-- `recover hp|health|mana|mp|stamina|sp|... [pct]` — recover just ONE vital (ignores the others, no minion
+-- casts). An optional trailing integer sets the target percent, so `recover mana 100` sleeps until mana is
+-- at 100% without waiting on the other vitals (no arg keeps the 90% default). More specific than `^recover$`,
+-- so it wins the alias match. `recover off` still stops it.
+alias([[^recover (hp|health|hitpoints|mana|mp|stamina|stam|sta|sp)(?: +(\d+))?$]], function(_, word, pct)
   local key = STAT_ALIASES[word:lower()]
+  local n = tonumber(pct)
+  local frac = n and ((n > 1) and (n / 100) or n) or nil   -- 100 -> 1.0, matching recover_stat's normalization
   if state.recover then
     echo("Already recovering — 'recover off' to stop.")
-  elseif one_stat_ready(key) then
-    echo(string.format("Already recovered — %s at 90%%+.", STAT_LABEL[key]))
+  elseif one_stat_ready(key, frac) then
+    echo(string.format("Already recovered — %s at %s.", STAT_LABEL[key], n and (math.min(n, 100) .. "%") or "90%+"))
   else
-    recover_stat(word)   -- promise-backed, so it shows in the widget as "recover HP/mana/stamina"
+    recover_stat(word, n)   -- promise-backed; recover_stat normalizes 95/0.95 -> fraction and clamps to 100%
   end
 end)
 

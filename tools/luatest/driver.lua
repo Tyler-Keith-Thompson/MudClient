@@ -17,7 +17,7 @@ end
 for _, n in ipairs({
   "trigger", "alias", "gag", "send",
   "rule_remove", "rule_enable", "class_enable", "class_remove",
-  "music_play", "music_stop", "music_volume", "msp_volume", "speech_volume",
+  "music_play", "music_stop", "music_volume", "music_midi", "music_midi_reset", "msp_volume", "speech_volume",
   "panel_render", "panel_top", "panel_height", "panel_top_height",
   "ai_request", "ai_local_request", "ai_local_tools_request", "ai_set_local_endpoint", "ai_set_local_model",
   "ai_memory_request", "ai_retrieve", "ai_rag_load",
@@ -72,7 +72,8 @@ stub("cancel", function(id) if id ~= nil then _timers[id] = nil end end)
 -- Tables the Swift side normally assembles from the registered functions.
 panel = { render = panel_render, top = panel_top,
           height = panel_height, top_height = panel_top_height }
-music = { play = music_play, stop = music_stop, volume = music_volume }
+music = { play = music_play, stop = music_stop, volume = music_volume,
+          midi = music_midi, midi_reset = music_midi_reset }
 
 -- Load the SAME host bootstrap the engine loads (doc/help registry, the __repl_* pretty-printer, and
 -- the legacy command() bridge), so the doc/help and command-bridge specs exercise the real code. Must
@@ -90,8 +91,8 @@ end
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Audio.lua",
                      "Scripts/AutoFight.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
                      "Scripts/Corpse.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
-                     "Scripts/Promise.lua", "Scripts/Recovery.lua", "Scripts/Speech.lua",
-                     "Scripts/Trivia.lua" }) do
+                     "Scripts/Promise.lua", "Scripts/Recovery.lua", "Scripts/Soulforge.lua",
+                     "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end

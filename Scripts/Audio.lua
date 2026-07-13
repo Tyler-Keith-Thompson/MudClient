@@ -29,6 +29,22 @@ end
 trigger([[^kxwt_music channel_play (\S+) (\S+)]], function(_, ch, tr) music_channel_play(ch, tr) end)
 trigger([[^kxwt_music channel_stop (\S+)]], function(_, ch) music_channel_stop(ch) end)
 
+-- Live MIDI performances (kxwt_midi) — a bard/flute playing in REAL TIME, streamed as raw MIDI events
+-- (unlike kxwt_music, which just names a pre-authored soundtrack file to loop). Each line is ONE MIDI
+-- channel-voice message as space-separated hex bytes ("90 4d 32" = Note On). We strip the kxwt framing
+-- and hand the raw MIDI payload to the live synth (music.midi), which plays it as it arrives — there are
+-- no timing bytes, events sound the moment they land. `set midi on` server-side turns the stream on.
+-- See docs/protocol/kxwt-midi.md. The `if music` guard tolerates an un-relaunched binary lacking it.
+local function midi_event(payload)
+  if music and music.midi then music.midi(payload) end
+end
+trigger([[^kxwt_midi (.+)]], function(_, payload) midi_event(payload) end)
+
+-- Flush any held notes when the connection drops so a performance can't hang a note past the socket.
+if on_disconnect == nil then
+  function on_disconnect() if music and music.midi_reset then music.midi_reset() end end
+end
+
 -- Audio volume: a MASTER plus three categories — music (layered player), sfx (MSP sound effects), and
 -- voice (TTS). The effective level pushed to each host service = round(master% × category%), so
 -- `volume('0')` zeroes the master → all three effective 0 → full silence, while `volume('voice 0')`
@@ -124,4 +140,5 @@ _AA_TEST.volume_command = volume_command
 _AA_TEST.VOLUME_DEFAULTS = VOLUME_DEFAULTS
 _AA_TEST.music_channel_play = music_channel_play
 _AA_TEST.music_channel_stop = music_channel_stop
+_AA_TEST.midi_event = midi_event
 _AA_TEST.SOUNDPACK = SOUNDPACK

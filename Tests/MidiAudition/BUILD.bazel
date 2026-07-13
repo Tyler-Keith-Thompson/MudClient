@@ -1,0 +1,23 @@
+load("@rules_swift//swift:swift.bzl", "swift_test")
+
+# MANUAL audio audition — plays the captured kxwt_midi flute performance through the real LiveMidiService
+# so you can HEAR it before rebuilding the app. Kept OUT of the normal suite on purpose:
+#   * tags = ["manual"]  → excluded from `bazel test //...` (no audio/sleeps in CI; run it by label),
+#   * tags = ["no-cache"] + local = True → always REPLAYS (never a cached PASS) and runs UNSANDBOXED so
+#     it can reach CoreAudio's default output device.
+# Run:  bazel test //Tests/MidiAudition:MidiAudition --config=debug --test_output=streamed
+# NOTE: keep --config=debug — it matches `just build`/`just run`, so auditioning shares their Bazel
+# analysis cache. Running WITHOUT it (Bazel's default config) makes the NEXT `just run` re-analyze the
+# whole graph, which shows up as a slow launch.
+swift_test(
+    name = "MidiAudition",
+    size = "small",
+    srcs = ["MidiAuditionTests.swift"],
+    local = True,
+    tags = ["manual", "no-cache"],
+    deps = [
+        "//Sources/MudClient:MudClientLib",
+        "@swiftpkg_dependencyinjection//:DependencyInjection",
+        "@swiftpkg_mockable//:Mockable",
+    ],
+)

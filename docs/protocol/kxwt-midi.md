@@ -6,8 +6,17 @@ out-of-band `kxwt_midi` protocol lines carrying **raw MIDI events**. This is sep
 see [[dclient-protocol-decompiled]] and `MusicService.swift`). `kxwt_midi` is the player *performing
 in real time*; there is no track name, just a stream of note events you feed to a synth as they arrive.
 
-**Status: captured, not yet implemented.** We currently gag all `^kxwt_` lines. This note + the capture
-in `captures/` is the reference for adding a MIDI performance player later.
+**Status: implemented** (live synth). `Audio.lua`'s `kxwt_midi` trigger strips the framing and forwards
+the raw MIDI-byte payload to `music.midi(...)`, backed by `LiveMidiService.swift` — an `AVAudioUnitSampler`
+on an `AVAudioEngine` that plays each event the instant it arrives (started lazily on the first event,
+using `MUD_SOUND_FONT` or the macOS system GM set). `music.midi_reset()` (wired to `on_disconnect`) is an
+All-Notes-Off panic so a held note can't hang. The `captures/` sample remains the reference/regression fixture.
+
+Known v1 limits (flag if the sound is off): the sampler is **mono-timbral** — one instrument at a time, so
+the last Program Change wins; simultaneous performers on different programs/channels (the help's "hard limit
+to instruments") would need one sampler per channel. Instrument selection relies on the soundbank exposing
+GM programs; if a performance sounds like the wrong instrument (or silent), that's the soundfont/bank path,
+not the event routing.
 
 ## How it's turned on
 

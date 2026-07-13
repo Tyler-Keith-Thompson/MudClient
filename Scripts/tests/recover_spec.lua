@@ -258,6 +258,14 @@ test("one_stat_ready checks only the named stat", function()
   state = saved
 end)
 
+test("one_stat_ready honors an explicit threshold (the `recover mana 100` early-out)", function()
+  local saved = state
+  state = { hp = 40, maxhp = 100, mana = 95, maxmana = 100, stam = 40, maxstam = 100 }
+  expect(one_stat_ready("mana", 0.90)):truthy()   -- 95% clears a 90% target
+  expect(one_stat_ready("mana", 1.00)):falsy()    -- ...but not a 100% target → recovery still runs
+  state = saved
+end)
+
 test("stat_ready follows recovery.stat (one stat), else falls back to every-vital ready()", function()
   local saved, saved_stat = state, rec.stat
   state = { hp = 40, maxhp = 100, mana = 95, maxmana = 100, stam = 40, maxstam = 100 }

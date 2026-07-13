@@ -519,6 +519,42 @@ test("soulsteal on a NON-LIVING target ('You can only soulsteal from living thin
   expect(souls):eq(1)                       -- exactly the one attempt that got rejected, never again
 end)
 
+test("a soulless target is REMEMBERED: a LATER fight vs the same name never casts soulsteal at all", function()
+  -- FIRST fight: learn it's unstealable (the game rejects the one attempt). Persisted by name.
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()      -- winner lightning
+  AF.lightning(); AF.on_fight(8, ENEMY)    -- ≤15% → the ONE soulsteal attempt
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  AF.soul_unstealable()                     -- rejected → learned + persisted for this name
+  expect(AF.is_unstealable(ENEMY)):eq(true)
+  AF.dead()                                 -- enemy dies → fight ends (persistence survives)
+
+  -- SECOND fight vs the SAME name (no reset — persistence must carry over): it stays in finish range the
+  -- whole time and must NEVER cast soulsteal, just keep nuking the known winner.
+  local before = #seq()
+  AF.on_fight(90, ENEMY); land_opener()     -- fresh engagement
+  for _ = 1, 4 do
+    LAND[AF.sent[#AF.sent] == CMD.lightning and "lightning" or "scorch"]()
+    AF.on_fight(5, ENEMY)                   -- deep in finish range every tick
+    expect(AF.sent[#AF.sent]):eq(CMD.lightning)   -- winner nuke, never "c soulsteal"
+  end
+  local souls = 0
+  for i = before + 1, #AF.sent do if AF.sent[i] == "c soulsteal" then souls = souls + 1 end end
+  expect(souls):eq(0)                       -- not a single soulsteal in the whole second fight
+end)
+
+test("autofight.unstealable('name') forgets a soulless target so it tries soulsteal again", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.scorch()
+  AF.lightning(); AF.on_fight(8, ENEMY)
+  AF.soul_unstealable()
+  expect(AF.is_unstealable(ENEMY)):eq(true)
+  autofight.unstealable(ENEMY)              -- forget it
+  expect(AF.is_unstealable(ENEMY)):eq(false)
+end)
+
 -- ---- dormant shower (kept, not probed) -----------------------------------------------------------
 -- shower is no longer a probe (scorch replaced it) but is kept DORMANT — cfg.shower_cmd + hit_shower()
 -- + its landed trigger stay in the file so a future feature (mana-aware spell switching) doesn't have

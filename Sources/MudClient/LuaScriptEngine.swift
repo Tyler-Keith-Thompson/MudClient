@@ -833,7 +833,24 @@ final class LuaScriptEngine: @unchecked Sendable {
             if let pct = args.first.flatMap(Self.doubleArg) { Container.speechService().setVolume(percent: pct) }
             return []
         }
-        try? lua.run("music = { play = music_play, stop = music_stop, volume = music_volume }")
+        // Live MIDI performances (kxwt_midi) — a real-time synth fed raw MIDI bytes, distinct from the
+        // file-based music.play. Scripts strip the kxwt framing and hand over the hex-byte payload of one
+        // MIDI message ("90 4d 32"); Swift parses + dispatches it to the sampler. See LiveMidiService.
+        lua.register("music_midi") { [weak self] args in
+            guard case .string(let hex)? = args.first else {
+                self?.usage(#"music.midi: expected a hex MIDI-byte string — e.g. music.midi("90 4d 32")"#)
+                return []
+            }
+            Container.liveMidiService().send(Self.midiBytes(hex))
+            return []
+        }
+        // music.midi_reset() — All-Notes-Off panic (performer left / socket dropped) so nothing hangs.
+        lua.register("music_midi_reset") { _ in
+            Container.liveMidiService().reset()
+            return []
+        }
+        try? lua.run("music = { play = music_play, stop = music_stop, volume = music_volume, "
+                     + "midi = music_midi, midi_reset = music_midi_reset }")
     }
 
     /// Terminal/input capabilities (TinTin++-style): key macros, input-line access, scrollback reads,
@@ -1456,6 +1473,11 @@ final class LuaScriptEngine: @unchecked Sendable {
     }
     private static func boolArg(_ v: LuaValue?) -> Bool {
         switch v { case .bool(let b)?: return b; case .int(let i)?: return i != 0; default: return false }
+    }
+    /// Parse a whitespace-separated hex-byte string ("90 4d 32") into MIDI bytes. Non-hex tokens are
+    /// skipped rather than aborting the whole message (a stray token shouldn't drop a note).
+    private static func midiBytes(_ hex: String) -> [UInt8] {
+        hex.split(whereSeparator: { $0 == " " || $0 == "\t" }).compactMap { UInt8($0, radix: 16) }
     }
     /// A count that may arrive as a number OR a string (`#sent 10` legacy-rewrites to `sent("10")`).
     private static func countArg(_ v: LuaValue) -> Int? {
