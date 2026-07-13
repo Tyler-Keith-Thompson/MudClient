@@ -901,12 +901,15 @@ local function hit_soul_latched()
 end
 
 local function hit_soul_nolatch()
-  -- Soulsteal cast, but the soul wouldn't individuate: "Your spell fails to latch on to an individual
-  -- soul!" — a distinct failure from a resist or a fizzle, but the steal DIDN'T land either way. Route it
-  -- through the SAME "resisted" outcome (re-nuke the winner once, then retry the steal). The interleaved
-  -- winner nukes guarantee the enemy still dies even if the soul never individuates, so there's no
-  -- no-damage spin. Soulsteal only runs in combat, so this always feeds the in-flight soulsteal await.
-  if resistS then resistS:onNext() end
+  -- "Your spell fails to latch on to an individual soul!" — this is a TERMINATOR, not a retry: this mob
+  -- simply has no individual soul to steal, so soulsteal can NEVER land on it (same category as "can only
+  -- soulsteal from living things"). Persist it by name and treat it exactly like the unstealable case —
+  -- stop re-casting soulsteal, keep nuking the winner down, and skip the soulsteal stage in future fights
+  -- against this name.
+  say("target has no individual soul to steal — nuking it down instead")
+  remember_unstealable(F.name)   -- persist: future fights vs this name skip the soulsteal stage entirely
+  F.known_unstealable = true     -- ...and don't re-cast for the rest of THIS fight (belt with soul_latched)
+  if soulLatchS then soulLatchS:onNext() end   -- same "latched" outcome → keep nuking, don't re-steal
 end
 
 local function hit_soul_unstealable()

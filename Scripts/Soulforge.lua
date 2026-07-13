@@ -125,10 +125,10 @@ local function is_raw(color, stones)
 end
 
 -- plan_next_forge(stones) -> { a=ord1, b=ord2 } (ord1 < ord2) for the next merge, or nil when nothing's
--- worth merging (fewer than two raw stones). PREFERS a same-colour pair, lowest tier first (clear the
--- junk); only when no raw colour has a pair does it mix the two lowest-tier raw stones (necessarily
--- distinct colours, since no colour has two). Pure — the whole policy lives here, and the flow just casts
--- what it returns.
+-- worth merging (fewer than two raw stones). Always CONSUMES THE LOWEST-TIER raw stone so low junk never
+-- gets stranded: it pairs that stone with a SAME-colour partner when one exists (similar-level merges are
+-- most effective), and otherwise MIXES it with the next-lowest raw stone — so a lone red combines with a
+-- green/pale instead of sitting there while pales pair up around it. Pure — the whole policy lives here.
 local function plan_next_forge(stones)
   local raw = {}
   for _, s in ipairs(stones) do
@@ -136,38 +136,24 @@ local function plan_next_forge(stones)
   end
   if #raw < 2 then return nil end
 
-  -- Bucket the raw stones by colour (each bucket keeps inventory order, so [1]/[2] are the first two
-  -- ordinals of that colour).
-  local by_color = {}
-  for _, s in ipairs(raw) do
-    by_color[s.color] = by_color[s.color] or {}
-    local b = by_color[s.color]
-    b[#b + 1] = s
-  end
-
-  -- Prefer the LOWEST-tier colour that has a pair (>= 2 raw stones): merge its first two ordinals.
-  local best_color, best_tier
-  for color, list in pairs(by_color) do
-    if #list >= 2 then
-      local t = TIER[color]
-      if not best_tier or t < best_tier then best_color, best_tier = color, t end
-    end
-  end
-  if best_color then
-    local list = by_color[best_color]
-    local a, b = list[1].ord, list[2].ord
-    if a > b then a, b = b, a end
-    return { a = a, b = b }
-  end
-
-  -- No colour has a pair: MIX the two lowest-tier raw stones (distinct colours by construction).
-  local sorted = {}
-  for _, s in ipairs(raw) do sorted[#sorted + 1] = s end
-  table.sort(sorted, function(x, y)
+  -- Lowest tier first (ties by inventory order) — that stone is the one we consume this merge.
+  table.sort(raw, function(x, y)
     if TIER[x.color] ~= TIER[y.color] then return TIER[x.color] < TIER[y.color] end
     return x.ord < y.ord
   end)
-  local a, b = sorted[1].ord, sorted[2].ord
+  local lowest = raw[1]
+
+  -- Prefer a SAME-colour partner for the lowest stone (a similar-level merge); scan in tier/ordinal order
+  -- so it takes the nearest same-colour one.
+  local partner
+  for i = 2, #raw do
+    if raw[i].color == lowest.color then partner = raw[i]; break end
+  end
+  -- No same-colour partner → MIX it with the next-lowest raw stone, consuming the low stone rather than
+  -- leaving it stranded (the "different colours when that's all that's left" case, per stone).
+  partner = partner or raw[2]
+
+  local a, b = lowest.ord, partner.ord
   if a > b then a, b = b, a end
   return { a = a, b = b }
 end
@@ -293,7 +279,7 @@ local function sf_touch()
   end) end
 end
 
-local plan_and_cast, start_gather, forge_done   -- fwd
+local plan_and_cast, start_gather, forge_done, done_looking   -- fwd
 
 -- Read the freshly-repopulated inventory INTO the model, then plan. Used only for the INITIAL read and a
 -- desync resync — NOT after every forge (the model is maintained in memory from forge-result feedback).
@@ -301,8 +287,10 @@ local function resync_and_plan()
   local op = sf_op; if not op then return end
   op.inv_timer = nil
   op.model = parse_soulstones(state.inventory)
-  -- A recycle after a stow: re-look the containers and run another pull/forge/stow pass on what's left.
-  if op.recycle then op.recycle = false; return start_gather() end
+  -- A recycle after a stow: run another pull/forge/stow pass from the IN-MEMORY container model — we looked
+  -- in each container ONCE at the start and have tracked its contents through every pull/stow since, so
+  -- there's no need to look again. (op.model is fresh from the re-inv above; the containers live in memory.)
+  if op.recycle then op.recycle, op.forged_this_cycle = false, 0; return done_looking() end
   -- FIRST read of the run: before forging, sweep any carried containers and pull their soulstones into
   -- inventory (the good stash is usually in a pocket dimension / sack). start_gather re-inventories when
   -- it's done, which re-enters here with op.gathered set, and we fall through to forging.
@@ -352,7 +340,7 @@ end
 --         driven (a "You get …" pulls the next of that colour, a "don't see …" moves on). Then forge.
 -- A per-step backstop timer means an unexpected reply never stalls the sweep; "You can't carry that many
 -- items." ends the pull early (forging frees slots).
-local gather_look, gather_look_done, done_looking, gather_pull, gather_pull_advance, finish_gather
+local gather_look, gather_look_done, gather_pull, gather_pull_advance, finish_gather   -- done_looking is fwd-declared above (resync_and_plan uses it on recycle)
 
 -- Arm the quiet-time backstop for the current step (look / pull / stow): if the game draws no recognised
 -- reply within gather_wait, run `cb` (advance) so we never hang waiting on a line that isn't coming. The
@@ -426,7 +414,7 @@ done_looking = function()
     say("nothing in your containers is worth forging — leaving them; forging what you carry.")
     return finish_gather()
   end
-  op.gphase, op.pull_idx = "pull", 1
+  op.gphase, op.pull_idx, op.pulled = "pull", 1, 0   -- per-pass pull count (drives the re-inv in finish_gather)
   gather_pull()
 end
 
@@ -644,6 +632,12 @@ end
 local function hit_get_ok()
   local op = sf_op; if not op or op.phase ~= "gather" or op.gphase ~= "pull" then return end
   op.pulled = (op.pulled or 0) + 1
+  -- Keep the in-memory container model current so later cycles decide without re-looking: one stone of
+  -- this colour just left this container.
+  local item = op.pull_queue[op.pull_idx]
+  if item and op.container_stones[item.kw] and op.container_stones[item.kw][item.color] then
+    op.container_stones[item.kw][item.color] = op.container_stones[item.kw][item.color] - 1
+  end
   sf_touch()
   gather_pull()   -- re-fires the SAME `get` → the next stone of this colour, until the container's empty
 end
@@ -662,9 +656,16 @@ local function hit_carry_full()
 end
 
 -- STOW sub-phase: a soulstone went back into the container ("You put a X soulstone in Y.") → put the next.
-local function hit_put_ok()
+-- The captured colour keeps the in-memory container model current (this colour just went back in), so the
+-- next cycle's decision needs no re-look.
+local function hit_put_ok(color_phrase)
   local op = sf_op; if not op or op.phase ~= "stow" then return end
   op.stowed_total = (op.stowed_total or 0) + 1
+  local color = tier_key(color_phrase)
+  if color and op.stow_kw then
+    op.container_stones[op.stow_kw] = op.container_stones[op.stow_kw] or {}
+    op.container_stones[op.stow_kw][color] = (op.container_stones[op.stow_kw][color] or 0) + 1
+  end
   sf_touch()
   stow_next()
 end
@@ -696,7 +697,8 @@ if trigger then
   trigger([[^You don't have enough mana]], function() hit_mana() end)
   -- GATHER/LOOK: a soulstone line inside a `look in` block ("(  2) a red soulstone" / "a green soulstone").
   -- Anchored to the bare-item form so "You get …" / "You forge …" never match; handler self-guards on
-  -- op.capturing so ordinary inventory soulstone lines don't feed it either.
+  -- op.capturing so ordinary inventory soulstone lines don't feed it either. We look in each container ONCE
+  -- and remember its contents, so there's no repeated dump to hide.
   trigger([[^\s*(?:\(\s*\d+\s*\)\s*)?an? .+ soulstone\.?\s*$]], function(line) hit_look_soulstone(line) end)
   -- GATHER/PULL: a soulstone pulled from a container, an empty/no-match container, or a full pack. The
   -- handlers self-guard on op.phase/op.gphase, so these are inert during the look and forge phases.
@@ -705,7 +707,7 @@ if trigger then
   trigger([[^You can't carry that many items]], function() hit_carry_full() end)
   -- GATHER/STOW: a soulstone put back into the container, or nothing left to put. Handlers self-guard on
   -- op.phase == "stow", so they're inert outside the stow step.
-  trigger([[^You put a (.+) soulstone in ]], function() hit_put_ok() end)
+  trigger([[^You put a (.+) soulstone in ]], function(_, color) hit_put_ok(color) end)
   trigger([[^You aren't carrying ]], function() hit_put_empty() end)
 end
 

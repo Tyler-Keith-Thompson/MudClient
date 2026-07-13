@@ -24,16 +24,19 @@ struct OutboundCommand: Sendable {
 
 final class InputService: @unchecked Sendable {
     private let lock = NSRecursiveLock()
-    private var _lastCommand: String?
-    private var lastCommand: String? {
+    /// The last full LINE the user submitted (already `!`-resolved), for the `!` repeat token. A LINE, not
+    /// the last atomic command: `drop scroll;sac scroll` is remembered whole, so a later `!` repeats BOTH,
+    /// and a `!` pipe stage expands to the whole thing too.
+    private var _lastLine: String?
+    private var lastLine: String? {
         get {
             lock.lock()
             defer { lock.unlock() }
-            return _lastCommand
+            return _lastLine
         } set {
             lock.lock()
             defer { lock.unlock() }
-            _lastCommand = newValue
+            _lastLine = newValue
         }
     }
     private let (stream, continuation) = AsyncThrowingStream<OutboundCommand, any Swift.Error>.makeStream()
@@ -72,32 +75,43 @@ final class InputService: @unchecked Sendable {
     private var subscriptions = Set<AnyCancellable>()
     
     var commandStream: AnyAsyncSequence<OutboundCommand> {
-        stream.map { [weak self] command in
-            guard let self else { return command }
-            if command.text == "!", let lastCommand {
-                return OutboundCommand(text: lastCommand, origin: command.origin)
-            } else if !command.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                self.lastCommand = command.text
-            }
-            return command
-        }
-        .eraseToAnyAsyncSequence()
+        stream.eraseToAnyAsyncSequence()
     }
-    
-    fileprivate init() { }
-    
+
+    init() { }
+
+    /// Expand the `!` "repeat" token to the last full LINE. It fires whether `!` is the WHOLE line or a
+    /// single `|` pipe stage (`drop scroll;sac scroll | !`) — both become `last` (which itself may carry
+    /// `;`/`|`, so all of it re-runs). A line with no standalone `!` stage is returned untouched. With no
+    /// history yet (`last` nil) a bare `!` resolves to empty (the caller drops it). NOTE: only a stage that
+    /// is EXACTLY `!` expands — `!foo` or `foo!` are ordinary text and pass through.
+    static func resolveBang(_ input: String, last: String?) -> String {
+        let stages = pipeSegments(input)
+        func isBang(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespacesAndNewlines) == "!" }
+        guard stages.contains(where: isBang) else { return input }
+        let replacement = last ?? ""
+        return stages.map { isBang($0) ? replacement : $0 }.joined(separator: "|")
+    }
+
     func parse(input: String) throws {
+        // Resolve `!` to the last full line BEFORE any splitting, so `!` repeats the WHOLE thing (all its
+        // `;` commands, all its pipe stages) — a whole-line `!` or a `!` pipe stage alike.
+        let resolved = InputService.resolveBang(input, last: lastLine)
+        // A bare `!` with nothing typed yet resolves to nothing — drop it rather than sending a blank line.
+        guard !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // Remember what actually ran (already `!`-resolved, so a later `!` never chases another `!`).
+        lastLine = resolved
         // `|` (the promise pipe) binds LOOSER than `;` (independent commands): a line with a top-level
         // pipe is ONE unit — the pipe machinery splits it on `|` and then splits each step on `;`, so
         // `a | b; c | d` is `a` then `(b; c)` then `d`. We must NOT pre-split it on `;` here, or that
         // `;` would cut it into `a | b` and `c | d` and break the grouping (the whole bug). Hand the
         // pipe line downstream whole; a pipe-free line splits on `;` as before, each command flowing
         // independently through the rest of the pipeline (aliases, on_send, transmit).
-        if InputService.pipeSegments(input).count > 1 {
-            continuation.yield(OutboundCommand(text: input, origin: .user))
+        if InputService.pipeSegments(resolved).count > 1 {
+            continuation.yield(OutboundCommand(text: resolved, origin: .user))
             return
         }
-        for command in InputService.semicolonSegments(input) {
+        for command in InputService.semicolonSegments(resolved) {
             continuation.yield(OutboundCommand(text: command, origin: .user))
         }
     }

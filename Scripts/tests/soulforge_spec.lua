@@ -118,10 +118,18 @@ test("two same-colour stones plan the 1st and 2nd ordinals → c soulforge 1.sou
   expect(SF.forge_cmd(pair)):eq("c soulforge 1.soulstone 2.soulstone")
 end)
 
-test("prefers a same-colour pair over the lower tier when the lower tier has no pair", function()
-  -- red is lower tier than green, but there's only ONE red — the green PAIR is merged (ords 2,3).
+test("a lone LOW stone is consumed (mixed up), not stranded while others pair", function()
+  -- Only ONE red, plus a green pair. The red has no same-colour partner, so it's MIXED with a green
+  -- (ords 1,2) — we don't leave the red sitting there and forge the greens instead.
   local pair = SF.plan_next_forge(SF.parse_soulstones(inv("red", "green", "green")))
-  expect(pair.a):eq(2); expect(pair.b):eq(3)
+  expect(pair.a):eq(1); expect(pair.b):eq(2)
+end)
+
+test("a same-colour partner for the lowest stone is preferred over mixing", function()
+  -- Two reds AND two greens: the lowest stone (red) has a same-colour partner → merge the red pair (1,2),
+  -- not a red+green mix.
+  local pair = SF.plan_next_forge(SF.parse_soulstones(inv("red", "red", "green", "green")))
+  expect(pair.a):eq(1); expect(pair.b):eq(2)
 end)
 
 test("among colours that BOTH have a pair, the lowest tier goes first", function()
@@ -186,11 +194,13 @@ end)
 
 test("the model climbs colours from forge FEEDBACK alone — exactly ONE inv for the whole run", function()
   begin_with(inv("red", "red", "green", "green"))
-  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- red pair (lowest with a pair)
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- lowest pair: the two reds
   SF.forge_result("yellow", "red")           -- red+red → yellow; model = [yellow, green, green]
-  expect(SF.sent[#SF.sent]):eq("c soulforge 2.soulstone 3.soulstone")   -- the green PAIR at ords 2,3
-  SF.forge_result("pale", "green")           -- green+green → pale; model = [yellow, pale]
-  expect(SF.active()):eq(false)              -- only one raw stone (yellow) left → done, no cast
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- lone yellow MIXED with a green
+  SF.forge_result("green", "green")          -- yellow+green → green (base green); model = [green, green]
+  expect(SF.sent[#SF.sent]):eq("c soulforge 1.soulstone 2.soulstone")   -- now the green pair
+  SF.forge_result("pale", "green")           -- green+green → pale; model = [pale] → done
+  expect(SF.active()):eq(false)
   local invs = 0; for _, c in ipairs(seq()) do if c == "inv" then invs = invs + 1 end end
   expect(invs):eq(1)                         -- the initial read only; every step after was in-memory
 end)
@@ -351,27 +361,29 @@ test("stow: after a forge pass, PUTS the results back into the source container"
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
 end)
 
-test("cycle: stow then re-look, batching through the stash; converges when a pass forges nothing", function()
+test("cycle: LOOKS ONCE, then decides every later pass from the in-memory container model; converges", function()
   SF.reset()
   state.inventory = { "a small sack" }
   SF.begin(); SF.on_inv()
+  expect(SF.sent[#SF.sent]):eq("look in sack")           -- the ONE look
   SF.look_soulstone("a red soulstone"); SF.look_soulstone("a red soulstone"); SF.look_done()
-  SF.get_ok(); SF.get_ok(); SF.get_empty()      -- pulled 2 reds
+  SF.get_ok(); SF.get_ok(); SF.get_empty()               -- pulled 2 reds (memory: sack red 2→0)
   state.inventory = inv("red", "red"); SF.on_inv()
-  SF.forge_result("yellow", "red")              -- forged → stow
+  SF.forge_result("yellow", "red")                        -- forged → stow
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
-  SF.put_ok(); SF.put_empty()                   -- stone back; this pass forged → RECYCLE (re-inv)
-  expect(SF.sent[#SF.sent]):eq("inv")
-  state.inventory = { "a small sack" }          -- carried empty now (the yellow lives in the sack)
-  SF.on_inv()                                   -- recycle → re-look
-  expect(SF.sent[#SF.sent]):eq("look in sack")
-  SF.look_soulstone("a yellow soulstone"); SF.look_done()   -- one lone yellow → raw → pull
-  expect(SF.sent[#SF.sent]):eq("get yellow soulstone sack")
+  SF.put_ok("yellow"); SF.put_empty()                     -- yellow back (memory: sack yellow 0→1); forged → recycle
+  expect(SF.sent[#SF.sent]):eq("inv")                     -- recycle re-INVENTORIES carried — does NOT re-look
+  state.inventory = { "a small sack" }                    -- carried empty; the yellow is only in the sack now
+  SF.on_inv()                                             -- recycle → decide from memory → pull straight away
+  expect(SF.sent[#SF.sent]):eq("get yellow soulstone sack")   -- NO second "look in"
   SF.get_ok(); SF.get_empty()
-  state.inventory = inv("yellow"); SF.on_inv()  -- 1 stone, can't pair → pass done → stow
+  state.inventory = inv("yellow"); SF.on_inv()            -- 1 stone, can't pair → pass done → stow
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
-  SF.put_ok(); SF.put_empty()                   -- yellow back; this pass forged NOTHING → settle
-  expect(SF.active()):eq(false)                 -- converged, not looping forever
+  SF.put_ok("yellow"); SF.put_empty()                     -- yellow back; this pass forged NOTHING → settle
+  expect(SF.active()):eq(false)                           -- converged
+  local looks = 0
+  for _, c in ipairs(seq()) do if c == "look in sack" then looks = looks + 1 end end
+  expect(looks):eq(1)                                     -- looked in the container EXACTLY once all run
 end)
 
 -- ---- (e) safety: bounded no-progress -------------------------------------------------------------

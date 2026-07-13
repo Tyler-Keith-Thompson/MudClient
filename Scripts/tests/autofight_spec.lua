@@ -128,18 +128,26 @@ test("soulsteal FIZZLE ('You fail to cast the spell') re-casts the steal at once
   AF.dead()
 end)
 
-test("soulsteal 'fails to latch on to an individual soul' is handled like a resist (re-nuke → retry)", function()
-  to_lightning()                      -- sent: c tarrants, cast 'lightning bolt'
-  AF.on_fight(70, ENEMY); AF.lightning()   -- lightning landed → "c scorch"
-  AF.on_fight(65, ENEMY); AF.scorch()      -- scorch landed → decide (lightning wins) → nuke lightning
-  AF.lightning(); AF.on_fight(10, ENEMY)   -- landed, ≤15% at the bar → "c soulsteal"
+test("soulsteal 'fails to latch on to an individual soul' is a TERMINATOR: keep nuking, persist unstealable", function()
+  -- This line means the mob has no individual soul — soulsteal can NEVER land on it. Treat it exactly like
+  -- "can only soulsteal from living things": stop re-casting, keep nuking, and remember the name.
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(65, ENEMY); AF.scorch()      -- winner lightning
+  AF.lightning(); AF.on_fight(10, ENEMY)   -- ≤15% → the ONE soulsteal attempt
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
-  AF.soul_nolatch()                   -- steal didn't individuate a soul → re-nuke the winner
-  expect(AF.sent[#AF.sent]):eq(CMD.lightning)   -- one winner nuke owed after the failed steal
-  AF.lightning(); AF.on_fight(10, ENEMY)   -- re-nuke landed → bar → retry "c soulsteal"
-  expect(AF.sent[#AF.sent]):eq("c soulsteal")
-  AF.soulsteal_ok()                   -- retry lands → done
-  AF.dead()
+  AF.soul_nolatch()                        -- no individual soul → back to nuking, never re-steal
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  expect(AF.is_unstealable(ENEMY)):eq(true)    -- learned + persisted for this name
+  -- And it must not keep trying to soulsteal, even as it stays in finish range.
+  for _ = 1, 3 do
+    AF.near_death(ENEMY)
+    AF.lightning(); AF.on_fight(5, ENEMY)
+    expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  end
+  local souls = 0
+  for _, cmd in ipairs(seq()) do if cmd == "c soulsteal" then souls = souls + 1 end end
+  expect(souls):eq(1)                      -- exactly the one attempt that failed, never again
 end)
 
 -- ---- the FALLBACK tier: icebolt → prism, probed only when BOTH primaries (lightning/scorch) underwhelm
