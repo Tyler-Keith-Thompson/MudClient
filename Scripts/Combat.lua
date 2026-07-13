@@ -293,7 +293,12 @@ if rx then
   -- is fighting and you aren't, and — only when YOU (not just a minion) are in it — open the engaged
   -- window (which gates goto/explore/rest) and cancel recovery. A mob brawling only with your MINIONS
   -- keeps them busy but doesn't pin YOU in combat (else `goto` refuses while your pets mop up adds).
-  T([[\S+'s [a-z ]*(annoys|scratches|hits|injures|wounds|mauls|decimates|devastates|maims|mutilates|dismembers|disembowels|massacres|obliterates|demolishes|destroys|annihilates|misses|nicks|cuts|gouges|gashes|lacerates|shreds|mangles|rends|thumps|mars|batters|thrashes|clobbers|smashes|pulverizes) ]])
+  -- CASE-INSENSITIVE verb match (?i:…) + tolerate the crit decoration `*** VERB ***`: AlterAeon UPPERCASES
+  -- the verb on a critical hit ("… MASSACRES …", sometimes "… *** MASSACRES ***"). The old lowercase-only,
+  -- case-sensitive pattern silently skipped every crit line — so a fight whose first rounds were all crits
+  -- never registered the opponent, never opened the engaged window, and (the reported bug) never fired
+  -- auto-assist, forcing a manual `ass`. parse_melee already lower()s + strips `*`, so only this gate moved.
+  T([[\S+'s [a-z *]*(?i:annoys|scratches|hits|injures|wounds|mauls|decimates|devastates|maims|mutilates|dismembers|disembowels|massacres|obliterates|demolishes|destroys|annihilates|misses|nicks|cuts|gouges|gashes|lacerates|shreds|mangles|rends|thumps|mars|batters|thrashes|clobbers|smashes|pulverizes) ]])
     :subscribe(function(c)
       local attacker, target = parse_melee(c.line)
       if not attacker then return end
@@ -307,6 +312,13 @@ if rx then
         if __recovery_cancel then __recovery_cancel("combat started") end  -- fights (kxwt-visible or not) cancel recovery
       end
     end)
+
+  -- EARLIEST assist signal: a pet/minion "jumps to your side in battle!" (or a tank rescues you) the instant
+  -- combat starts — BEFORE any melee-round line, and immune to the crit-verb gap above. Your side is now in
+  -- a fight; if you aren't yet, jump in. Names no enemy, so it drives assist only (maybe_assist self-guards
+  -- on not-already-fighting + the debounce, so a second minion joining mid-fight is a harmless no-op).
+  T([[jumps to your side in battle!]]):subscribe(function() maybe_assist(os.time()) end)
+  T([[rescues you and takes over the battle!]]):subscribe(function() maybe_assist(os.time()) end)
 
   -- Condition-ladder lines while engaged: infer the OTHER mobs' health. Gated on engaged() so an
   -- out-of-combat 'look' condition line can't spawn phantom opponents; skips you/your minions.

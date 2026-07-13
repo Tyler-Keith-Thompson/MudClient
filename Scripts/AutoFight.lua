@@ -91,6 +91,9 @@ local cfg = {
   probe_enough     = 5,              -- % health a single PRIMARY (lightning/fireball) hit must clear to SKIP the
                                      -- icebolt/prism fallback probes (they're rarely best, so don't bother
                                      -- trying them if a primary already hits hard)
+  fireball_bias    = 5,              -- percentage-points: fireball is the PREFERRED winner (splash/AOE bonus) —
+                                     -- any other spell must beat fireball's %-drop by AT LEAST this much to win
+                                     -- the pick instead (err toward fireball; lightning must beat it HANDILY)
   soulsteal_cmd    = "c soulsteal",
   aoe_cmd          = "c frostflower",-- room AOE, used instead of the single-target probe/nuke on a pack
   -- DORMANT: shower was the 2nd probe before scorch. Kept (with its landed trigger + hit_shower() below)
@@ -400,6 +403,15 @@ local function aoe_active()
   return F.pack                                       -- "auto"
 end
 
+-- Which spell to cast when an AOE is called for → (cmd, landed-tag). Fireball does SPLASH damage, so if
+-- fireball is ALREADY the chosen winner we just keep nuking with it (no reason to switch off our best
+-- single-target pick to hit the pack). Only when the winner ISN'T fireball do we back up to the dedicated
+-- room AOE, frostflower. During the probe (no winner picked yet) F.winner_spell is nil → frostflower.
+local function aoe_cast()
+  if F.winner_spell == "fireball" then return cfg.fireball_cmd, "fireball" end
+  return cfg.aoe_cmd, "frostflower"
+end
+
 -- ==================================================================================================
 -- THE FIGHT AS A PROMISE + STREAM FLOW
 -- ==================================================================================================
@@ -589,17 +601,23 @@ end
 -- STAGE 2 — the PROBE. Resolves WITH the winning spell name. Walks a pointer through the PRIMARY probes
 -- lightning → fireball → decide, and — only when NEITHER primary hit hard enough — a FALLBACK tier
 -- icebolt → prism → decide, crediting each spell's %-drop (via on_fight/last_damage_spell) and picking the
--- biggest. AOE, while active, overrides the actual cast with frostflower WITHOUT advancing the pointer — so
--- when the pack thins the probe resumes exactly where it paused.
+-- biggest. AOE, while active, overrides the actual cast (frostflower during the probe, since no winner is
+-- picked yet — see aoe_cast) WITHOUT advancing the pointer — so when the pack thins the probe resumes
+-- exactly where it paused.
 local PROBE_NEXT = { lightning = "fireball", fireball = "decide", icebolt = "prism", prism = "decide" }
 local function probe()
   F.phase = "probe"
   F.probe_ptr = "lightning"
   local step
   step = function()
+    -- A mid-probe autofight.winner() override sets F.known_winner: bail out of probing immediately and
+    -- resolve WITH the override, flowing it straight into fightLoop — no need to finish walking the
+    -- pointer (remember_winner is already done by autofight.winner itself).
+    if F.known_winner then return resolved(F.known_winner) end
     if aoe_active() then                              -- override cast; pointer untouched
-      F.last_damage_spell = "aoe"; F.phase = "aoe"
-      return castStep(cfg.aoe_cmd, "frostflower"):andThen(function(o)
+      local acmd, atag = aoe_cast()                   -- probe has no winner yet → frostflower
+      F.last_damage_spell = (atag == "fireball") and "fireball" or "aoe"; F.phase = "aoe"
+      return castStep(acmd, atag):andThen(function(o)
         if o == "mana" then return never_p() end
         F.phase = "probe"
         return step()
@@ -613,12 +631,14 @@ local function probe()
         F.fallback_tried, F.probe_ptr = true, "icebolt"
         return step()
       end
-      -- coarse winner pick: biggest drop; ties prefer lightning > fireball > icebolt (prism must win outright).
+      -- coarse winner pick: fireball is the PREFERRED default (it also splashes/AOEs), handicapped by
+      -- cfg.fireball_bias — another spell must beat fireball's drop by MORE than the bias to take the win
+      -- (lightning in particular must beat it HANDILY, not just edge it out).
       local ld, sd, id, pd = F.lightning_drop, F.fireball_drop, F.icebolt_drop, F.prism_drop or 0
-      local winner, best = "lightning", ld
-      if sd > best then winner, best = "fireball", sd end
-      if id > best then winner, best = "icebolt", id end
-      if pd > best then winner, best = "prism", pd end
+      local winner, best = "fireball", sd + cfg.fireball_bias   -- err toward fireball (splash/AOE bonus)
+      if ld > best then winner, best = "lightning", ld end      -- lightning must beat fireball HANDILY (+bias)
+      if id > best then winner, best = "icebolt",   id end
+      if pd > best then winner, best = "prism",     pd end
       remember_winner(F.name, winner)                 -- learn it so the next fight skips the probe
       return resolved(winner)                          -- ← the probe verdict flows on as the resolve value
     end
@@ -633,15 +653,17 @@ local function probe()
 end
 
 -- STAGE 3 — fightLoop(winner). Reactive: on each landed spell, cast the winner (or soulsteal once the
--- enemy is in finish range), until enemyDead ends it. AOE overrides the cast with frostflower. Soulsteal
+-- enemy is in finish range), until enemyDead ends it. AOE overrides the cast: fireball if it's the winner
+-- (splash), else frostflower (see aoe_cast). Soulsteal
 -- resist re-nukes exactly once then retries; a latch keeps nuking the winner and never re-casts soulsteal.
 local function fightLoop(winner)
   if winner then F.winner_spell, F.winner = winner, cfg[winner .. "_cmd"] end
   local step
   step = function()
     if aoe_active() then
-      F.last_damage_spell = "aoe"; F.phase = "aoe"
-      return castStep(cfg.aoe_cmd, "frostflower"):andThen(function(o)
+      local acmd, atag = aoe_cast()                   -- fireball winner keeps fireball (splash); else frostflower
+      F.last_damage_spell = (atag == "fireball") and "fireball" or "aoe"; F.phase = "aoe"
+      return castStep(acmd, atag):andThen(function(o)
         if o == "mana" then return never_p() end
         return step()
       end)
@@ -664,7 +686,10 @@ local function fightLoop(winner)
       end)
     end
     F.renuke_pending = false
-    local w = winner or "lightning"                   -- edge: AOE cleared before any winner was learned
+    -- Read the LIVE field first: a mid-fight autofight.winner() override sets F.winner_spell, and this
+    -- re-read (mirroring the AOE override's re-read-every-cast pattern) picks it up on the very next nuke
+    -- instead of continuing to cast the stale CAPTURED `winner` upvalue.
+    local w = F.winner_spell or winner or "lightning"  -- edge: AOE cleared before any winner was learned
     F.last_damage_spell = w; F.phase = "nuke"
     return castStep(cfg[w .. "_cmd"], w):andThen(function(o)
       if o == "mana" then return never_p() end
@@ -810,6 +835,12 @@ local function note_mdeath(name)
   reeval_pack()
 end
 
+-- Timestamp of the last kxwt_fighting line seen (either the health-bar tick or the -1 end), set by the
+-- live subscribers below. Module-level (NOT on the per-fight F table, which start_fight/end_fight reset)
+-- so it survives across fights and simply tracks "is kxwt still the live source right now?" — see
+-- __autofight_prompt just past on_fight_end.
+local last_kxwt_fight = 0
+
 -- kxwt_fighting <pct> <gender> <name> — the enemy health bar. Combat start = not-fighting → fighting.
 -- A health-% change is BOTH a pacing resolution AND the winner-comparison signal: while a probe is the
 -- most-recent damage spell, any drop is credited to it (coarse — a straggler drop can misattribute, and
@@ -863,6 +894,15 @@ local function on_fight_end()
     local cb = F.on_dead; F.on_dead, F.on_fail = nil, nil
     if cb then cb() end
   end
+end
+
+-- Prompt-driven combat signal for nomelee, where kxwt_fighting never arrives. Ignored whenever kxwt has
+-- fired recently (normal play) so the well-tested kxwt path stays the sole driver there.
+local KXWT_FRESH = 5   -- seconds; if kxwt_fighting fired within this window, the prompt bridge stays quiet
+function __autofight_prompt(pct, name)   -- pct+name when fighting; both nil when the prompt says not-fighting
+  if os.time() - last_kxwt_fight < KXWT_FRESH then return end   -- kxwt is live → ignore the prompt
+  if pct and name and name ~= "" then on_fight(pct, name)       -- start/refresh the fight from the prompt
+  else on_fight_end() end                                        -- prompt says not fighting → end it
 end
 
 -- ---- combat line resolutions ---------------------------------------------------------------------
@@ -1144,8 +1184,8 @@ if rx then
   local combatBar = T([[^kxwt_fighting (\d+) \S+ (.+)$]])
   local combatEnd = T([[^kxwt_fighting -1$]])
   local enemyDead = T([[^.+ is DEAD!$]])
-  combatBar:subscribe(function(c) on_fight(tonumber(c[1]), c[2]) end)
-  combatEnd:subscribe(function()  on_fight_end() end)
+  combatBar:subscribe(function(c) last_kxwt_fight = os.time(); on_fight(tonumber(c[1]), c[2]) end)
+  combatEnd:subscribe(function()  last_kxwt_fight = os.time(); on_fight_end() end)
   enemyDead:subscribe(function()  hit_dead() end)
 
   -- Near-death latch: the game tells us OUR TARGET is nearly dead → switch to soulsteal at the next frame
@@ -1487,6 +1527,8 @@ _AF_TEST = {
   begin_promise = begin_fight_promise,
   settle_promise = settle_fight_promise,
   fight_promise = function() return F.fight_promise end,
+  prompt_bridge = function(pct, name) return __autofight_prompt(pct, name) end,
+  mark_kxwt     = function(t) last_kxwt_fight = t end,      -- set kxwt "last seen" for freshness-guard tests
   reset = function()                                      -- clean pre-fight state, armed, for a test
     F.on = true
     end_fight()

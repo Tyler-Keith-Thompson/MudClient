@@ -440,6 +440,23 @@ test("stow: after a forge pass, PUTS the results back into the source container"
   expect(SF.sent[#SF.sent]):eq("put soulstone sack")
 end)
 
+test("stow is COUNT-BOUNDED: puts exactly what it holds, no trailing 'put' that misses (the noise fix)", function()
+  -- The stow used to `put soulstone` until a MISS, and that terminal miss printed "You do not seem to have
+  -- that item." Now it stops when the carried model is empty — one `put` per stone, no trailing miss.
+  SF.reset()
+  state.inventory = { "a small sack" }
+  SF.begin(); SF.on_inv()
+  SF.look_soulstone("a red soulstone"); SF.look_soulstone("a red soulstone")
+  SF.look_done()
+  SF.get_ok("red"); SF.get_ok("red"); SF.get_empty()       -- pulled 2 reds
+  SF.forge_result("yellow", "red")                          -- 2 red → 1 yellow; stow the single yellow
+  expect(SF.sent[#SF.sent]):eq("put soulstone sack")
+  SF.put_ok("yellow")                                       -- the ONE stone is back → model empty → STOP here
+  local puts = 0
+  for _, c in ipairs(seq()) do if c == "put soulstone sack" then puts = puts + 1 end end
+  expect(puts):eq(1)                                        -- exactly one put; no extra miss-generating put
+end)
+
 test("cycle: LOOKS ONCE and never re-inventories between passes — memory-driven, two batches, converges", function()
   -- 4 greens in the sack, but the pack only holds 2 at a time → it takes TWO pull/forge/stow batches. The
   -- whole thing runs off the in-memory model: exactly ONE `look in` and ONE `inv` (the initial) all run.

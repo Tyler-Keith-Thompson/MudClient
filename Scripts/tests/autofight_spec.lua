@@ -177,11 +177,14 @@ test("the fallback tier IS probed when both primaries underwhelm: icebolt then p
 end)
 
 test("prism loses ties: a weak-but-tied icebolt (fallback) still beats prism after the probe", function()
+  -- icebolt/prism must each clear fireball's handicap (fireball_drop + cfg.fireball_bias = 1+5 = 6) to be
+  -- in contention at all, so this tie is driven at Δ7/Δ7 (was Δ4/Δ4 pre-bias) — same "tie" intent, just
+  -- above fireball's now-preferred floor.
   AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()
   AF.on_fight(88, ENEMY); AF.lightning()              -- lightning Δ2 (< 5) → fireball
   AF.on_fight(87, ENEMY); AF.fireball()                 -- fireball Δ1 (< 5) → fallback icebolt
-  AF.on_fight(83, ENEMY); AF.icebolt()                -- icebolt Δ4 → prism
-  AF.on_fight(79, ENEMY); AF.prism()                  -- prism Δ4 — ties icebolt → icebolt keeps it → nuke icebolt
+  AF.on_fight(80, ENEMY); AF.icebolt()                -- icebolt Δ7 (clears fireball's 1+bias=6 floor) → prism
+  AF.on_fight(73, ENEMY); AF.prism()                  -- prism Δ7 — ties icebolt → icebolt keeps it → nuke icebolt
   expect(AF.sent[#AF.sent]):eq("c icebolt")
   AF.icebolt()                                        -- nuke repeats icebolt (not prism)
   expect(AF.sent[#AF.sent]):eq("c icebolt")
@@ -316,6 +319,22 @@ test("winner pick: fireball drops more than lightning → nuke with fireball", f
   AF.on_fight(85, ENEMY); AF.lightning()    -- lightning Δ5  → "c fireball"
   AF.on_fight(60, ENEMY); AF.fireball()      -- fireball Δ25 → decide → nuke
   expect(AF.sent[#AF.sent]):eq("c fireball")
+end)
+
+-- fireball_bias: fireball is the PREFERRED winner — lightning must beat it by MORE than cfg.fireball_bias
+-- (5 points), not just edge it out, or fireball keeps the pick (splash/AOE bonus).
+test("winner pick bias: lightning beats fireball by <= the bias → fireball still wins (err toward fireball)", function()
+  to_lightning()
+  AF.on_fight(78, ENEMY); AF.lightning()    -- lightning Δ12 → "c fireball"
+  AF.on_fight(68, ENEMY); AF.fireball()      -- fireball Δ10 → decide: 12 doesn't beat 10+bias(5)=15 → fireball
+  expect(AF.sent[#AF.sent]):eq("c fireball")
+end)
+
+test("winner pick bias: lightning beats fireball by MORE than the bias → lightning wins handily", function()
+  to_lightning()
+  AF.on_fight(74, ENEMY); AF.lightning()    -- lightning Δ16 → "c fireball"
+  AF.on_fight(64, ENEMY); AF.fireball()      -- fireball Δ10 → decide: 16 beats 10+bias(5)=15 → lightning
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
 end)
 
 -- ---- (f) robustness ------------------------------------------------------------------------------
@@ -805,6 +824,30 @@ test("room crowd-count ignores our own minions/self — only hostiles count", fu
   state.name, state.group = nil, nil
 end)
 
+-- aoe_cast: fireball does splash/AOE damage, so if fireball is the CHOSEN winner an AOE keeps nuking it
+-- instead of backing off to the dedicated frostflower — any OTHER winner still backs up to frostflower.
+test("AOE with a fireball winner keeps casting fireball (splash) instead of backing up to frostflower", function()
+  AF.reset()
+  AF.winners()["gnomian guard"] = "fireball"          -- known winner → skip probe, nuke fireball
+  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → "c fireball" in flight
+  expect(AF.sent[#AF.sent]):eq("c fireball")
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- pack forms mid-fight
+  AF.fireball(); AF.on_fight(85, ENEMY)               -- landed → bar boundary → next nuke decision reads AOE
+  expect(AF.sent[#AF.sent]):eq("c fireball")          -- keeps fireball (splash), NOT frostflower
+  AF.on_fight_end()
+end)
+
+test("AOE with a lightning winner backs up to frostflower (only a fireball winner keeps its own cast)", function()
+  AF.reset()
+  AF.winners()["gnomian guard"] = "lightning"         -- known winner → skip probe, nuke lightning
+  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → "cast 'lightning bolt'" in flight
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- pack forms mid-fight
+  AF.lightning(); AF.on_fight(85, ENEMY)              -- landed → bar boundary → next nuke decision reads AOE
+  expect(AF.sent[#AF.sent]):eq("c frostflower")       -- backs up to the dedicated room AOE
+  AF.on_fight_end()
+end)
+
 test("a peaceful look (not fighting) never arms AOE", function()
   AF.reset()                                   -- not fighting
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
@@ -883,6 +926,32 @@ test("autofight.winner switches the CURRENT fight immediately (stops casting the
   AF.tarrants()                                          -- opener lands → nukes the override, never probes
   expect(AF.sent[#AF.sent]):eq("c fireball")
   for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end   -- never probed
+  AF.on_fight_end()
+end)
+
+-- A mid-fight override must redirect the CURRENT fight even when it lands DURING an already in-flight
+-- stage (not just before the probe starts, like the test above) — both while the PROBE is walking its
+-- pointer and while fightLoop is mid-nuke on a resolved winner.
+test("autofight.winner override during the PROBE stage redirects the very next cast", function()
+  AF.reset()
+  AF.on_fight(90, "a wraith")                            -- opener → probe starts
+  AF.tarrants()                                          -- opener lands → probe's first primary cast in flight
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  autofight.winner("a wraith", "icebolt")                  -- override WHILE the lightning probe is in flight
+  AF.lightning()                                         -- in-flight lightning lands → probe bails on the override
+  expect(AF.sent[#AF.sent]):eq("c icebolt")               -- redirected, never reached "c fireball"
+  for _, cmd in ipairs(seq()) do expect(cmd == "c fireball"):eq(false) end
+  AF.on_fight_end()
+end)
+
+test("autofight.winner override during the NUKE stage redirects the very next cast", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()                 -- lightning Δ20 → "c fireball"
+  AF.on_fight(65, ENEMY); AF.fireball()                    -- fireball Δ5 → decide → winner lightning → nuke#1
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  autofight.winner(ENEMY, "prism")                         -- override WHILE nuke#1 is in flight
+  AF.lightning(); AF.on_fight(50, ENEMY)                 -- nuke#1 lands → bar boundary → reads the override
+  expect(AF.sent[#AF.sent]):eq("c prism")
   AF.on_fight_end()
 end)
 
@@ -1060,4 +1129,29 @@ test("tank rescue can be disabled: autofight.tank('off') suppresses the response
   expect(_AA_TEST.corpse.on):eq(true)                -- disabled → no action
   expect(#AF.sent):eq(before)
   autofight.tank("on")                                -- restore for later tests
+end)
+
+-- ---- prompt bridge (nomelee) ------------------------------------------------------------------------
+-- Under `nomelee` the server never sends kxwt_fighting, so AutoFight's whole combat lifecycle would
+-- otherwise never fire. Prompt.lua's apply_prompt calls __autofight_prompt (exposed here as
+-- AF.prompt_bridge) with the parsed fight_pct/fight_name — but ONLY as a fallback: it must stay silent
+-- whenever kxwt_fighting has fired recently (AF.mark_kxwt sets that "last seen" clock directly, since the
+-- live subscribers stamp it with os.time() on every kxwt_fighting line).
+
+test("prompt bridge starts and ends a fight when kxwt is stale (nomelee)", function()
+  AF.reset()
+  AF.mark_kxwt(0)                                     -- kxwt hasn't fired — long stale
+  AF.prompt_bridge(90, ENEMY)                         -- fresh engagement, prompt-driven
+  expect_seq(seq(), { "c tarrants" })                 -- same opener a kxwt-driven start_fight would send
+  land_opener()
+  AF.prompt_bridge(nil, nil)                          -- prompt says not-fighting → end the fight
+  expect(AF.state().fighting):eq(false)
+end)
+
+test("prompt bridge is a no-op when kxwt is fresh (normal play stays authoritative)", function()
+  AF.reset()
+  AF.mark_kxwt(os.time())                             -- kxwt just fired
+  AF.prompt_bridge(90, ENEMY)
+  expect(#seq()):eq(0)                                -- ignored — nothing sent, no fight started
+  expect(AF.state().fighting):eq(false)
 end)

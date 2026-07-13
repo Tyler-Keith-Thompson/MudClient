@@ -56,6 +56,17 @@ test("append_col wraps a plain row into columns, or extends an existing column r
   local extended = append_col({ cols = { { text = "a" }, { text = "b" } } }, cell)
   expect(#extended.cols):eq(3)
   expect(extended.cols[3]):eq(cell)
+
+  -- A cell that is ITSELF a column band (lag+promise side-by-side) must be FLATTENED into sibling columns,
+  -- never nested — the panel renderer can't recurse into a column's own `cols` (it would render blank; the
+  -- lag/promise "didn't render" regression). So both sub-cells land as top-level columns.
+  local la, pr = { text = "lag", width = 6 }, { text = "prom", width = 10 }
+  local band = { cols = { la, pr }, width = 16 }
+  local flat = append_col({ text = "ref" }, band)
+  expect(#flat.cols):eq(3)                                  -- ref + la + pr, NOT ref + nested-band
+  expect(flat.cols[2]):eq(la)
+  expect(flat.cols[3]):eq(pr)
+  for _, c in ipairs(flat.cols) do expect(c.cols):eq(nil) end   -- no nested cols survive
 end)
 
 -- ---- whole-panel layout, driven through the live on_update (capture_update nils the minimap) --------

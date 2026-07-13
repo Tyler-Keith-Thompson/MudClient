@@ -434,14 +434,17 @@ local function minimap_cells()
 end
 
 -- Append a fixed-width cell as the last column of a row (wrapping a single-line row into columns).
+-- Append `cell` as a new column of `row`. IMPORTANT: the panel renderer does NOT recurse into a nested
+-- `cols` (a column value only ever exposes `spans`/`text` — see PanelHost.parseColumn), so a cell that is
+-- ITSELF a multi-column band (`{ cols = { a, b } }`) must be FLATTENED into sibling columns here, not
+-- nested (nesting renders blank). Leaf cells (spans/text) append as one column as before.
 local function append_col(row, cell)
-  if row.cols then
-    local cols = {}
-    for _, c in ipairs(row.cols) do cols[#cols + 1] = c end
-    cols[#cols + 1] = cell
-    return { cols = cols }
-  end
-  return { cols = { row, cell } }
+  local cols = {}
+  if row.cols then for _, c in ipairs(row.cols) do cols[#cols + 1] = c end
+  else cols[#cols + 1] = row end
+  if cell.cols then for _, c in ipairs(cell.cols) do cols[#cols + 1] = c end
+  else cols[#cols + 1] = cell end
+  return { cols = cols }
 end
 
 -- Promise widget — sits UNDER the minimap (right column). One row per in-flight promise from
@@ -596,7 +599,7 @@ local function update_top()
   for i = 1, n do
     local m = right[i] or blank
     if left[i] then rows[i] = append_col(left[i], m)
-    else rows[i] = { cols = { { text = "" }, m } } end
+    else rows[i] = append_col({ text = "" }, m) end   -- append_col flattens a widget-band cell (m.cols)
   end
   panel.top(rows)
 end

@@ -135,6 +135,14 @@ test("parse_melee parses the verbatim nomelee-log round lines into attacker/targ
   a, t = parse_melee("Your slash MUTILATES an orc bachelor!")
   expect(a):eq("you"); expect(t):eq("an orc bachelor")
 
+  -- CRIT lines (UPPERCASE verb, and the `*** VERB ***` decoration) parse the same — the helper lower()s the
+  -- verb and strips `*`. These are exactly the lines auto-assist was missing (the live TRIGGER now matches
+  -- them case-insensitively; parse_melee always did).
+  a, t = parse_melee("A metataur guard's frigid crush MASSACRES A flesh beast!")
+  expect(a):eq("A metataur guard"); expect(t):eq("A flesh beast")
+  a, t = parse_melee("A spear wielding skeletal knight's shield bash *** MASSACRES *** A metataur guard!")
+  expect(a):eq("A spear wielding skeletal knight"); expect(t):eq("A metataur guard")
+
   -- Non-combat lines with an incidental verb-word do not parse.
   expect(parse_melee("A squat orc putters around his hovel.")):eq(nil)
   expect(parse_melee("You are already targeting him.")):eq(nil)

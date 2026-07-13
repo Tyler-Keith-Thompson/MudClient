@@ -543,9 +543,14 @@ end
 
 stow_next = function()
   local op = sf_op; if not op or not op.stow_kw then return stow_done() end
+  -- Count-bounded (same fix as the pull): op.model is our exact carried-soulstone tally — hit_put_ok drops
+  -- one from it per `put`. Stop the moment it's empty instead of sending one more `put soulstone` that misses
+  -- with "You do not seem to have that item." (the noise the player saw). The backstop / empty triggers
+  -- remain as safety nets for a rare model desync.
+  if #(op.model or {}) == 0 then return stow_done() end
   sf_touch()
   sf_send("put soulstone " .. op.stow_kw)
-  arm_gather_backstop(stow_done)   -- quiet gap = nothing left to put
+  arm_gather_backstop(stow_done)   -- quiet gap = nothing left to put (desync safety net)
 end
 
 local function begin_stow()
@@ -786,7 +791,10 @@ if trigger then
   -- GATHER/STOW: a soulstone put back into the container, or nothing left to put. Handlers self-guard on
   -- op.phase == "stow", so they're inert outside the stow step.
   trigger([[^You put a (.+) soulstone in ]], function(_, color) hit_put_ok(color) end)
+  -- "nothing left to put" can surface as either wording; both end the stow. Count-bounding (stow_next)
+  -- normally stops us BEFORE a miss, so these are desync safety nets. Phase-guarded in hit_put_empty.
   trigger([[^You aren't carrying ]], function() hit_put_empty() end)
+  trigger([[^You do not seem to have that item\.]], function() hit_put_empty() end)
 end
 
 -- ---- control surface ------------------------------------------------------------------------------

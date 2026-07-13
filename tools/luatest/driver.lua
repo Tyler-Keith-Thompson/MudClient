@@ -91,7 +91,7 @@ end
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Audio.lua",
                      "Scripts/AutoFight.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
                      "Scripts/Corpse.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
-                     "Scripts/Promise.lua", "Scripts/Recovery.lua", "Scripts/Soulforge.lua",
+                     "Scripts/Promise.lua", "Scripts/Prompt.lua", "Scripts/Recovery.lua", "Scripts/Soulforge.lua",
                      "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
