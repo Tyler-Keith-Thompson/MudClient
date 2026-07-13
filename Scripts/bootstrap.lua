@@ -508,6 +508,8 @@ doc("rpc_connect", { sig = "rpc_connect(uuid)", group = "connection",
   example = "rpc_connect(\"6nxn1ftm5tbcyq3kteam\")" })
 doc("rpc_disconnect", { sig = "rpc_disconnect()", group = "connection",
   text = "Close the RPC/telemetry connection opened by rpc_connect()." })
+doc("rpc_is_connected", { sig = "rpc_is_connected()", group = "connection",
+  text = "True once the RPC game connection (:3103) is open. Used to guard the auto-connect on load." })
 doc("rpc_send", { sig = "rpc_send(text)", group = "connection",
   text = "Send user input / a command / login text over the RPC connection (:3103). PROVISIONAL outbound message format while the exact one is confirmed from the client binary. Use to try driving the game over the RPC.",
   example = "rpc_send(\"look\")" })

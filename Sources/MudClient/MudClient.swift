@@ -57,7 +57,15 @@ struct Connect: ParsableCommand {
                     // (on_send-injected sends inherit that origin) for the searchable transcript.
                     Container.transcriptStore().recordSent(outbound, origin: command.origin)
                     Container.sessionLog().logCommand(outbound)
-                    Container.connectionManager().send(outbound)
+                    // Single convergence point for ALL outbound (user input + script send()). Route to the
+                    // RPC when it's the live connection (1.105 single-socket: commands are text_block events
+                    // over :3103); else the legacy telnet path.
+                    let rpc = Container.rpcConnection()
+                    if rpc.isConnected {
+                        rpc.send(text: outbound)
+                    } else {
+                        Container.connectionManager().send(outbound)
+                    }
                 }
             }
         }

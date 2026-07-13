@@ -40,9 +40,23 @@ final class RPCConnection: @unchecked Sendable {
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return channel != nil }
 
-    func connect(uuid: String) {
+    /// The install identity to present as version_info.client_uuid. Prefer the real AlterAeon client's
+    /// uuid from its config (so we look like a known install); fall back to a stable DFLT token.
+    static func defaultUUID() -> String {
+        let cfg = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/AlterAeon/alter_aeon.cfg")
+        if let text = try? String(contentsOf: cfg, encoding: .utf8),
+           let range = text.range(of: "<uuid>([^<]+)</uuid>", options: .regularExpression) {
+            let inner = text[range].dropFirst("<uuid>".count).dropLast("</uuid>".count)
+            if !inner.isEmpty { return String(inner) }
+        }
+        return "DFLT000000000000000000000000"
+    }
+
+    func connect(uuid rawUUID: String) {
+        let uuid = rawUUID.isEmpty ? Self.defaultUUID() : rawUUID
         disconnect()
-        log("connecting to \(Self.host):\(Self.port)…")
+        log("connecting to \(Self.host):\(Self.port)… (uuid=\(uuid))")
 
         var tlsConfig = TLSConfiguration.makeClientConfiguration()
         tlsConfig.certificateVerification = .none
@@ -254,9 +268,12 @@ final class RPCConnection: @unchecked Sendable {
             log("channelSend channel='\(m.channelName)' message='\(m.sentMessage)'")
         case .textBlock(let m):
             // The game's actual output. `text` is raw ANSI + Latin-1 bytes (its own \r\n embedded), so
-            // decode byte→scalar (Latin-1, lossless — keeps ESC/high bytes) and render() it verbatim, the
-            // same way the telnet text path writes chunks. This is what puts the login prompt on screen.
+            // decode byte→scalar (Latin-1, lossless — keeps ESC/high bytes). Mirror the telnet inbound path
+            // (ConnectionManager): refresh the panel model, RECORD TO THE RAW LOG (so we can build parsers
+            // for the tagged data that rides inside text_block), then render() verbatim.
             let text = String(m.text.map { Character(UnicodeScalar($0)) })
+            Container.scriptInterpreter().engine.notifyUpdate()
+            Container.sessionLog().logServer(text)
             Container.terminalService().render(text)
         case .audioPlayout(let m):
             log("audioPlayout file='\(m.shortClipFilename)'")

@@ -20,10 +20,12 @@
 -- Trigger patterns are SWIFT regular expressions, so they use [[...]] long strings to pass
 -- backslash classes like \d through untouched.
 --
--- Loading this at startup (via load("Scripts")) opens the connection. The connect is top-level and
--- guarded by is_connected() so a hot-reload() — which re-runs this file in the LIVE state — never
--- drops or redials an already-open session.
-if not is_connected() then connect("alteraeon.com", 3102) end
+-- Loading this at startup (via load("Scripts")) opens the connection. AlterAeon 1.105 is single-socket:
+-- the whole game runs over the protobuf RPC (www.alteraeon.com:3103) — game text arrives as text_block,
+-- commands go out as text_block, telemetry + music ride the same socket. So we open the RPC, NOT the
+-- legacy telnet (:3102). uuid defaults from the install's alter_aeon.cfg. Guarded by rpc_is_connected()
+-- so a hot-reload() — which re-runs this file in the LIVE state — never drops or redials an open session.
+if rpc_connect and not rpc_is_connected() then rpc_connect() end
 
 -- The shared world-state table. AlterAeon OWNS the schema, but fills it DEFENSIVELY (merge missing
 -- keys into whatever `state` already is) so load order doesn't matter: another script may create a

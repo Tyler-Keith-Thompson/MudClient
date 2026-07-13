@@ -25,7 +25,7 @@ for _, n in ipairs({
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
   "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send", "on_stream",
-  "rpc_connect", "rpc_disconnect", "rpc_send",
+  "rpc_connect", "rpc_disconnect", "rpc_send", "rpc_is_connected",
   "log_start", "log_stop", "log_active", "replay",
   "grep", "sent", "received", "claude", "chat",
   "speak", "speech_stop",

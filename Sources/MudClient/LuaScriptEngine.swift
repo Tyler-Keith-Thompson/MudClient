@@ -686,10 +686,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         // rpc_connect(uuid) — open the second (RPC/telemetry) TLS connection to :3103 and run the
         // version_info + RSA channel-auth handshake. Verbose [rpc] progress lines are echoed as it goes.
         lua.register("rpc_connect") { args in
-            guard case .string(let uuid)? = args.first else {
-                Container.terminalService().print("usage: rpc_connect(uuid) — e.g. rpc_connect(\"6nxn1ftm5tbcyq3kteam\")")
-                return []
-            }
+            // uuid optional: empty/absent → RPCConnection reads the install uuid from alter_aeon.cfg.
+            let uuid: String = { if case .string(let u)? = args.first { return u } else { return "" } }()
+            // Single-socket mode: drop the legacy telnet game connection so we don't run two parallel
+            // game sessions (the RPC IS the game in 1.105 — text in via text_block, commands out via it).
+            Container.connectionManager().disconnect()
             Container.rpcConnection().connect(uuid: uuid)
             return []
         }
@@ -697,6 +698,10 @@ final class LuaScriptEngine: @unchecked Sendable {
         lua.register("rpc_disconnect") { _ in
             Container.rpcConnection().disconnect()
             return []
+        }
+        // rpc_is_connected() -> bool. True once the RPC channel is open (used to guard auto-connect).
+        lua.register("rpc_is_connected") { _ in
+            [.bool(Container.rpcConnection().isConnected)]
         }
         // rpc_send(text) — send user input / a command / login over the RPC (PROVISIONAL message format,
         // see RPCConnection.send). Lets us try driving the game over :3103 while the exact outbound
