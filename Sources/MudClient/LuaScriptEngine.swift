@@ -698,6 +698,17 @@ final class LuaScriptEngine: @unchecked Sendable {
             Container.rpcConnection().disconnect()
             return []
         }
+        // rpc_send(text) — send user input / a command / login over the RPC (PROVISIONAL message format,
+        // see RPCConnection.send). Lets us try driving the game over :3103 while the exact outbound
+        // message is confirmed from the binary.
+        lua.register("rpc_send") { args in
+            guard case .string(let text)? = args.first else {
+                Container.terminalService().print("usage: rpc_send(text) — e.g. rpc_send(\"look\")")
+                return []
+            }
+            Container.rpcConnection().send(text: text)
+            return []
+        }
         // telnet_send(option, payload) — send `IAC SB <option> <payload> IAC SE`, escaping IAC bytes in
         // the payload. `option` is numeric; `payload` is a (byte) string.
         lua.register("telnet_send") { [weak self] args in

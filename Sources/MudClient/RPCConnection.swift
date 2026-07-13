@@ -112,6 +112,27 @@ final class RPCConnection: @unchecked Sendable {
         Container.terminalService().print("[rpc] \(message)")
     }
 
+    /// Outbound user input / commands / login over the RPC. CONFIRMED from the binary's send_command()
+    /// (0xec870 → serializer 0xee300): the user's line goes in `xirr_client_rpc.text_block { text }` with
+    /// frameinfo.proto_name = the SHORT "text_block" (the client sends the short name outbound, even though
+    /// the server sends the full "xirr_client_rpc.text_block" inbound). text_block is bidirectional — this
+    /// carries login name, password, and every in-game command. A newline is appended (the server expects a
+    /// line, same as telnet).
+    func send(text: String) {
+        guard phase == .binary else { log("send: channel not ready"); return }
+        var msg = XirrClientRpc_text_block()
+        msg.text = Data((text + "\n").utf8)
+        guard let payload: Data = try? msg.serializedBytes() else { log("send: encode error"); return }
+        // Outbound frame byte-matched to the client's tx_send_packet (0x15d480): FULL proto_name, short
+        // rpc_service_name, f20=1 (EVENT). All three are required or the server drops the packet.
+        var frameinfo = XirrRpc_xirr_proto_framer_frameinfo()
+        frameinfo.protoName = XirrClientRpc_text_block.protoMessageName   // full "xirr_client_rpc.text_block"
+        frameinfo.rpcServiceName = "text_block"                          // short form (required)
+        frameinfo.f20 = 1                                                // EVENT/PUSH
+        write(RPCFramer.encodeBlock(frameinfo: frameinfo, payload: payload))
+        log("send: '\(text)'")
+    }
+
     // MARK: - Handshake
 
     /// Step 0: the text preamble. Sent RAW (no line framing) as `REQUEST <proto>\n`. The server's
@@ -131,7 +152,12 @@ final class RPCConnection: @unchecked Sendable {
             log("version_info encode error")
             return
         }
-        write(RPCFramer.encodeBlock(protoName: XirrClientRpc_version_info.protoMessageName, serviceName: "", payload: payload))
+        // Same framing rules as user input: full proto_name, short rpc_service_name "versioninfo", f20=1.
+        var frameinfo = XirrRpc_xirr_proto_framer_frameinfo()
+        frameinfo.protoName = XirrClientRpc_version_info.protoMessageName
+        frameinfo.rpcServiceName = "versioninfo"
+        frameinfo.f20 = 1
+        write(RPCFramer.encodeBlock(frameinfo: frameinfo, payload: payload))
         log("version_info sent (version=\(Self.clientVersion) uuid=\(uuid))")
     }
 
@@ -227,11 +253,26 @@ final class RPCConnection: @unchecked Sendable {
         case .channelSend(let m):
             log("channelSend channel='\(m.channelName)' message='\(m.sentMessage)'")
         case .textBlock(let m):
-            log("textBlock text='\(m.text)' extra='\(m.extraInfo)'")
+            // The game's actual output. `text` is raw ANSI + Latin-1 bytes (its own \r\n embedded), so
+            // decode byte→scalar (Latin-1, lossless — keeps ESC/high bytes) and render() it verbatim, the
+            // same way the telnet text path writes chunks. This is what puts the login prompt on screen.
+            let text = String(m.text.map { Character(UnicodeScalar($0)) })
+            Container.terminalService().render(text)
         case .audioPlayout(let m):
             log("audioPlayout file='\(m.shortClipFilename)'")
-        case .keepalive:
-            log("keepalive")
+        case .keepalive(let m, let reqFrameinfo):
+            // Answer the server's rpc/ping or it drops us (~15s). Reply is a keepalive_info transaction
+            // RESPONSE: echo the request's f30 (transaction id), set frameinfo.f20 = 3, echo the type name.
+            var respFrameinfo = XirrRpc_xirr_proto_framer_frameinfo()
+            respFrameinfo.protoName = reqFrameinfo.protoName   // echo "xirr_server_rpc.keepalive_info"
+            respFrameinfo.f20 = 3                              // RESPONSE
+            respFrameinfo.f30 = reqFrameinfo.f30               // echo transaction id (correlation key)
+            var pong = XirrServerRpc_keepalive_info()
+            pong.f1 = m.f1
+            if let payload: Data = try? pong.serializedBytes() {
+                write(RPCFramer.encodeBlock(frameinfo: respFrameinfo, payload: payload))
+                log("keepalive ping (txn \(reqFrameinfo.f30)) — ponged")
+            }
         case .unknown(let protoName, let serviceName, let payload):
             log("unknown proto=\(protoName) service=\(serviceName) bytes=\(payload.count)")
         }

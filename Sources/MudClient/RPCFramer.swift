@@ -24,7 +24,9 @@ enum RPCMessage: Equatable {
     case channelSend(XirrClientRpc_channel_send_data)
     case textBlock(XirrClientRpc_text_block)
     case audioPlayout(XirrClientRpc_audio_playout_data)
-    case keepalive(XirrServerRpc_keepalive_info)
+    // keepalive carries its frameinfo too: the pong must echo the request's transaction id (frameinfo.f30)
+    // and set f20=3 (RESPONSE) — correlation is by f30 (see AUTH_WIRE.md keepalive section).
+    case keepalive(XirrServerRpc_keepalive_info, frameinfo: XirrRpc_xirr_proto_framer_frameinfo)
     case auth(XirrRpc_xirr_rpc_channel_auth)
     case unknown(protoName: String, serviceName: String, payload: Data)
 }
@@ -38,22 +40,23 @@ struct RPCFramer: Sendable {
     // Maps a routing key (either the full dotted proto name or the short rpc_service_name) to the
     // decode+wrap step for that message type. Tried in order: exact protoName match, then suffix
     // match on the message part of protoName (after the last "."), then rpcServiceName match.
-    private static let routes: [(fullName: String, serviceKey: String, decode: (Data) throws -> RPCMessage)] = [
-        (DclientRpc_hpbar_data.protoMessageName, "hpbar", { .hpbar(try DclientRpc_hpbar_data(serializedBytes: $0)) }),
-        (DclientRpc_enemy_hp_data.protoMessageName, "enemyhp", { .enemyHP(try DclientRpc_enemy_hp_data(serializedBytes: $0)) }),
-        (DclientRpc_sky_and_time.protoMessageName, "skystate", { .skyAndTime(try DclientRpc_sky_and_time(serializedBytes: $0)) }),
-        (DclientRpc_exp_to_level.protoMessageName, "xp2l", { .expToLevel(try DclientRpc_exp_to_level(serializedBytes: $0)) }),
-        (DclientRpc_icon_bar_data.protoMessageName, "iconbar", { .iconBar(try DclientRpc_icon_bar_data(serializedBytes: $0)) }),
-        (DclientRpc_room_terrain_metadata.protoMessageName, "room_terrain_metadata", { .roomTerrain(try DclientRpc_room_terrain_metadata(serializedBytes: $0)) }),
-        (XirrSoundpackRpc_music_playout_data.protoMessageName, "music", { .music(try XirrSoundpackRpc_music_playout_data(serializedBytes: $0)) }),
-        (DclientRpc_popup_window.protoMessageName, "popup_window_create", { .popupWindow(try DclientRpc_popup_window(serializedBytes: $0)) }),
-        (DclientRpc_button_configuration.protoMessageName, "fkey", { .buttonConfig(try DclientRpc_button_configuration(serializedBytes: $0)) }),
-        (XirrClientRpc_generic_kv_event.protoMessageName, "kvp", { .genericKV(try XirrClientRpc_generic_kv_event(serializedBytes: $0)) }),
-        (XirrClientRpc_channel_send_data.protoMessageName, "channelsend", { .channelSend(try XirrClientRpc_channel_send_data(serializedBytes: $0)) }),
-        (XirrClientRpc_text_block.protoMessageName, "text_block", { .textBlock(try XirrClientRpc_text_block(serializedBytes: $0)) }),
-        (XirrClientRpc_audio_playout_data.protoMessageName, "audio_playout_data", { .audioPlayout(try XirrClientRpc_audio_playout_data(serializedBytes: $0)) }),
-        (XirrServerRpc_keepalive_info.protoMessageName, "keepalive", { .keepalive(try XirrServerRpc_keepalive_info(serializedBytes: $0)) }),
-        (XirrRpc_xirr_rpc_channel_auth.protoMessageName, "auth", { .auth(try XirrRpc_xirr_rpc_channel_auth(serializedBytes: $0)) }),
+    private typealias Decoder = (Data, XirrRpc_xirr_proto_framer_frameinfo) throws -> RPCMessage
+    private static let routes: [(fullName: String, serviceKey: String, decode: Decoder)] = [
+        (DclientRpc_hpbar_data.protoMessageName, "hpbar", { d, _ in .hpbar(try DclientRpc_hpbar_data(serializedBytes: d)) }),
+        (DclientRpc_enemy_hp_data.protoMessageName, "enemyhp", { d, _ in .enemyHP(try DclientRpc_enemy_hp_data(serializedBytes: d)) }),
+        (DclientRpc_sky_and_time.protoMessageName, "skystate", { d, _ in .skyAndTime(try DclientRpc_sky_and_time(serializedBytes: d)) }),
+        (DclientRpc_exp_to_level.protoMessageName, "xp2l", { d, _ in .expToLevel(try DclientRpc_exp_to_level(serializedBytes: d)) }),
+        (DclientRpc_icon_bar_data.protoMessageName, "iconbar", { d, _ in .iconBar(try DclientRpc_icon_bar_data(serializedBytes: d)) }),
+        (DclientRpc_room_terrain_metadata.protoMessageName, "room_terrain_metadata", { d, _ in .roomTerrain(try DclientRpc_room_terrain_metadata(serializedBytes: d)) }),
+        (XirrSoundpackRpc_music_playout_data.protoMessageName, "music", { d, _ in .music(try XirrSoundpackRpc_music_playout_data(serializedBytes: d)) }),
+        (DclientRpc_popup_window.protoMessageName, "popup_window_create", { d, _ in .popupWindow(try DclientRpc_popup_window(serializedBytes: d)) }),
+        (DclientRpc_button_configuration.protoMessageName, "fkey", { d, _ in .buttonConfig(try DclientRpc_button_configuration(serializedBytes: d)) }),
+        (XirrClientRpc_generic_kv_event.protoMessageName, "kvp", { d, _ in .genericKV(try XirrClientRpc_generic_kv_event(serializedBytes: d)) }),
+        (XirrClientRpc_channel_send_data.protoMessageName, "channelsend", { d, _ in .channelSend(try XirrClientRpc_channel_send_data(serializedBytes: d)) }),
+        (XirrClientRpc_text_block.protoMessageName, "text_block", { d, _ in .textBlock(try XirrClientRpc_text_block(serializedBytes: d)) }),
+        (XirrClientRpc_audio_playout_data.protoMessageName, "audio_playout_data", { d, _ in .audioPlayout(try XirrClientRpc_audio_playout_data(serializedBytes: d)) }),
+        (XirrServerRpc_keepalive_info.protoMessageName, "keepalive", { d, fi in .keepalive(try XirrServerRpc_keepalive_info(serializedBytes: d), frameinfo: fi) }),
+        (XirrRpc_xirr_rpc_channel_auth.protoMessageName, "auth", { d, _ in .auth(try XirrRpc_xirr_rpc_channel_auth(serializedBytes: d)) }),
     ]
 
     private var lineFramer = LineFramer()
@@ -87,13 +90,19 @@ struct RPCFramer: Sendable {
         guard let route else {
             return .unknown(protoName: protoName, serviceName: serviceName, payload: payload)
         }
-        return try route.decode(payload)
+        return try route.decode(payload, frameinfo)
     }
 
     static func encodeBlock(protoName: String, serviceName: String, payload: Data) -> Data {
         var frameinfo = XirrRpc_xirr_proto_framer_frameinfo()
         frameinfo.protoName = protoName
         frameinfo.rpcServiceName = serviceName
+        return encodeBlock(frameinfo: frameinfo, payload: payload)
+    }
+
+    /// Encode a block with a fully-specified frameinfo (needed for transaction responses like the
+    /// keepalive pong, which set frameinfo.f20 = 3 (RESPONSE) and echo the request's f30 transaction id).
+    static func encodeBlock(frameinfo: XirrRpc_xirr_proto_framer_frameinfo, payload: Data) -> Data {
         let frameinfoPayload: Data = (try? frameinfo.serializedBytes()) ?? Data()
         return LineFramer.encode(frameinfoPayload) + LineFramer.encode(payload)
     }

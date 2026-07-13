@@ -508,6 +508,9 @@ doc("rpc_connect", { sig = "rpc_connect(uuid)", group = "connection",
   example = "rpc_connect(\"6nxn1ftm5tbcyq3kteam\")" })
 doc("rpc_disconnect", { sig = "rpc_disconnect()", group = "connection",
   text = "Close the RPC/telemetry connection opened by rpc_connect()." })
+doc("rpc_send", { sig = "rpc_send(text)", group = "connection",
+  text = "Send user input / a command / login text over the RPC connection (:3103). PROVISIONAL outbound message format while the exact one is confirmed from the client binary. Use to try driving the game over the RPC.",
+  example = "rpc_send(\"look\")" })
 
 -- terminal / input
 doc("bind", { sig = "bind(keyname, handler) -> id", group = "terminal",
