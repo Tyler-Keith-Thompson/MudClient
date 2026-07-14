@@ -166,18 +166,30 @@ dclient.handlers["hp"] = function(data)      -- "hp maxhp mana maxmana mov maxmo
   end
 end
 
--- GROUP is the one place kxwq beats dclient, so we deliberately DON'T write the roster from the framed
--- `;sgroup;` event — we let AlterAeon.lua's `kxw[tq]_group` parser own `state.group` instead.
--- Why: the framed `;sgroup;` payload is strictly POORER. Its lines are "hp maxhp mana maxmana mov maxmov
--- -name-" with NO flags and it OMITS you, whereas the paired `kxwq_group` block carries the class/role
--- flags ("… M A mummy", "… MT A flesh beast", "XLN Vaelith") AND includes you. Those flags are what
--- HUD.lua's group_member_row colors by (M=cyan minion, O=grey, ?=yellow mob; L/T/N badges) — the framed
--- data literally cannot reproduce the colors because the flags aren't in it. Both events fire every tick,
--- so writing state.group from BOTH made the roster flicker (flagged kxwq rows vs flagless framed rows,
--- and you popping in/out). Deferring to kxwq_group kills the flicker and restores the colors. We leave the
--- handler registered as a no-op purely so the tag still surfaces in the dclient debug echo (dispatch echoes
--- every tag before the handler lookup) while we map the protocol.
-dclient.handlers["group"] = function(_) end
+-- GROUP roster from the framed `;sgroup;` event. Over the 1.105 RPC this is the ONLY group source —
+-- `kxwq_group` (which used to own state.group, with class/role flags + a self row) is gone, so we parse
+-- `;sgroup;` here again. Its lines are "hp maxhp mana maxmana mov maxmov -name-" with NO flags and it OMITS
+-- you, so: (1) prepend a self row from our own vitals (flags "X" = you), and (2) tag every listed member
+-- "M" (your minion → cyan in HUD.group_member_row). That's right for the common solo-with-minions case;
+-- we can't recover tank/nomelee (T/N) badges or distinguish other players' minions — the flags simply
+-- aren't in the framed payload — but it puts the roster (you + your minions) back on the HUD.
+dclient.handlers["group"] = function(data)
+  local g = {}
+  if state.name and state.name ~= "" then
+    g[1] = { hp = state.hp, maxhp = state.maxhp, mana = state.mana, maxmana = state.maxmana,
+             stam = state.stam, maxstam = state.maxstam, name = state.name, flags = "X", is_self = true }
+  end
+  for line in (data .. "\n"):gmatch("(.-)\n") do
+    local hp, mhp, m, mm, s, ms, name =
+      line:match("^(%d+) (%d+) (%d+) (%d+) (%d+) (%d+) %-(.-)%-%s*$")
+    if hp then
+      g[#g + 1] = { hp = tonumber(hp), maxhp = tonumber(mhp), mana = tonumber(m), maxmana = tonumber(mm),
+                    stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = "M" }
+    end
+  end
+  state.group = g
+  if on_update then on_update() end
+end
 
 dclient.handlers["areaname"] = function(data) state.area = data end
 
