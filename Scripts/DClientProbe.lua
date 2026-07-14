@@ -203,7 +203,7 @@ dclient.handlers["areaname"] = function(data) state.area = data end
 -- the payload with EVERY control byte escaped (\r \n \xNN) so section delimiters and the +0x40 terrain
 -- encoding are visible without the terminal eating them. Toggle with `dclient.capture_map`; on by default
 -- while we reverse the grid. File: ~/Documents/MudClient/smap_capture.log.
-dclient.capture_map = true   -- re-capturing across DISTINCT rooms to decode section-3 (room-id/coords)
+dclient.capture_map = false   -- section-3 decoded + bridged (AIPilot smap_on_map_update); flip on only to re-capture
 local SMAP_CAPTURE_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/smap_capture.log"
 local function smap_escape(s)
   return (s:gsub("[^\32-\126]", function(c)
@@ -218,6 +218,10 @@ dclient.handlers["map"] = function(data)
     local f = io.open(SMAP_CAPTURE_FILE, "a")
     if f then f:write(string.format("=== map %d bytes ===\n%s\n", #data, smap_escape(data))); f:close() end
   end
+  -- Feed AIPilot's smap coord bridge (decodes the room-id/coords section and drives
+  -- pilot_room_change), which restores the room-graph minimap over the 1.105 RPC transport where
+  -- kxwt_rvnum/kxwt_rshort are dead. Guarded: a no-op if AIPilot hasn't loaded (or hasn't loaded yet).
+  if smap_on_map_update then smap_on_map_update() end
   if on_update then on_update() end
 end
 

@@ -59,6 +59,30 @@ final class SoundService: @unchecked Sendable {
     /// here instead, then hop to main to schedule. Serial: decodes are quick individually and this bounds
     /// concurrent memory; a big music decode can't starve the render.
     private let decodeQueue = DispatchQueue(label: "com.mudclient.sound.decode", qos: .userInitiated)
+    /// Cache of decoded source PCM buffers keyed by file path. The AVAudioFile read/decode is the expensive
+    /// part; a game replays the same handful of effects (footsteps, casts, hits) and area tracks constantly,
+    /// so decoding each once and reusing the buffer removes the audible delay on repeats. Touched ONLY on
+    /// decodeQueue (serial), so it needs no extra lock. Capped so the big soundtrack buffers can't grow
+    /// unbounded; one-shots are tiny and dominate the working set.
+    private var decodeCache: [String: AVAudioPCMBuffer] = [:]
+    private var decodeCacheOrder: [String] = []
+    private static let decodeCacheMax = 64
+    /// Decode `file` to a source PCM buffer, serving from cache when possible. MUST be called on decodeQueue.
+    private func decodeSource(_ file: URL) -> AVAudioPCMBuffer? {
+        let key = file.path
+        if let cached = decodeCache[key] { return cached }
+        guard let audio = try? AVAudioFile(forReading: file), audio.length > 0,
+              let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
+                                         frameCapacity: AVAudioFrameCount(audio.length)),
+              (try? audio.read(into: src)) != nil
+        else { return nil }
+        decodeCache[key] = src
+        decodeCacheOrder.append(key)
+        if decodeCacheOrder.count > Self.decodeCacheMax {
+            let evict = decodeCacheOrder.removeFirst(); decodeCache[evict] = nil
+        }
+        return src
+    }
     private var channelPool: [AVAudioPlayerNode] = []       // main-queue only, pre-wired once
     private var channelAssign: [String: Int] = [:]          // channel name -> channelPool index
     private static let channelPoolSize = 4
@@ -109,10 +133,7 @@ final class SoundService: @unchecked Sendable {
         // the engine graph, so it can't deadlock.
         decodeQueue.async { [weak self] in
             guard let self,
-                  let audio = try? AVAudioFile(forReading: file), audio.length > 0,
-                  let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                                             frameCapacity: AVAudioFrameCount(audio.length)),
-                  (try? audio.read(into: src)) != nil,
+                  let src = self.decodeSource(file),
                   let buffer = self.convert(src, to: self.channelFormat)
             else { return }
             DispatchQueue.main.async { [weak self] in
@@ -137,13 +158,7 @@ final class SoundService: @unchecked Sendable {
         // behind the sound — the "heard the effect, text arrived seconds later" lag). One-shots are small,
         // so this is quick; then hop to main to schedule.
         decodeQueue.async { [weak self] in
-            guard let self,
-                  let audio = try? AVAudioFile(forReading: file),
-                  audio.length > 0,
-                  let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                                             frameCapacity: AVAudioFrameCount(audio.length)),
-                  (try? audio.read(into: src)) != nil
-            else { return }
+            guard let self, let src = self.decodeSource(file) else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.startEngine(), let fmt = self.oneShotFormat,
                       !self.oneShotPool.isEmpty else { return }

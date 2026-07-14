@@ -232,6 +232,119 @@ function pilot_room_name(n)
   if P.rooms[id].name ~= n then P.rooms[id].name = n; schedule_save() end
 end
 
+-- ---- smap coord bridge (restores the room-graph minimap over the 1.105 RPC transport) -----
+-- 1.105 abandoned kxwt_rvnum/kxwt_rshort — the room-id + x/y/z triggers pilot_room_change used to run
+-- off — so P.rooms never gets fed and the minimap stays empty. The `;smap;` block (state.dclient_map,
+-- set by DClientProbe's "map" handler) still carries room identity: it's several stacked fixed-width
+-- terrain/feature layer grids, followed by a FINAL section ~4x wider — 4 chars/cell, decoding a stable
+-- 18-bit room id (see decode_smap_cell below; the 4th char is always 0/unused). It's player-centered
+-- every frame (center cell = current room), so we reconstruct absolute coords frame-to-frame (the
+-- offset the new center room sat at in the PREVIOUS frame's grid = the step we just took) and feed the
+-- existing pilot_room_change exactly as kxwt_rvnum used to. Pure decode/reconstruction lives here;
+-- DClientProbe.lua just calls smap_on_map_update() (guarded) whenever state.dclient_map changes.
+
+-- Split the raw `;smap;` block into rows (mirrors HUD.lua's dclient_map_rows — duplicated rather than
+-- shared since HUD's is a local, and this one feeds a different section of the same block).
+local function smap_rows(raw)
+  local rows = {}
+  for line in (raw .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = (line:gsub("\r$", "")) end
+  while #rows > 0 and rows[#rows] == "" do rows[#rows] = nil end
+  return rows
+end
+
+-- One 4-char cell -> its 18-bit room id (0 = empty/unknown). Each char is `char - 0x40` (6-bit); the
+-- first 3 chars form the id, the 4th is always 0/unused.
+local function decode_smap_cell(c4)
+  local c0, c1, c2 = c4:byte(1) - 0x40, c4:byte(2) - 0x40, c4:byte(3) - 0x40
+  return (c0 << 12) | (c1 << 6) | c2
+end
+
+-- Pull the coords/room-id section out of a raw `;smap;` block: the WIDEST run of same-width rows
+-- (width >= 32, so >= 8 cells; >= 6 rows) — the terrain/feature layers above it are narrower. Returns
+-- { grid = <2D array of room-id ints>, h, w, center_r, center_c } (1-indexed), or nil.
+local function smap_coord_grid(raw)
+  local rows = smap_rows(raw)
+  local i, n = 1, #rows
+  local best
+  while i <= n do
+    local w = #rows[i]
+    local j = i
+    while j <= n and #rows[j] == w do j = j + 1 end
+    if w >= 32 and (j - i) >= 6 and (not best or w > best.w) then best = { i = i, j = j - 1, w = w } end
+    i = j
+  end
+  if not best then return nil end
+  local grid = {}
+  for r = best.i, best.j do
+    local line, row = rows[r], {}
+    for c = 1, best.w, 4 do
+      local cell = line:sub(c, c + 3)
+      row[#row + 1] = (#cell == 4) and decode_smap_cell(cell) or 0
+    end
+    grid[#grid + 1] = row
+  end
+  local h, w = #grid, #grid[1]
+  return { grid = grid, h = h, w = w, center_r = math.floor(h / 2) + 1, center_c = math.floor(w / 2) + 1 }
+end
+
+-- Reconstruction state (module-level, survives pilot.reload() via _AIP like the rest of the pilot):
+--   abs[room_id] = {x, y}   -- every room id we've ever placed, in our own absolute frame
+--   cur, cur_xy             -- the room we're currently anchored on, and its {x, y}
+--   prev_grid               -- last frame's smap_coord_grid() result (to find the step just taken)
+_AIP.smap = _AIP.smap or { abs = {}, cur = nil, cur_xy = nil, prev_grid = nil }
+local SM = _AIP.smap
+
+local function smap_grid_find(grid, id)
+  for r, row in ipairs(grid) do
+    for c, v in ipairs(row) do
+      if v == id then return r, c end
+    end
+  end
+  return nil
+end
+
+-- Feed one decoded grid: update the absolute-coord map and, if the center room changed, call the
+-- existing pilot_room_change (unchanged) so the room graph / minimap populate exactly as before.
+-- ORIENTATION IS A GUESS (col+ = east/+x, row+ = south/+y) — unverified live; flip both signs below if
+-- the minimap comes up mirrored. Jump handling (recall/death teleport): if the new center isn't in the
+-- previous frame's grid, fall back to its previously-known abs[] coord (revisit) or, failing that, just
+-- keep cur_xy as-is (an unavoidable guess — we have no ground truth for a room we've never seen before
+-- AND didn't step to from a known one).
+local function smap_apply(g)
+  local grid, center_r, center_c = g.grid, g.center_r, g.center_c
+  local C = grid[center_r] and grid[center_r][center_c] or 0
+  if C == 0 then return end                            -- degenerate/partial frame: nothing to anchor on
+
+  if SM.cur == nil then
+    SM.cur_xy = SM.cur_xy or { 0, 0 }
+  elseif C ~= SM.cur then
+    local r, c
+    if SM.prev_grid then r, c = smap_grid_find(SM.prev_grid.grid, C) end
+    if r then
+      SM.cur_xy = { SM.cur_xy[1] + (c - SM.prev_grid.center_c), SM.cur_xy[2] + (r - SM.prev_grid.center_r) }
+    elseif SM.abs[C] then
+      SM.cur_xy = { SM.abs[C][1], SM.abs[C][2] }
+    end
+  end
+
+  local changed = (C ~= SM.cur)
+  SM.cur, SM.prev_grid = C, g
+  for r, row in ipairs(grid) do
+    for c, id in ipairs(row) do
+      if id ~= 0 then SM.abs[id] = { SM.cur_xy[1] + (c - center_c), SM.cur_xy[2] + (r - center_r) } end
+    end
+  end
+
+  if changed then pilot_room_change(C, { SM.cur_xy[1], SM.cur_xy[2], 0, 0 }) end
+end
+
+-- Entry point: called (guarded, from DClientProbe.lua) whenever state.dclient_map updates.
+function smap_on_map_update()
+  if not (state and state.dclient_map) then return end
+  local g = smap_coord_grid(state.dclient_map)
+  if g then smap_apply(g) end
+end
+
 local function parse_exits(line)
   local lower = line:lower()
   local body = lower:match("%[exits:(.-)%]") or lower:match("obvious exits:(.+)")
@@ -2792,6 +2905,8 @@ _AIP_TEST = {
   nearest_reachable_to_coord = nearest_reachable_to_coord, mark_death = mark_death,
   mark_command = mark_command,
   find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
+  smap_coord_grid = smap_coord_grid, smap_apply = smap_apply, smap_on_map_update = smap_on_map_update,
+  SM = SM,
   parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
   learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
   waypoint_num_for_room = waypoint_num_for_room, waypoint_cmd_num = waypoint_cmd_num,

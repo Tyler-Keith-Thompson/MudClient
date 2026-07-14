@@ -64,11 +64,12 @@ local function tilde_to_ansi(s)
 end
 
 -- RPC message debugger (`#rpc ...`). Globals so they persist across #reload and the user drives them:
---   _RPC_DEBUG   — master on/off (default ON). When on, EVERY decoded message (except text_block, which
---                  is the rendered game text) is echoed as a one-line summary — UNLESS its name is ignored.
+--   _RPC_DEBUG   — master on/off (default OFF — the protocol is mapped now; turn on with `#rpc debug on`
+--                  to inspect messages). When on, EVERY decoded message (except text_block, which is the
+--                  rendered game text) is echoed as a one-line summary — UNLESS its name is ignored.
 --   _RPC_IGNORE  — a set of name substrings the user has muted (`#rpc ignore hpbar`); matched against the
 --                  message's proto_name AND rpc_service_name. The user tracks what's noise, not the code.
-_RPC_DEBUG = _RPC_DEBUG == nil and true or _RPC_DEBUG
+_RPC_DEBUG = _RPC_DEBUG == nil and false or _RPC_DEBUG
 _RPC_IGNORE = _RPC_IGNORE or {}
 -- Normalize a name for matching: lowercase + drop underscores, so the user can `#rpc ignore` by whatever
 -- they SEE — the pretty camelCase summary label ("audioPlayout", "enemyHP") OR the raw snake proto name

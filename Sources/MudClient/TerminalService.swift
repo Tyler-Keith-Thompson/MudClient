@@ -518,6 +518,15 @@ final class TerminalService {
         // carried colour survives — both live (what the next DECSC save records) and in the stored
         // scrollback (what the next line's SGR carry inherits). No-op when the game is at default.
         if isEcho { body = Self.echoBodyRestoringSGR(body, carried: liveSGR) }
+        // An echo must never share a line with game text. The game often leaves a partial line with no
+        // trailing newline (a prompt — especially over RPC), which lives in `pendingLine`; without this an
+        // echo appends right onto it ("<prompt>[rpc] …"). If we're mid-line, start the echo on a fresh one.
+        if isEcho {
+            scrollbackLock.lock()
+            let midLine = !pendingLine.isEmpty
+            scrollbackLock.unlock()
+            if midLine { body = "\n" + body }
+        }
         let payload = body + terminator
         // Track the colour the game stream expects active going forward. Game output advances it; an echo
         // body ends with liveSGR re-asserted, so this leaves it unchanged for echoes.
