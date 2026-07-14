@@ -97,6 +97,10 @@ test:
 test-lua:
     {{BAZEL}} test //tools/luatest:lua_scripts_test --config={{BAZEL_CONFIG}} --test_output=errors
 
+[doc('Regenerate the protobuf descriptor set Lua reads via pb.load()')]
+regen-rpc-descriptor:
+    protoc --descriptor_set_out=Scripts/rpc_descriptor.pb --proto_path=Sources/MudClient/RPC/proto Sources/MudClient/RPC/proto/*.proto
+
 [doc('Generate Xcode project (pass --no-open to skip launching Xcode)')]
 generate *args="":
     @bash scripts/generate-xcodeproj.sh {{args}}

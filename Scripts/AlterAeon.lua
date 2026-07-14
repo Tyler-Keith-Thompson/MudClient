@@ -20,12 +20,14 @@
 -- Trigger patterns are SWIFT regular expressions, so they use [[...]] long strings to pass
 -- backslash classes like \d through untouched.
 --
--- Loading this at startup (via load("Scripts")) opens the connection. AlterAeon 1.105 is single-socket:
--- the whole game runs over the protobuf RPC (www.alteraeon.com:3103) — game text arrives as text_block,
--- commands go out as text_block, telemetry + music ride the same socket. So we open the RPC, NOT the
--- legacy telnet (:3102). uuid defaults from the install's alter_aeon.cfg. Guarded by rpc_is_connected()
--- so a hot-reload() — which re-runs this file in the LIVE state — never drops or redials an open session.
-if rpc_connect and not rpc_is_connected() then rpc_connect() end
+-- AlterAeon 1.105 is single-socket: the whole game runs over the protobuf RPC
+-- (www.alteraeon.com:3103) — game text arrives as text_block, commands go out as text_block,
+-- telemetry + music ride the same socket. The connection is opened by RPC.lua (Scripts/RPC.lua,
+-- `dclient_rpc.start()`), a pure-Lua reimplementation of the old Swift RPCConnection built on
+-- net_connect/net_send/on_net/on_net_connect/on_net_disconnect — it self-starts on load (case-insensitive
+-- alphabetical load order puts it after AlterAeon, but load order doesn't matter here since it's
+-- guarded and self-contained). Do NOT also call rpc_connect() here — that would open a SECOND,
+-- redundant Swift-side RPC connection.
 
 -- The shared world-state table. AlterAeon OWNS the schema, but fills it DEFENSIVELY (merge missing
 -- keys into whatever `state` already is) so load order doesn't matter: another script may create a

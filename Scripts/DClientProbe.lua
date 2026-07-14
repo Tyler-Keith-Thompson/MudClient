@@ -15,7 +15,7 @@
 -- Enabled by default (dclient.on = true) with debug on (dclient.debug = true) so every tag is visible
 -- while we finish mapping out the protocol; `#dcprobe` re-sends the identity if the server needs a kick.
 
-local dclient = { on = true, buf = "", debug = true, handlers = {} }
+local dclient = { on = true, buf = "", debug = false, handlers = {} }
 
 local function dclient_dispatch(tag, data)
   -- Debug: echo EVERY tag, handled or not (so nothing is invisible while we map the protocol). Newlines in

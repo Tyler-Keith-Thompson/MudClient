@@ -37,6 +37,11 @@ final class RPCConnection: @unchecked Sendable {
     private var phase: Phase = .awaitingAck
     private var ackBuffer = Data()
     private var pendingUUID = ""
+    // text_block bytes are the raw telnet-style game stream (IAC, `;s<tag>;` dclient tags, MSP markers all
+    // inline). We feed them through the SAME inbound pipeline the telnet Connection uses so IAC is parsed,
+    // tags are peeled, lines are assembled, MSP fires, and triggers/HUD run — instead of raw-rendering.
+    private var textContinuation: AsyncThrowingStream<Data, any Swift.Error>.Continuation?
+    private var pumpTask: Task<Void, Never>?
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return channel != nil }
 
@@ -53,9 +58,37 @@ final class RPCConnection: @unchecked Sendable {
         return "DFLT000000000000000000000000"
     }
 
+    /// Run the text_block byte stream through the same inbound pipeline as the telnet Connection
+    /// (captureRaw → IAC → line endings → on_stream tag-peel → line assembly → MSP → triggers), then
+    /// render + log each processed line exactly like ConnectionManager does. IAC responses are NOT written
+    /// back (the RPC channel carries framed protobuf, not raw telnet), but IAC is still parsed/stripped and
+    /// ECHO (password hiding) handled locally.
+    private func startTextPump() {
+        let (textStream, cont) = AsyncThrowingStream<Data, any Swift.Error>.makeStream()
+        lock.lock(); textContinuation = cont; lock.unlock()
+        pumpTask = Task {
+            let processed = textStream
+                .captureRaw()
+                .handleIACCommunication(writeToStream: { _ in })
+                .normalizeLineEndings()
+                .filterServerStream()
+                .assembleLines()
+                .processMSP()
+                .processServerOutputForScripts()
+            do {
+                for try await string in processed {
+                    Container.scriptInterpreter().engine.notifyUpdate()
+                    Container.sessionLog().logServer(string)
+                    Container.terminalService().render(string)
+                }
+            } catch {}
+        }
+    }
+
     func connect(uuid rawUUID: String) {
         let uuid = rawUUID.isEmpty ? Self.defaultUUID() : rawUUID
         disconnect()
+        startTextPump()
         log("connecting to \(Self.host):\(Self.port)… (uuid=\(uuid))")
 
         var tlsConfig = TLSConfiguration.makeClientConfiguration()
@@ -104,8 +137,14 @@ final class RPCConnection: @unchecked Sendable {
     }
 
     func disconnect() {
-        lock.lock(); let ch = channel; channel = nil; lock.unlock()
+        lock.lock()
+        let ch = channel; channel = nil
+        let cont = textContinuation; textContinuation = nil
+        let pump = pumpTask; pumpTask = nil
+        lock.unlock()
         ch?.close(promise: nil)
+        cont?.finish()
+        pump?.cancel()
         framer = RPCFramer()
         privateKey = nil
         phase = .awaitingAck
@@ -115,15 +154,26 @@ final class RPCConnection: @unchecked Sendable {
     private func write(_ data: Data) {
         lock.lock(); let ch = channel; lock.unlock()
         guard let ch else { return }
-        // DEBUG: dump outbound bytes so we can validate our framing against the server's expectation.
-        let dump = data.prefix(120)
-        let hex = dump.map { String(format: "%02x", $0) }.joined(separator: " ")
-        log("TX \(data.count)B: \(hex)")
+        if Self.debugLog {
+            let dump = data.prefix(120)
+            let hex = dump.map { String(format: "%02x", $0) }.joined(separator: " ")
+            log("TX \(data.count)B: \(hex)")
+        }
         ch.writeAndFlush(ByteBuffer(bytes: data), promise: nil)
     }
 
+    /// When false (default), routine decoded-telemetry messages aren't echoed to the screen — the display
+    /// stays clean game text + widgets. Lifecycle/auth/unknown/errors always log. Toggle via rpc_debug().
+    nonisolated(unsafe) static var debugLog = false
+
     private func log(_ message: String) {
         Container.terminalService().print("[rpc] \(message)")
+    }
+
+    /// Per-message trace, gated on `debugLog` — used for the routine decoded telemetry so it can be
+    /// silenced as we wire each type into state/widgets.
+    private func dbg(_ message: String) {
+        if Self.debugLog { log(message) }
     }
 
     /// Outbound user input / commands / login over the RPC. CONFIRMED from the binary's send_command()
@@ -144,7 +194,7 @@ final class RPCConnection: @unchecked Sendable {
         frameinfo.rpcServiceName = "text_block"                          // short form (required)
         frameinfo.f20 = 1                                                // EVENT/PUSH
         write(RPCFramer.encodeBlock(frameinfo: frameinfo, payload: payload))
-        log("send: '\(text)'")
+        dbg("send: '\(text)'")
     }
 
     // MARK: - Handshake
@@ -196,12 +246,13 @@ final class RPCConnection: @unchecked Sendable {
     }
 
     private func handleInbound(_ data: Data) {
-        // DEBUG: dump raw inbound bytes (pre-framing) so we can see the server's exact preamble/framing.
-        let dump = data.prefix(160)
-        let hex = dump.map { String(format: "%02x", $0) }.joined(separator: " ")
-        let ascii = String(dump.map { (0x20...0x7e).contains($0) ? Character(UnicodeScalar($0)) : "." })
-        log("raw \(data.count)B: \(hex)")
-        log("raw ascii: \(ascii)")
+        if Self.debugLog {
+            let dump = data.prefix(160)
+            let hex = dump.map { String(format: "%02x", $0) }.joined(separator: " ")
+            let ascii = String(dump.map { (0x20...0x7e).contains($0) ? Character(UnicodeScalar($0)) : "." })
+            log("raw \(data.count)B: \(hex)")
+            log("raw ascii: \(ascii)")
+        }
 
         var payload = data
         if phase == .awaitingAck {
@@ -244,6 +295,10 @@ final class RPCConnection: @unchecked Sendable {
         switch message {
         case .auth(let m):
             handleAuth(m)
+        // Telemetry below is REDUNDANT with the tagged data (kxwq_*/;s..) that rides inside text_block and
+        // is already parsed by the Lua scripts → widgets. So we do NOT wire it into state (that would
+        // double-write / risk conflicts). We keep it LOGGED (visible) as "not-yet-handled" per the user's
+        // ask; as we decide to make the protobuf the source for a given widget, flip its case to silent.
         case .hpbar(let m):
             log("hpbar f1=\(m.f1) f2=\(m.f2) f3=\(m.f3) f4=\(m.f4) f5=\(m.f5) f6=\(m.f6)")
         case .enemyHP(let m):
@@ -267,14 +322,11 @@ final class RPCConnection: @unchecked Sendable {
         case .channelSend(let m):
             log("channelSend channel='\(m.channelName)' message='\(m.sentMessage)'")
         case .textBlock(let m):
-            // The game's actual output. `text` is raw ANSI + Latin-1 bytes (its own \r\n embedded), so
-            // decode byte→scalar (Latin-1, lossless — keeps ESC/high bytes). Mirror the telnet inbound path
-            // (ConnectionManager): refresh the panel model, RECORD TO THE RAW LOG (so we can build parsers
-            // for the tagged data that rides inside text_block), then render() verbatim.
-            let text = String(m.text.map { Character(UnicodeScalar($0)) })
-            Container.scriptInterpreter().engine.notifyUpdate()
-            Container.sessionLog().logServer(text)
-            Container.terminalService().render(text)
+            // The game's actual output — raw telnet-style bytes (IAC, `;s<tag>;`, MSP markers inline).
+            // Hand them to the inbound pipeline (startTextPump) rather than rendering raw, so IAC is parsed,
+            // tags peel, lines assemble, and triggers fire — exactly like the telnet path.
+            lock.lock(); let cont = textContinuation; lock.unlock()
+            cont?.yield(m.text)
         case .audioPlayout(let m):
             log("audioPlayout file='\(m.shortClipFilename)'")
         case .keepalive(let m, let reqFrameinfo):
@@ -288,7 +340,7 @@ final class RPCConnection: @unchecked Sendable {
             pong.f1 = m.f1
             if let payload: Data = try? pong.serializedBytes() {
                 write(RPCFramer.encodeBlock(frameinfo: respFrameinfo, payload: payload))
-                log("keepalive ping (txn \(reqFrameinfo.f30)) — ponged")
+                dbg("keepalive ping (txn \(reqFrameinfo.f30)) — ponged")
             }
         case .unknown(let protoName, let serviceName, let payload):
             log("unknown proto=\(protoName) service=\(serviceName) bytes=\(payload.count)")

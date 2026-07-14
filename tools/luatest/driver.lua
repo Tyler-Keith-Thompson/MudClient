@@ -26,6 +26,7 @@ for _, n in ipairs({
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
   "unbind", "input_set", "bell", "copy", "disconnect", "is_connected", "connect", "telnet_send", "on_stream",
   "rpc_connect", "rpc_disconnect", "rpc_send", "rpc_is_connected",
+  "net_connect", "net_send", "net_disconnect", "net_is_connected", "feed_server",
   "log_start", "log_stop", "log_active", "replay",
   "grep", "sent", "received", "claude", "chat",
   "speak", "speech_stop",
@@ -93,8 +94,8 @@ end
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Audio.lua",
                      "Scripts/AutoFight.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
                      "Scripts/Corpse.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
-                     "Scripts/Promise.lua", "Scripts/Prompt.lua", "Scripts/Recovery.lua", "Scripts/Soulforge.lua",
-                     "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
+                     "Scripts/Promise.lua", "Scripts/Prompt.lua", "Scripts/Recovery.lua", "Scripts/RPC.lua",
+                     "Scripts/Soulforge.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end

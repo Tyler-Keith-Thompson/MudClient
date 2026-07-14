@@ -21,6 +21,7 @@ filegroup(
         "HUD.lua",
         "Prompt.lua",
         "Recovery.lua",
+        "RPC.lua",
         "Soulforge.lua",
         "Trivia.lua",
         "Equipment.lua",
@@ -28,6 +29,7 @@ filegroup(
         "ChatDecode.lua",
         "Promise.lua",
         "testing.lua",
+        "rpc_descriptor.pb",
     ] + glob(["tests/*.lua"]),
     visibility = ["//visibility:public"],
 )

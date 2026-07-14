@@ -381,6 +381,26 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("on_disconnect", [.string(reason)])
     }
 
+    /// Raw bytes arrived on the game-agnostic `NetConnection`. No-op unless the script defines
+    /// `on_net(data)`. `data` is delivered byte-exact (see `LuaValue.bytes`/`Lua.push`) so a raw
+    /// protobuf/RPC frame survives the round-trip.
+    func notifyNet(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_net", [.bytes(data)])
+    }
+
+    /// The `NetConnection` socket just went active. No-op unless the script defines `on_net_connect`.
+    func notifyNetConnect() {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_net_connect", [])
+    }
+
+    /// The `NetConnection` socket went down. No-op unless the script defines `on_net_disconnect(reason)`.
+    func notifyNetDisconnect(reason: String) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_net_disconnect", [.string(reason)])
+    }
+
     /// A GO-AHEAD prompt boundary flushed `text`. No-op unless the script defines `on_prompt(text)`.
     func notifyPrompt(_ text: String) {
         // A prompt is the server's reply boundary — pair it with the last send for a round-trip sample.
@@ -740,6 +760,50 @@ final class LuaScriptEngine: @unchecked Sendable {
         // knowing anything about it — the client only knows "a script may rewrite the stream".
         lua.register("on_stream") { [weak self] args in
             if case .function(let fn)? = args.first { self?.streamFilter = fn }
+            return []
+        }
+        // ---- Generic binary socket (game-agnostic — no protocol/framing knowledge here; that's Lua's
+        // job now). Mirrors connect/disconnect/is_connected above, but raw-byte, and a second, wholly
+        // independent socket from the telnet ConnectionManager/RPCConnection. ----
+        // net_connect(host, port[, opts]) — opts.tls (bool, default false).
+        lua.register("net_connect") { [weak self] args in
+            guard case .string(let host)? = args.first, let port = args.count > 1 ? Self.intArg(args[1]) : nil else {
+                self?.usage(#"net_connect: expected (host, port[, {tls=true}]) — e.g. net_connect("example.com", 443, {tls=true})"#)
+                return []
+            }
+            var tls = false
+            if args.count > 2, case .table(_, let opts) = args[2], case .bool(let b)? = opts["tls"] { tls = b }
+            Container.netConnection().connect(host: host, port: port, tls: tls)
+            return []
+        }
+        // net_send(data) — raw write to the socket, binary-safe (no newline appended, no splitting).
+        lua.register("net_send") { [weak self] args in
+            guard let data = args.first.flatMap(Self.dataArg) else {
+                self?.usage(#"net_send: expected a (byte) string — e.g. net_send("\255\250...")"#)
+                return []
+            }
+            Container.netConnection().send(data)
+            return []
+        }
+        // net_disconnect() — close the socket.
+        lua.register("net_disconnect") { _ in
+            Container.netConnection().disconnect()
+            return []
+        }
+        // net_is_connected() -> bool.
+        lua.register("net_is_connected") { _ in
+            [.bool(Container.netConnection().isConnected)]
+        }
+        // feed_server(data) — inject raw bytes into the SAME inbound display/trigger pipeline the
+        // telnet connection uses, so a script can hand decoded game text (e.g. peeled out of a
+        // protobuf frame) back to be rendered + trigger-processed. Independent of net_connect/
+        // is_connected — works even with no socket open at all.
+        lua.register("feed_server") { [weak self] args in
+            guard let data = args.first.flatMap(Self.dataArg) else {
+                self?.usage(#"feed_server: expected a (byte) string — e.g. feed_server("You are standing here.\n")"#)
+                return []
+            }
+            Container.serverTextFeed().feed(data)
             return []
         }
         installLogReplay()
@@ -1538,6 +1602,16 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     private static func intArg(_ v: LuaValue) -> Int? {
         switch v { case .int(let i): return Int(i); case .number(let d): return Int(d); default: return nil }
+    }
+    /// Byte-exact extraction for an arg carrying raw data — a Lua string decodes to `.string` when it
+    /// happens to be valid UTF-8 and `.bytes` otherwise (see `Lua.decodeString`); accept either so
+    /// binary payloads (protobuf, arbitrary bytes) and plain text both work.
+    private static func dataArg(_ v: LuaValue) -> Data? {
+        switch v {
+        case .string(let s): return Data(s.utf8)
+        case .bytes(let d): return d
+        default: return nil
+        }
     }
     private static func doubleArg(_ v: LuaValue) -> Double? {
         switch v { case .number(let d): return d; case .int(let i): return Double(i); default: return nil }

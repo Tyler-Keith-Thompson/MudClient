@@ -83,6 +83,10 @@ final class Lua: @unchecked Sendable {
     init() {
         state = luaL_newstate()
         luaL_openlibs(state)
+        // Vendored lua-protobuf (starwing/lua-protobuf 0.5.2): registers as `require("pb")` /
+        // the loaded global `pb`, same convention as the standard libs above.
+        luaL_requiref(state, "pb", luaopen_pb, 1)
+        lua_settop(state, -2) // pop the pb table pushed by luaL_requiref
     }
 
     deinit {
@@ -360,6 +364,19 @@ final class Lua: @unchecked Sendable {
 
     func decode(at idx: Int32) -> LuaValue { decode(at: idx, ancestors: [], depth: 0) }
 
+    /// Decode a Lua string byte-exactly (length-counted via `lua_tolstring`, NOT `String(cString:)` —
+    /// that would truncate at the first embedded NUL). Valid UTF-8 decodes to `.string` (the common
+    /// case: commands, text, embedded NULs all survive). Bytes that are NOT valid UTF-8 (arbitrary
+    /// binary — protobuf, Latin-1, raw telnet) decode to `.bytes(Data)` instead of lossily replacing
+    /// invalid sequences, so a Lua string round-trips byte-for-byte through the host either way.
+    private static func decodeString(_ state: OpaquePointer, _ idx: Int32) -> LuaValue {
+        var len: Int = 0
+        guard let c = lua_tolstring(state, idx, &len) else { return .nil }
+        let bytes = c.withMemoryRebound(to: UInt8.self, capacity: len) { UnsafeBufferPointer(start: $0, count: len) }
+        if let s = String(bytes: bytes, encoding: .utf8) { return .string(s) }
+        return .bytes(Data(bytes))
+    }
+
     /// `ancestors` holds the table addresses on the current descent PATH (not all tables ever seen), so
     /// a table that points back at one of its own ancestors is a cycle and is broken; a table merely
     /// referenced by two siblings (a DAG, no cycle) is still decoded fully in each place. This is what
@@ -376,8 +393,7 @@ final class Lua: @unchecked Sendable {
             }
             return .number(lua_tonumberx(state, idx, nil))
         case LUA_TSTRING:
-            if let c = lua_tolstring(state, idx, nil) { return .string(String(cString: c)) }
-            return .nil
+            return Self.decodeString(state, idx)
         case LUA_TFUNCTION:
             lua_pushvalue(state, idx)                                  // copy to top
             let ref = luaL_ref(state, clua_registryindex())            // pops it, returns handle

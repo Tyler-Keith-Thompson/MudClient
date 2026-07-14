@@ -513,6 +513,19 @@ doc("rpc_is_connected", { sig = "rpc_is_connected()", group = "connection",
 doc("rpc_send", { sig = "rpc_send(text)", group = "connection",
   text = "Send user input / a command / login text over the RPC connection (:3103). PROVISIONAL outbound message format while the exact one is confirmed from the client binary. Use to try driving the game over the RPC.",
   example = "rpc_send(\"look\")" })
+doc("net_connect", { sig = "net_connect(host, port[, opts])", group = "connection",
+  text = "Open a THIRD, wholly generic binary socket (no protocol/framing/handshake knowledge — that's entirely Lua's job). opts.tls (bool, default false) wraps it in TLS. Inbound bytes arrive via on_net(data); on_net_connect()/on_net_disconnect(reason) fire on lifecycle. Independent of connect()/rpc_connect().",
+  example = "net_connect(\"example.com\", 443, { tls = true })" })
+doc("net_send", { sig = "net_send(data)", group = "connection",
+  text = "Raw, binary-safe write to the net_connect() socket — no newline appended, no command splitting. data is a (byte) string.",
+  example = "net_send(payload)" })
+doc("net_disconnect", { sig = "net_disconnect()", group = "connection",
+  text = "Close the socket opened by net_connect()." })
+doc("net_is_connected", { sig = "net_is_connected() -> bool", group = "connection",
+  text = "Whether the net_connect() socket is currently connected." })
+doc("feed_server", { sig = "feed_server(data)", group = "connection",
+  text = "Inject raw bytes into the SAME inbound display/trigger pipeline the telnet connection uses (IAC parsing, line assembly, MSP, on_stream, triggers) — lets a script hand back decoded game text (e.g. peeled out of a protobuf frame from net_connect) to be rendered and processed as if it arrived over the wire. Independent of net_connect/is_connected — works with no socket open at all.",
+  example = "feed_server(\"You are standing in a room.\\n\")" })
 
 -- terminal / input
 doc("bind", { sig = "bind(keyname, handler) -> id", group = "terminal",
@@ -992,3 +1005,6 @@ doc("on_mouse", { sig = "on_mouse(event, x, y, button)", group = "hooks", text =
 doc("on_user_input", { sig = "on_user_input(cmd)", group = "hooks", text = "hooks: define a global with this name. Observe a typed command (non-swallowing)." })
 doc("on_update", { sig = "on_update()", group = "hooks", text = "hooks: define a global with this name. Fired after a batch of server output so the script can refresh panels." })
 doc("on_inventory", { sig = "on_inventory()", group = "hooks", text = "hooks: define a global with this name. Fired by AlterAeon.lua's inventory trigger when the `You are carrying:` block just closed (state.inventory is current; state.inv_seq also bumps). Lets a script await the ACTUAL inv reply instead of a fixed post-send delay." })
+doc("on_net", { sig = "on_net(data)", group = "hooks", text = "hooks: define a global with this name. Fired with raw, byte-exact bytes read from the net_connect() socket (arbitrary binary — e.g. a protobuf/RPC frame)." })
+doc("on_net_connect", { sig = "on_net_connect()", group = "hooks", text = "hooks: define a global with this name. Fired when the net_connect() socket connects." })
+doc("on_net_disconnect", { sig = "on_net_disconnect(reason)", group = "hooks", text = "hooks: define a global with this name. Fired when the net_connect() socket goes down." })

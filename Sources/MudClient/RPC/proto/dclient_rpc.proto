@@ -4,6 +4,10 @@
 // numeric field names (fN) are NOT in the binary. String field names ARE exact.
 // Text-carrying fields are `bytes` (not `string`): AlterAeon game text is ANSI + Latin-1,
 // not valid UTF-8, and a `string` field would make SwiftProtobuf reject the whole message.
+//
+// Scripts/rpc_descriptor.pb (checked in) is a FileDescriptorSet compiled from all the .protos in
+// this directory — it's what the embedded Lua's `pb.load()` reads to decode/encode these messages
+// at runtime. Regenerate it after editing any .proto here: `just regen-rpc-descriptor`.
 syntax = "proto2";
 package dclient_rpc;
 
