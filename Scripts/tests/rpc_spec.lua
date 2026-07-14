@@ -151,6 +151,34 @@ test("unknown proto routes without erroring; echoes only under _RPC_DEBUG", func
   echo, _RPC_DEBUG = prior_echo, prior_dbg
 end)
 
+test("enemy_hp_data drives AutoFight via __autofight_prompt and clears the fight on death", function()
+  if not load_test_descriptor() then return end
+  local calls, prior = {}, __autofight_prompt
+  __autofight_prompt = function(pct, name) calls[#calls + 1] = { pct = pct, name = name } end
+  local fi = { proto_name = "dclient_rpc.enemy_hp_data", rpc_service_name = "enemyhp" }
+  -- A live health bar → feed (pct, name).
+  _RPC_TEST.route(fi, pb.encode("dclient_rpc.enemy_hp_data", { enemy_name = "A screech-Owl", f2 = 84 }))
+  expect(#calls):eq(1)
+  expect(calls[1].pct):eq(84); expect(calls[1].name):eq("A screech-Owl")
+  expect(state.fighting):truthy()
+  -- The death beat (hp=nil/0) must NOT keep the fight alive.
+  _RPC_TEST.route(fi, pb.encode("dclient_rpc.enemy_hp_data", { enemy_name = "A screech-Owl", f2 = 0 }))
+  expect(state.fighting):falsy()
+  __autofight_prompt = prior
+end)
+
+test("generic_kv_event key='ncombat' ends the fight and AutoFight authoritatively", function()
+  if not load_test_descriptor() then return end
+  local ended, prior = false, __autofight_prompt
+  __autofight_prompt = function(pct, name) if pct == nil and name == nil then ended = true end end
+  state.fighting = true
+  local fi = { proto_name = "xirr_client_rpc.generic_kv_event", rpc_service_name = "kvp" }
+  _RPC_TEST.route(fi, pb.encode("xirr_client_rpc.generic_kv_event", { key = "ncombat" }))
+  expect(state.fighting):falsy()
+  expect(ended):truthy()
+  __autofight_prompt = prior
+end)
+
 test("generic_kv_event key='dirs' decodes the exits bitmask into state.exits", function()
   if not load_test_descriptor() then return end
   local prior_exits = state.exits

@@ -198,8 +198,26 @@ dclient.handlers["areaname"] = function(data) state.area = data end
 -- features/rooms. Per the decompiled protocol notes this is a ~23x23 local grid with the player near
 -- its center — NOT the rvnum room graph the old AIPilot minimap used (that graph gets no data over
 -- RPC now, since rvnum tags are gone). Stash the raw text; HUD.lua's minimap_cells() parses/renders it.
+-- CAPTURE: dump the FULL raw ;smap; payload losslessly to a file so the real sectioned structure can be
+-- inspected offline (we've only ever seen a sliver on-screen). Each event = one record: byte length, then
+-- the payload with EVERY control byte escaped (\r \n \xNN) so section delimiters and the +0x40 terrain
+-- encoding are visible without the terminal eating them. Toggle with `dclient.capture_map`; on by default
+-- while we reverse the grid. File: ~/Documents/MudClient/smap_capture.log.
+dclient.capture_map = false   -- format reversed (see HUD.lua minimap_cells_from_dclient); flip on to re-capture
+local SMAP_CAPTURE_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/smap_capture.log"
+local function smap_escape(s)
+  return (s:gsub("[^\32-\126]", function(c)
+    local b = c:byte()
+    if b == 13 then return "\\r" elseif b == 10 then return "\\n" end
+    return string.format("\\x%02x", b)
+  end))
+end
 dclient.handlers["map"] = function(data)
   state.dclient_map = data
+  if dclient.capture_map then
+    local f = io.open(SMAP_CAPTURE_FILE, "a")
+    if f then f:write(string.format("=== map %d bytes ===\n%s\n", #data, smap_escape(data))); f:close() end
+  end
   if on_update then on_update() end
 end
 

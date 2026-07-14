@@ -308,9 +308,20 @@ end)
 
 -- ---- minimap on the new 1.105 RPC model (the ;smap; server-rendered grid, state.dclient_map) ---------
 
-local map_glyph_fg = _HUD_TEST.map_glyph_fg
+local map_glyph = _HUD_TEST.map_glyph
 local dclient_map_rows = _HUD_TEST.dclient_map_rows
+local dclient_terrain_section = _HUD_TEST.dclient_terrain_section
 local minimap_cells_from_dclient = _HUD_TEST.minimap_cells_from_dclient
+
+-- A real ;smap; block (captured live): 11 terrain rows (width 11), then a 3-row 4-chars-per-cell
+-- room-id/coords section (width 44) that must be IGNORED by terrain extraction.
+local SMAP = table.concat({
+  "@@@@@@@@@@@", "@@@@@@@@@@@", "@@@DD@@@@@D", "@@@D@D@@@@@", "@@@D@@D@DB@",
+  "@@DD@D@D@DC", "@@@DA@CD@D@", "@@@@D@@@C@@", "@@@@@@@@@DD", "@@@@@@@@@@@", "@@@@@@@@@@@",
+  "@@@@@@@@@@@@A@IPBDL@@@@@@@@@@@@@@@@@@@@@BDO@",
+  "@@@@@@@@@@@@A@LABDC@APAH@@@@@@@@@@@@@@@@BFF@",
+  "@@@@@@@@DBV@BBR@BDZ@A@F@B@Q@@@@@BDB@BDT@BD]@",
+}, "\r\n")
 
 test("dclient_map_rows splits \\r\\n-separated rows and drops a trailing blank", function()
   local rows = dclient_map_rows("@@@\r\nABC\r\n@@@")
@@ -321,26 +332,35 @@ test("dclient_map_rows splits \\r\\n-separated rows and drops a trailing blank",
   expect(#rows2):eq(2)
 end)
 
-test("map_glyph_fg dims unexplored '@'/blank and colors letters", function()
-  expect(map_glyph_fg("@")):eq("brightblack")
-  expect(map_glyph_fg(" ")):eq("brightblack")
-  expect(map_glyph_fg("")):eq("brightblack")
-  expect(map_glyph_fg("A")):eq("green")        -- first palette color
-  expect(map_glyph_fg("B")):eq("brightgreen")   -- second palette color
+test("map_glyph: empty code is a dim dot, terrain codes are coloured blocks", function()
+  local g0, fg0 = map_glyph(0)
+  expect(g0):eq("·"); expect(fg0):eq("brightblack")
+  local g1, fg1 = map_glyph(1)
+  expect(g1):eq("▪"); expect(fg1):eq("green")          -- first palette colour
+  local _, fg2 = map_glyph(2)
+  expect(fg2):eq("brightgreen")                        -- second palette colour
 end)
 
-test("minimap_cells_from_dclient parses a raw grid into fixed-width cell rows, clipped/centered", function()
-  local raw = "@@@@@@@@@@@\r\n@@@DD@@@@@D\r\n@@@D@@D@DB@\r\n@@@@@@@@@@@"
-  local out = minimap_cells_from_dclient(raw)
+test("dclient_terrain_section picks the widest-run terrain grid, ignoring the coords section", function()
+  local sec = dclient_terrain_section(dclient_map_rows(SMAP))
+  expect(sec):truthy()
+  expect(#sec):eq(11)                                  -- the 11 terrain rows, not the 3 coord rows
+  expect(#sec[1]):eq(11)                               -- width 11 (not the 44-wide coord section)
+end)
+
+test("minimap_cells_from_dclient renders the terrain section, player-centered", function()
+  local out = minimap_cells_from_dclient(SMAP)
   expect(out):truthy()
-  expect(#out):eq(4)                          -- shorter than the clip height -> keeps every row
-  expect(out[1].width):eq(11 + 2)             -- row width + the 2-space gutter
-  -- first two spans: the gutter, then the first grid cell
-  expect(out[1].spans[1].text):eq("  ")
-  expect(out[1].spans[2].text):eq("@")
-  expect(out[1].spans[2].fg):eq("brightblack")
+  expect(#out):eq(11)
+  expect(out[1].width):eq(11 + 2)                      -- width + 2-space gutter
+  expect(out[1].spans[1].text):eq("  ")                -- gutter
+  expect(out[1].spans[2].text):eq("·")                 -- code 0 -> dim dot
+  -- dead-center cell (row 6, col 6) is marked as "you"
+  expect(out[6].spans[1 + 6].text):eq("◉")
+  expect(out[6].spans[1 + 6].fg):eq("brightwhite")
 end)
 
-test("minimap_cells_from_dclient returns nil for an empty/blank grid", function()
+test("minimap_cells_from_dclient returns nil when there is no terrain section", function()
   expect(minimap_cells_from_dclient("")):eq(nil)
+  expect(minimap_cells_from_dclient("@@@\r\nABC")):eq(nil)   -- too few rows to be a grid
 end)

@@ -62,10 +62,13 @@ end
 -- persist.save() when you just have a table. Returns true on success.
 function M.write(path, body)
   if not spit(path .. ".tmp", body) then return false end
-  local cur = fsize(path)
-  if cur > 0 and cur >= fsize(path .. ".bak") then
-    local data = slurp(path); if data then spit(path .. ".bak", data) end
-  end
+  -- Snapshot the shrink-proof .bak. Read the current primary ONCE (not 3×: the old code slurped `path`
+  -- for its size, slurped `.bak` for ITS size, then slurped `path` AGAIN to copy — three full reads of a
+  -- multi-hundred-KB file per save, all under the Lua lock). We only need the primary's bytes + the .bak
+  -- size, so: one read of the primary, one size of .bak.
+  local data = slurp(path)
+  local cur = data and #data or 0
+  if cur > 0 and cur >= fsize(path .. ".bak") then spit(path .. ".bak", data) end
   return os.rename(path .. ".tmp", path) and true or false
 end
 

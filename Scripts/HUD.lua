@@ -442,61 +442,69 @@ local function dclient_map_rows(raw)
   return rows
 end
 
--- GUESS (unverified live — flag for correction): `@` = unexplored/empty (dim), letters cycle through a
--- readable palette so adjacent terrain types are visually distinct. Glyph MEANINGS beyond "letter vs.
--- blank" aren't recovered, so this is deliberately generic rather than invented per-letter semantics.
+-- Terrain-code → glyph. RE'd against a live `;smap;` capture: the block is `\n`-separated STACKED layer
+-- grids (terrain / roads / features …), each cell a 6-bit code encoded `char-0x40` (so `@`=0=empty). The
+-- codes ARE terrain classes (0 empty, then walkable/road/water/…) but the client is a graphical tile
+-- renderer with NO code→glyph table — so we invent readable glyphs: empty = a dim dot, terrain = a filled
+-- block coloured by code, so the map's SHAPE reads at a glance. (Palette by code, cycling for high codes.)
 local MAP_PALETTE = { "green", "brightgreen", "yellow", "brightyellow", "cyan", "brightcyan",
                       "blue", "brightblue", "magenta", "brightmagenta", "red", "brightred" }
-local function map_glyph_fg(ch)
-  if ch == "" or ch == " " or ch == "@" then return "brightblack" end
-  local idx = ch:byte() - string.byte("A") + 1
-  if idx >= 1 and idx <= 26 then return MAP_PALETTE[((idx - 1) % #MAP_PALETTE) + 1] end
-  return "white"
+local function map_glyph(code)
+  if code <= 0 then return "·", "brightblack" end                 -- empty / unexplored
+  return "▪", MAP_PALETTE[((code - 1) % #MAP_PALETTE) + 1]         -- terrain, coloured by class
 end
 
--- The raw dclient grid is reportedly ~23x23 with the player near its center (per the decompiled
--- protocol notes); clip a window sized like the old rvnum-graph minimap (~25x9) centered on the middle
--- of the grid so it fits the widget. The dead-center cell is highlighted as "you" — the RPC payload
--- doesn't mark your position explicitly, so this ASSUMES the server centers the grid on the player
--- (again per the decompiled notes); verify live and adjust if you're not actually dead-center.
-local MAP_CLIP_H, MAP_CLIP_W = 9, 23
+-- Pull the TERRAIN section out of a raw `;smap;` block. The block stacks several fixed-width layer grids
+-- (plus a final 4-chars-per-cell room-id/coords section, ~4× wider). The terrain layer is the FIRST
+-- maximal run of same-width rows in a sane grid range — take that and ignore the rest. Returns the row
+-- list (each a string of `char-0x40` codes) or nil. (Earlier code treated the WHOLE block as one grid,
+-- which is why it rendered a garbled sliver.)
+local function dclient_terrain_section(rows)
+  local best_start, best_len, i, n = nil, 0, 1, #rows
+  while i <= n do
+    local w = #rows[i]
+    local j = i
+    while j <= n and #rows[j] == w do j = j + 1 end
+    local len = j - i
+    if w >= 6 and w <= 26 and len >= 6 and len > best_len then best_start, best_len = i, len end
+    i = j
+  end
+  if not best_start then return nil end
+  local sec = {}
+  for k = best_start, best_start + best_len - 1 do sec[#sec + 1] = rows[k] end
+  return sec
+end
+
+-- Render the terrain section as a player-centered minimap. The `;smap;` grid is server-centered on you
+-- (self is a separate field, not a glyph), so the dead-center cell is marked as "you".
 local function minimap_cells_from_dclient(raw)
-  local rows = dclient_map_rows(raw)
-  if #rows == 0 then return nil end
-  local total_h = #rows
-  local total_w = 0
-  for _, line in ipairs(rows) do if #line > total_w then total_w = #line end end
-  if total_w == 0 then return nil end
-  local h = math.min(MAP_CLIP_H, total_h)
-  local w = math.min(MAP_CLIP_W, total_w)
-  local row_off = math.floor((total_h - h) / 2)
-  local col_off = math.floor((total_w - w) / 2)
+  local sec = dclient_terrain_section(dclient_map_rows(raw))
+  if not sec then return nil end
+  local h, w = #sec, #sec[1]
   local center_r, center_c = math.floor(h / 2) + 1, math.floor(w / 2) + 1
   local out = {}
   for r = 1, h do
-    local line = rows[row_off + r] or ""
+    local line = sec[r] or ""
     local spans = { { text = "  " } }
     for c = 1, w do
-      local ch = line:sub(col_off + c, col_off + c)
-      local is_you = (r == center_r and c == center_c)
-      spans[#spans + 1] = { text = ch ~= "" and ch or " ",
-                             fg = is_you and "brightwhite" or map_glyph_fg(ch), bold = is_you or nil }
+      local ch = line:sub(c, c)
+      local code = (ch ~= "" and ch ~= " ") and (ch:byte() - 0x40) or 0
+      if r == center_r and c == center_c then
+        spans[#spans + 1] = { text = "◉", fg = "brightwhite", bold = true }
+      else
+        local g, fg = map_glyph(code)
+        spans[#spans + 1] = { text = g, fg = fg }
+      end
     end
     out[r] = { spans = spans, width = w + 2 }
   end
   return out
 end
 
--- Is the captured `;smap;` blob actually a usable grid? Over the 1.105 RPC the ;smap; TEXT tag does
--- NOT carry the full 23×23 map (that rides a separate binary message), so DClientProbe often grabs a
--- degenerate few-char sliver that renders as a 2-wide column of `@`/`D` garbage. Only treat it as a map
--- when it's plausibly grid-shaped; otherwise fall through to AIPilot's room-graph minimap.
+-- Does a raw `;smap;` block contain a usable terrain section? (Guards against a degenerate partial that
+-- would render as junk; the full block has a real multi-row same-width terrain layer.)
 local function dclient_map_usable(raw)
-  local rows = dclient_map_rows(raw)
-  if #rows < 5 then return false end
-  local w = 0
-  for _, line in ipairs(rows) do if #line > w then w = #line end end
-  return w >= 10
+  return dclient_terrain_section(dclient_map_rows(raw)) ~= nil
 end
 
 -- Render an AIPilot minimap() result into panel rows. Return the FULL window (no trimming): the grid is
@@ -522,15 +530,17 @@ end
 -- only when it's actually grid-shaped (dclient_map_usable) — over RPC it's usually a degenerate sliver.
 -- nil if neither source has data.
 local function minimap_cells()
+  -- Prefer the server's real local map (`;smap;` terrain section) when we have a usable one — it's the
+  -- authoritative geography, player-centered. Fall back to AIPilot's dead-reckoned room-graph minimap
+  -- (the only source on the legacy telnet path, or before the first ;smap; arrives). nil if neither.
+  if state.dclient_map and dclient_map_usable(state.dclient_map) then
+    local out = minimap_cells_from_dclient(state.dclient_map)
+    if out then return out end
+  end
   if minimap then
     local m = minimap(3, 2)                    -- 7×5 rooms, rendered ~25×9 (explicit connectors)
     if m then return minimap_window(m) end
   end
-  -- NOTE: the `;smap;` dclient_map fallback is DISABLED. Over the 1.105 RPC that text tag only ever
-  -- carries a degenerate sliver that renders as @/D junk (dclient_map_usable can't reliably tell it from
-  -- a real grid). The genuine local map is `room_terrain_metadata` (4 packed int32 arrays) — being wired
-  -- separately. Until then, show the readable AIPilot graph or nothing, never junk.
-  local _ = dclient_map_usable and minimap_cells_from_dclient   -- keep referenced (tests import them)
   return nil
 end
 
@@ -719,5 +729,5 @@ _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next
               append_col = append_col, opponent_bars = opponent_bars,
               target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
               truncate_middle = truncate_middle, lag_rows = lag_rows,
-              minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph_fg = map_glyph_fg,
-              dclient_map_rows = dclient_map_rows }
+              minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph = map_glyph,
+              dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section }

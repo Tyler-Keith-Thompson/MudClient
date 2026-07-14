@@ -135,8 +135,16 @@ local save_timer
 local function save_map()
   -- Persist the parsed `waypoint` list + learned number<->room maps alongside the room map, so goto's
   -- waypoint routing survives reloads and relaunches (list once, keep working).
+  -- PERF PROBE: this runs on the lua.timer queue UNDER the process-wide Lua lock, so if serializing the
+  -- (large) map is slow it freezes ALL inbound RPC/text until it returns — the suspected post-combat lag.
+  -- Time it (CPU seconds via os.clock) and shout if it's expensive, so we can confirm/deny the culprit live.
+  local t0 = os.clock()
   persist.save(cfg.map_file, { rooms = P.rooms, dir_deltas = P.dir_deltas, memories = P.memories,
                                waypoints = P.waypoints, wp_room = P.wp_room, room_wp = P.room_wp })
+  local ms = (os.clock() - t0) * 1000
+  if ms > 150 and echo then
+    echo(string.format("\27[1;31m[perf] save_map %.0fms (rooms=%d)\27[0m", ms, count_map(P.rooms)))
+  end
 end
 -- Debounce map writes: each edit cancels the pending save and re-arms a fresh 2s timer, so a burst of
 -- edits coalesces into one write 2s after the last. (Was a generation counter that neutered stale

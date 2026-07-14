@@ -333,6 +333,11 @@ local function route(frameinfo, payload)
       local name, pct = m.enemy_name, m.f2
       if name and #name > 0 and pct and pct > 0 then
         state.fighting, state.fight_name, state.fight_pct = true, name, pct
+        -- Drive AutoFight: it's normally armed by kxwt_fighting, which is DEAD over RPC. `__autofight_prompt`
+        -- is its transport-agnostic combat-signal entry (built for the nomelee prompt fallback) — enemy_hp_data
+        -- is our authoritative health bar, so feed every tick (name+pct starts/refreshes the fight; the spell-
+        -- landed TEXT triggers still fire through the text_block pipeline, so the rest of the routine works).
+        if __autofight_prompt then __autofight_prompt(pct, name) end
       else
         state.fighting, state.fight_name, state.fight_pct = false, nil, nil
       end
@@ -379,6 +384,7 @@ local function route(frameinfo, payload)
         -- inferring it from a trailing enemy_hp_data hp=nil, which can be dropped/lagged). Clear the fight
         -- so the HUD combat widget stops showing a phantom enemy. (Combat START is enemy_hp_data-driven.)
         state.fighting, state.fight_name, state.fight_pct = false, nil, nil
+        if __autofight_prompt then __autofight_prompt(nil, nil) end   -- end AutoFight's routine authoritatively
         if on_update then on_update() end
       end
     end
