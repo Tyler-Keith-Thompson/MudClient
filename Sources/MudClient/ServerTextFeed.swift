@@ -18,13 +18,22 @@ final class ServerTextFeed: @unchecked Sendable {
     private var continuation: AsyncThrowingStream<Data, any Swift.Error>.Continuation?
     private var pumpTask: Task<Void, Never>?
 
-    /// Inject `data` into the inbound pipeline. Starts the pump lazily on first use.
+    /// Inject `data` — ONE COMPLETE server message — into the inbound pipeline. Starts the pump lazily.
+    ///
+    /// Unlike a telnet socket read (arbitrary byte chunk), each `feed` is a whole, self-delimited message
+    /// (a decoded protobuf `text_block`), and the server is idle after it. There is no telnet GO-AHEAD on
+    /// the protobuf wire to flush a final no-newline line, so the line assembler would otherwise hold that
+    /// line until the NEXT message arrives (the "off-by-one" prompt lag). We therefore flush at the message
+    /// boundary: append the pipeline's own prompt-flush trigger (the byte sequence the IAC layer maps to
+    /// the flush marker) so the message's last line renders immediately. This keys off the message, not a
+    /// wire GA — protobuf messages ARE the chunk boundary.
+    private static let messageFlush = Data([0xff, 0xf9])   // IAC GO-AHEAD → prompt-flush marker downstream
     func feed(_ data: Data) {
         lock.lock()
         if continuation == nil { startPump() }
         let cont = continuation
         lock.unlock()
-        cont?.yield(data)
+        cont?.yield(data + Self.messageFlush)
     }
 
     private func startPump() {

@@ -23,15 +23,36 @@ _RPC_TEST = _RPC_TEST or {}
 -- Load the protobuf schema so pb.encode/decode know our message types. This is a FileDescriptorSet
 -- compiled from Sources/MudClient/RPC/proto/*.proto (regenerate with `just regen-rpc-descriptor`).
 -- WITHOUT this, every pb.decode fails and frameinfos come back empty → all blocks route as "unknown".
-do
+-- Load ONCE: `pb`'s registered types are C-side state that survives a Lua #reload, so re-reading the
+-- file every reload is pointless (guarded by a global flag).
+if not __rpc_pb_loaded then
   local f = io.open("Scripts/rpc_descriptor.pb", "rb")
   if not f then
     echo("[rpc] ERROR: Scripts/rpc_descriptor.pb not found — protobuf decode will fail")
   else
     local data = f:read("*a"); f:close()
     local ok, err = pcall(pb.load, data)
-    if not ok then echo("[rpc] ERROR: pb.load failed: " .. tostring(err)) end
+    if not ok then echo("[rpc] ERROR: pb.load failed: " .. tostring(err)) else __rpc_pb_loaded = true end
   end
+end
+
+-- AlterAeon soundpack root (music/sound filenames from the RPC are relative to this, e.g.
+-- "ogg_v1/soundtrack/track_area_dragontooth" → SOUNDPACK .. name .. ".ogg").
+local SOUNDPACK = (os.getenv("HOME") or "") .. "/Library/AlterAeon/soundpack/"
+
+-- RPC message debugger (`#rpc ...`). Globals so they persist across #reload and the user drives them:
+--   _RPC_DEBUG   — master on/off (default ON). When on, EVERY decoded message (except text_block, which
+--                  is the rendered game text) is echoed as a one-line summary — UNLESS its name is ignored.
+--   _RPC_IGNORE  — a set of name substrings the user has muted (`#rpc ignore hpbar`); matched against the
+--                  message's proto_name AND rpc_service_name. The user tracks what's noise, not the code.
+_RPC_DEBUG = _RPC_DEBUG == nil and true or _RPC_DEBUG
+_RPC_IGNORE = _RPC_IGNORE or {}
+local function rpc_ignored(proto_name, service_name)
+  for pat in pairs(_RPC_IGNORE) do
+    if (proto_name ~= "" and proto_name:find(pat, 1, true)) or
+       (service_name ~= "" and service_name:find(pat, 1, true)) then return true end
+  end
+  return false
 end
 
 --------------------------------------------------------------------------------
@@ -116,11 +137,6 @@ local function new_block_reader()
     for _, payload in ipairs(line_reader(bytes)) do
       if pending_fi == nil then
         local ok, fi = pcall(pb.decode, FRAMEINFO_TYPE, payload)
-        if _RPC_DEBUG then
-          local hex = payload:sub(1, 48):gsub(".", function(c) return string.format("%02x ", c:byte()) end)
-          echo(string.format("[rpc dbg] frameinfo %dB ok=%s proto=%s svc=%s | %s",
-            #payload, tostring(ok), tostring(ok and fi and fi.proto_name), tostring(ok and fi and fi.rpc_service_name), hex))
-        end
         pending_fi = ok and fi or {}
       else
         blocks[#blocks + 1] = { frameinfo = pending_fi, payload = payload }
@@ -227,27 +243,66 @@ local function route(frameinfo, payload)
   local proto_name = frameinfo.proto_name or ""
   local service_name = frameinfo.rpc_service_name or ""
   local r = find_route(proto_name, service_name)
-  if not r then
-    if _RPC_DEBUG then echo(string.format("[rpc] unknown proto=%s service=%s bytes=%d", proto_name, service_name, #payload)) end
-    return
+  local m = nil
+  if r then
+    local ok, dec = pcall(pb.decode, r.full, payload)
+    if ok then m = dec end
+    -- ACTIONS for the types we handle. text_block is the rendered game text: feed it and RETURN (never
+    -- echoed as a debug line). Everything else does its action then falls through to the debug echo.
+    if r.full == "xirr_client_rpc.text_block" then
+      feed_server(m and m.text or "")   -- feed_server flushes the tail per call (each text_block is complete)
+      return
+    elseif r.full == "xirr_server_rpc.keepalive_info" then
+      send_pong(frameinfo, m or {})     -- answer rpc/ping or the server drops us (~15s)
+    elseif r.full == "xirr_soundpack_rpc.music_playout_data" and m then
+      -- In practice the server just re-sends the current area soundtrack (same filename, op=10) over and
+      -- over — there's no distinct START. So: any op that NAMES a track → play it, but DEDUP on filename
+      -- (per channel, in a global so it survives #reload) so we don't restart it 83×. Only explicit STOP
+      -- (5 HARD_STOP / 9 SOFT_STOP) or DELETE (2) actually stops. Suspend/unsuspend are treated as "play".
+      local ch = (m.channel_name and m.channel_name ~= "") and m.channel_name or "music"
+      local op = m.op or 0
+      __rpc_music = __rpc_music or {}
+      if op == 5 or op == 9 or op == 2 then
+        if music and music.stop then music.stop(ch) end
+        __rpc_music[ch] = nil
+      elseif m.filename and m.filename ~= "" and __rpc_music[ch] ~= m.filename then
+        __rpc_music[ch] = m.filename
+        if music and music.play then music.play(ch, SOUNDPACK .. m.filename .. ".ogg") end
+      end
+    elseif r.full == "xirr_client_rpc.audio_playout_data" and m then
+      if m.short_clip_filename and m.short_clip_filename ~= "" and sound_once then
+        sound_once(SOUNDPACK .. m.short_clip_filename .. ".ogg")
+      end
+    elseif r.full == "dclient_rpc.hpbar_data" and m then
+      -- f1..f6 = hp/maxhp, sp/maxsp, mv/maxmv (BEST-GUESS; swap here if crossed — hot-reloadable).
+      state.hp, state.maxhp = m.f1, m.f2
+      state.mana, state.maxmana = m.f3, m.f4
+      state.stam, state.maxstam = m.f5, m.f6
+      if __recovery_on_vitals then __recovery_on_vitals() end
+      if on_update then on_update() end
+    elseif r.full == "dclient_rpc.enemy_hp_data" and m then
+      local name = m.enemy_name
+      if name and #name > 0 then
+        state.fighting, state.fight_name, state.fight_pct = true, name, m.f2
+      else
+        state.fighting, state.fight_name, state.fight_pct = false, nil, nil
+      end
+      if on_update then on_update() end
+    end
   end
-  if r.full == "xirr_client_rpc.text_block" then
-    local m = pb.decode(r.full, payload)
-    feed_server(m.text or "")
-    return
-  end
-  if r.full == "xirr_server_rpc.keepalive_info" then
-    local m = pb.decode(r.full, payload)
-    send_pong(frameinfo, m)
-    return
-  end
-  -- Not-yet-handled telemetry (hpbar/enemy/sky/icons/buttons/kv/...): SILENT by default. Echoing every
-  -- one floods the terminal and locks the UI (the server streams these continuously). Flip _RPC_DEBUG on
-  -- and #reload to inspect; as we wire a type into a widget, add an explicit case above.
-  if _RPC_DEBUG then
-    local m = pb.decode(r.full, payload)
-    local summarize = SUMMARIZERS[r.full]
-    echo(summarize and summarize(m) or string.format("[rpc] %s: %s", r.full, tostring(m)))
+  -- DEBUGGER: echo every message (except text_block, handled above) unless the user muted its name via
+  -- `#rpc ignore <name>`. The user decides what's noise; we don't hide "handled" ones automatically.
+  -- DECODED, not raw: a custom summarizer if we have one, else the decoded fields pretty-printed.
+  if _RPC_DEBUG and not rpc_ignored(proto_name, service_name) then
+    local name = proto_name ~= "" and proto_name or service_name
+    local s = r and SUMMARIZERS[r.full]
+    if s then
+      echo(s(m))
+    elseif m then
+      echo(string.format("[rpc] %s %s", name, __repl_render and __repl_render(m) or "(decoded)"))
+    else
+      echo(string.format("[rpc] %s [unrouted] (%dB)", name, #payload))
+    end
   end
 end
 
@@ -263,9 +318,11 @@ local REQUEST_PROTOCOL = "xirr_proto_rpc_1.0_noauth"
 local PHASE_AWAITING_ACK = "awaiting_ack"
 local PHASE_BINARY = "binary"
 
-local phase = PHASE_AWAITING_ACK
-local ack_buf = ""
-local block_reader = nil
+-- Connection state lives in a GLOBAL table so it SURVIVES #reload. The socket is a Swift object that
+-- outlives the Lua reload; if we reset phase back to the handshake here, the still-open binary stream
+-- would be misread as an ACK line and disconnect us. Keeping phase/ack_buf/block_reader in `__rpc` means
+-- a #reload picks up mid-session exactly where it was (block_reader closure + its byte buffer intact).
+__rpc = __rpc or { phase = PHASE_AWAITING_ACK, ack_buf = "", block_reader = nil }
 
 -- The install identity to present as version_info.client_uuid — prefer the real AlterAeon client's
 -- uuid from its config (so we look like a known install); fall back to a stable DFLT token.
@@ -289,29 +346,29 @@ local function send_version_info()
 end
 
 function on_net_connect()
-  phase = PHASE_AWAITING_ACK
-  ack_buf = ""
-  block_reader = new_block_reader()
+  __rpc.phase = PHASE_AWAITING_ACK
+  __rpc.ack_buf = ""
+  __rpc.block_reader = new_block_reader()
   net_send("REQUEST " .. REQUEST_PROTOCOL .. "\n")
 end
 
 function on_net_disconnect(reason)
-  phase = PHASE_AWAITING_ACK
-  ack_buf = ""
+  __rpc.phase = PHASE_AWAITING_ACK
+  __rpc.ack_buf = ""
   echo("[rpc] disconnected: " .. tostring(reason))
 end
 
 function on_net(data)
   local payload = data
-  if phase == PHASE_AWAITING_ACK then
-    ack_buf = ack_buf .. data
-    local nl = ack_buf:find("\n", 1, true)
+  if __rpc.phase == PHASE_AWAITING_ACK then
+    __rpc.ack_buf = __rpc.ack_buf .. data
+    local nl = __rpc.ack_buf:find("\n", 1, true)
     if not nl then return end
-    local line = ack_buf:sub(1, nl - 1):gsub("%s+$", "")
-    local remainder = ack_buf:sub(nl + 1)
-    ack_buf = ""
+    local line = __rpc.ack_buf:sub(1, nl - 1):gsub("%s+$", "")
+    local remainder = __rpc.ack_buf:sub(nl + 1)
+    __rpc.ack_buf = ""
     if line:upper():match("^ACK") then
-      phase = PHASE_BINARY
+      __rpc.phase = PHASE_BINARY
       send_version_info()
       payload = remainder
       if #payload == 0 then return end
@@ -321,7 +378,8 @@ function on_net(data)
       return
     end
   end
-  for _, block in ipairs(block_reader(payload)) do
+  if not __rpc.block_reader then __rpc.block_reader = new_block_reader() end
+  for _, block in ipairs(__rpc.block_reader(payload)) do
     route(block.frameinfo, block.payload)
   end
 end
@@ -335,7 +393,7 @@ end
 local prior_on_send = on_send
 
 function on_send(cmd)
-  if phase == PHASE_BINARY and net_is_connected and net_is_connected() then
+  if __rpc.phase == PHASE_BINARY and net_is_connected and net_is_connected() then
     local frameinfo = { proto_name = "xirr_client_rpc.text_block", rpc_service_name = "text_block", f20 = 1 }
     local payload = pb.encode("xirr_client_rpc.text_block", { text = cmd .. "\n" })
     net_send(encode_block(frameinfo, payload))
@@ -365,14 +423,44 @@ doc(dclient_rpc.stop, { name = "dclient_rpc.stop", sig = "dclient_rpc.stop()", g
   text = "Close the RPC connection opened by dclient_rpc.start()." })
 
 function dclient_rpc.connected()
-  return phase == PHASE_BINARY and (net_is_connected and net_is_connected() or false)
+  return __rpc.phase == PHASE_BINARY and (net_is_connected and net_is_connected() or false)
 end
 doc(dclient_rpc.connected, { name = "dclient_rpc.connected", sig = "dclient_rpc.connected() -> bool", group = "connection",
   text = "Whether the RPC handshake completed (past the REQUEST/ACK text preamble, into the binary protobuf phase)." })
 
--- Auto-connect on load, guarded so #reload (which re-runs this file in the LIVE state) never redials
--- an already-open session.
-if net_connect and not (net_is_connected and net_is_connected()) then dclient_rpc.start() end
+-- `#rpc ...` message-debugger command. Callable global, so the host's `#word rest` → `word("rest")`
+-- rewrite turns `#rpc ignore hpbar` into `rpc("ignore hpbar")`.
+rpc = setmetatable(rpc or {}, { __call = function(_, args)
+  local cmd, rest = (args or ""):match("^(%S*)%s*(.-)%s*$")
+  cmd = (cmd or ""):lower()
+  if cmd == "debug" then
+    if rest ~= "" then _RPC_DEBUG = (rest:lower() ~= "off") end
+    echo("[rpc] debug " .. (_RPC_DEBUG and "on" or "off"))
+  elseif cmd == "ignore" and rest ~= "" then
+    _RPC_IGNORE[rest] = true; echo("[rpc] ignoring '" .. rest .. "'")
+  elseif cmd == "show" and rest ~= "" then
+    _RPC_IGNORE[rest] = nil; echo("[rpc] showing '" .. rest .. "'")
+  elseif cmd == "list" then
+    local ign = {}; for k in pairs(_RPC_IGNORE) do ign[#ign + 1] = k end
+    table.sort(ign)
+    echo("[rpc] debug=" .. (_RPC_DEBUG and "on" or "off") .. "  ignored: " .. (#ign > 0 and table.concat(ign, ", ") or "(none)"))
+  else
+    echo("[rpc] usage: rpc debug on|off · rpc ignore <name> · rpc show <name> · rpc list")
+  end
+end })
+doc(rpc, { name = "rpc", sig = "rpc('debug on|off' | 'ignore <name>' | 'show <name>' | 'list')", group = "connection",
+  text = "RPC message debugger. `#rpc debug on|off` toggles echoing every decoded RPC message (except game text). `#rpc ignore <name>`/`#rpc show <name>` mute/unmute a message by a substring of its protobuf name or service key (e.g. `#rpc ignore hpbar`). `#rpc list` shows the current state." })
+
+-- Auto-connect on load. Guarded so #reload (re-runs this file in the LIVE state) never redials an open
+-- session. If the socket IS already up (a #reload mid-session), we're past the handshake — force binary
+-- phase so on_net decodes frames instead of misreading them as an ACK line (keep the persisted reader +
+-- its byte buffer so we don't desync).
+if net_connect and not (net_is_connected and net_is_connected()) then
+  dclient_rpc.start()
+elseif net_is_connected and net_is_connected() then
+  __rpc.phase = PHASE_BINARY
+  if not __rpc.block_reader then __rpc.block_reader = new_block_reader() end
+end
 
 --------------------------------------------------------------------------------
 -- Test seam — exposes the pure logic (no live socket needed) for Scripts/tests/rpc_spec.lua.
