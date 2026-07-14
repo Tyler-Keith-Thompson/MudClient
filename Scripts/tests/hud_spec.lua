@@ -152,20 +152,22 @@ end)
 
 -- ---- exp widget on the new 1.105 RPC model: state.exp_to_level = per-class % to next level, PER-MILLE --
 
-test("exp_spans surfaces the class CLOSEST to levelling (max %) from state.exp_to_level (1.105 RPC)", function()
+test("exp_spans names the class(es) CLOSEST to levelling (max %) from state.exp_to_level (1.105 RPC)", function()
   local saved = state
-  -- Per-mille %s (matches the game's `level` display): 60.3 94.4 51.7 94.4 72.4 80.4 — closest is 94%.
+  -- Per-mille %s indexed Mage/Cleric/Thief/Warrior/Necro/Druid: the two 94.4s are Cleric+Warrior (closest).
   state = { exp_to_level = { 603, 944, 517, 944, 724, 804 } }
   local t = exp_text()
-  expect(t):contains("next lvl: 94%")
-  expect(t):contains("60 94 52 94 72 80%")
+  expect(t):contains("Cleric, Warrior")
+  expect(t):contains("(94%)")
   state = saved
 end)
 
-test("exp_spans shows 'level now' when a class has hit 100% (1000 per-mille)", function()
+test("exp_spans shows 'level:' with the class name when one has hit 100% (1000 per-mille)", function()
   local saved = state
-  state = { exp_to_level = { 500, 1000, 300 } }
-  expect(exp_text()):contains("level now")
+  state = { exp_to_level = { 500, 1000, 300 } }   -- Cleric (index 2) at 100%
+  local t = exp_text()
+  expect(t):contains("level:")
+  expect(t):contains("Cleric")
   state = saved
 end)
 

@@ -341,6 +341,34 @@ local function route(frameinfo, payload)
       -- shows the class closest to levelling (the max). Stash the raw array as-is.
       state.exp_to_level = m.f1
       if on_update then on_update() end
+    elseif r.full == "xirr_client_rpc.generic_kv_event" and m then
+      -- A keyed side-channel: `key` names the datum, value rides `kvalue` (string) or `f3` (int), by key.
+      --   key='areaname' → kvalue is the current area ("The Town of Dragon Tooth") → area widget.
+      --   key='dirs'     → f3 is an EXITS BITMASK (kvalue empty). Bits (CONFIRMED against observed values
+      --                    85=N+E+S+W, 69=N+E+W, 640=NW+D): 1=N 2=NE 4=E 8=SE 16=S 32=SW 64=W 128=NW 256=U
+      --                    512=D. Decode into the north/east/up/... set the HUD compass + room-name badges
+      --                    read (same shape AlterAeon.lua's "[Exits: ]" trigger builds).
+      --   other keys (event/colorflash/bclear/…) → fall through to the debug echo, unhandled for now.
+      local key = m.key or ""
+      if key == "areaname" then
+        state.area = m.kvalue or ""
+        if on_update then on_update() end
+      elseif key == "dirs" then
+        local bits = m.f3 or 0
+        local set = {}
+        if bits &   1 ~= 0 then set.north     = true end
+        if bits &   2 ~= 0 then set.northeast = true end
+        if bits &   4 ~= 0 then set.east      = true end
+        if bits &   8 ~= 0 then set.southeast = true end
+        if bits &  16 ~= 0 then set.south     = true end
+        if bits &  32 ~= 0 then set.southwest = true end
+        if bits &  64 ~= 0 then set.west      = true end
+        if bits & 128 ~= 0 then set.northwest = true end
+        if bits & 256 ~= 0 then set.up        = true end
+        if bits & 512 ~= 0 then set.down      = true end
+        state.exits = set
+        if on_update then on_update() end
+      end
     end
   end
   -- DEBUGGER: echo every message (except text_block, handled above) unless the user muted its name via

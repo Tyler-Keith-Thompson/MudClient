@@ -151,6 +151,31 @@ test("unknown proto routes without erroring; echoes only under _RPC_DEBUG", func
   echo, _RPC_DEBUG = prior_echo, prior_dbg
 end)
 
+test("generic_kv_event key='dirs' decodes the exits bitmask into state.exits", function()
+  if not load_test_descriptor() then return end
+  local prior_exits = state.exits
+  -- 85 = 1|4|16|64 = N,E,S,W ; 640 = 128|512 = NW,D (confirmed against observed live values).
+  local fi = { proto_name = "xirr_client_rpc.generic_kv_event", rpc_service_name = "kvp" }
+  _RPC_TEST.route(fi, pb.encode("xirr_client_rpc.generic_kv_event", { key = "dirs", f3 = 85 }))
+  expect(state.exits.north):truthy(); expect(state.exits.east):truthy()
+  expect(state.exits.south):truthy(); expect(state.exits.west):truthy()
+  expect(state.exits.northeast):falsy(); expect(state.exits.up):falsy()
+  _RPC_TEST.route(fi, pb.encode("xirr_client_rpc.generic_kv_event", { key = "dirs", f3 = 640 }))
+  expect(state.exits.northwest):truthy(); expect(state.exits.down):truthy()
+  expect(state.exits.north):falsy()   -- replaced wholesale, not merged
+  state.exits = prior_exits
+end)
+
+test("generic_kv_event key='areaname' sets state.area from kvalue", function()
+  if not load_test_descriptor() then return end
+  local prior_area = state.area
+  local fi = { proto_name = "xirr_client_rpc.generic_kv_event", rpc_service_name = "kvp" }
+  _RPC_TEST.route(fi, pb.encode("xirr_client_rpc.generic_kv_event",
+                                { key = "areaname", kvalue = "The Town of Dragon Tooth" }))
+  expect(state.area):eq("The Town of Dragon Tooth")
+  state.area = prior_area
+end)
+
 test("default_uuid falls back to the DFLT token when no config file is present", function()
   -- Can't assert the real ~/Library path is absent in CI, so just check the function is callable
   -- and returns a non-empty string of the right shape either way.

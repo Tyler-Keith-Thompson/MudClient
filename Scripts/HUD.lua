@@ -327,26 +327,24 @@ local function next_level(exp, classes)
 end
 
 -- 1.105 model (CONFIRMED against the game's `level` display): dclient_rpc.exp_to_level is a flat array of
--- PER-CLASS progress toward next level, in PER-MILLE (0-1000 = tenths of a percent). E.g. 603,944,517,944,
--- 724,804 = 60.3% 94.4% 51.7% 94.4% 72.4% 80.4% — matching the game's Necro 72 / Mage 60 / Cleric 94 /
--- Druid 80 / Warrior 94 / Thief 51 (order differs, values match). No pool or class names ride this message,
--- so we surface the class CLOSEST to levelling: the MAX percent. Returns nil when there's nothing to show.
+-- PER-CLASS progress toward next level, in PER-MILLE (0-1000 = tenths of a percent), indexed by AlterAeon's
+-- class order below. E.g. 603,944,517,944,724,804 = 60.3/94.4/51.7/94.4/72.4/80.4% → the unique values pin
+-- the order (60=Mage, 51=Thief, 72=Necro, 80=Druid); the two 94s are Cleric+Warrior. We show the class(es)
+-- CLOSEST to levelling (the max %) BY NAME. Returns nil when there's nothing to show.
+local EXP_CLASSES = { "Mage", "Cleric", "Thief", "Warrior", "Necromancer", "Druid" }
 local function exp_pairs_spans()
   local vals = state.exp_to_level
   if not vals or #vals == 0 then return nil end
   local best = 0
   for _, v in ipairs(vals) do if (v or 0) > best then best = v end end
-  local b = { { text = "exp ", dim = true } }
+  local names = {}
+  for i, v in ipairs(vals) do if v == best then names[#names + 1] = EXP_CLASSES[i] or ("class" .. i) end end
+  local who = table.concat(names, ", ")
   if best >= 1000 then
-    b[#b + 1] = { text = "level now", fg = "brightgreen", bold = true }
-  else
-    b[#b + 1] = { text = string.format("next lvl: %.0f%%", best / 10), fg = "magenta" }
+    return { { text = "exp ", dim = true }, { text = "level: " .. who, fg = "brightgreen", bold = true } }
   end
-  -- Every class's percent (dim), easy to eyeball against the game's `level` display.
-  local figs = {}
-  for _, v in ipairs(vals) do figs[#figs + 1] = string.format("%.0f", (v or 0) / 10) end
-  b[#b + 1] = { text = "  (" .. table.concat(figs, " ") .. "%)", dim = true }
-  return b
+  return { { text = "exp ", dim = true },
+           { text = string.format("next: %s (%.0f%%)", who, best / 10), fg = "magenta" } }
 end
 
 local function exp_spans()
@@ -489,22 +487,22 @@ local function minimap_cells_from_dclient(raw)
   return out
 end
 
--- Minimap (top-right). Prefers the `;smap;` server-rendered grid (state.dclient_map, set by
--- DClientProbe's "map" handler) — the ONLY map source over the 1.105 RPC, since rvnum tags (which the
--- old AIPilot room-graph minimap needs) no longer arrive. Falls back to AIPilot's `minimap()` room-graph
--- rendering when there's no dclient grid yet (e.g. still on the legacy telnet/kxwt path), so nothing
--- regresses for anyone not yet on the new protocol. nil if neither source has data.
-local function minimap_cells()
-  if state.dclient_map and state.dclient_map ~= "" then
-    local out = minimap_cells_from_dclient(state.dclient_map)
-    if out then return out end
-  end
-  if not minimap then return nil end          -- AIPilot (which owns the map) not loaded
-  local m = minimap(3, 2)                      -- 7×5 rooms, rendered ~25×9 (explicit connectors)
-  if not m then return nil end
-  -- Return the FULL window (no trimming): the grid is built with you at its centre, so keeping every
-  -- row keeps you centred — with empty space to the north when there's nothing mapped that way, rather
-  -- than ramming you against the top edge.
+-- Is the captured `;smap;` blob actually a usable grid? Over the 1.105 RPC the ;smap; TEXT tag does
+-- NOT carry the full 23×23 map (that rides a separate binary message), so DClientProbe often grabs a
+-- degenerate few-char sliver that renders as a 2-wide column of `@`/`D` garbage. Only treat it as a map
+-- when it's plausibly grid-shaped; otherwise fall through to AIPilot's room-graph minimap.
+local function dclient_map_usable(raw)
+  local rows = dclient_map_rows(raw)
+  if #rows < 5 then return false end
+  local w = 0
+  for _, line in ipairs(rows) do if #line > w then w = #line end end
+  return w >= 10
+end
+
+-- Render an AIPilot minimap() result into panel rows. Return the FULL window (no trimming): the grid is
+-- built with you at its centre, so keeping every row keeps you centred — with empty space to the north
+-- when there's nothing mapped that way, rather than ramming you against the top edge.
+local function minimap_window(m)
   local out = {}
   for r = 1, m.h do
     local line = m.cells[r] or {}
@@ -517,6 +515,22 @@ local function minimap_cells()
     out[r] = { spans = spans, width = m.w + 2 }
   end
   return out
+end
+
+-- Minimap (top-right). AIPilot's `minimap()` room-graph render is the primary, readable source. The
+-- `;smap;` server grid (state.dclient_map, set by DClientProbe's "map" handler) is only a fallback and
+-- only when it's actually grid-shaped (dclient_map_usable) — over RPC it's usually a degenerate sliver.
+-- nil if neither source has data.
+local function minimap_cells()
+  if minimap then
+    local m = minimap(3, 2)                    -- 7×5 rooms, rendered ~25×9 (explicit connectors)
+    if m then return minimap_window(m) end
+  end
+  if state.dclient_map and dclient_map_usable(state.dclient_map) then
+    local out = minimap_cells_from_dclient(state.dclient_map)
+    if out then return out end
+  end
+  return nil
 end
 
 -- Append a fixed-width cell as the last column of a row (wrapping a single-line row into columns).
