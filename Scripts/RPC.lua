@@ -333,7 +333,13 @@ local function route(frameinfo, payload)
       -- — otherwise the HUD sticks showing a phantom dead enemy pinned at 0%.
       local name, pct = m.enemy_name, m.f2
       if name and #name > 0 and pct and pct > 0 then
+        local was_fighting = state.fighting
         state.fighting, state.fight_name, state.fight_pct = true, name, pct
+        -- Combat START (transition into fighting): CANCEL any in-progress recovery — resting/sleeping
+        -- through a fight is dangerous. kxwt_fighting used to do this (Combat.lua); over RPC enemy_hp_data
+        -- is the earliest combat-start signal (fires before/instead of a melee line, incl. ranged/spell
+        -- openers). Only on the transition, not every HP tick.
+        if not was_fighting and __recovery_cancel then __recovery_cancel("combat started") end
         -- Drive AutoFight: it's normally armed by kxwt_fighting, which is DEAD over RPC. `__autofight_prompt`
         -- is its transport-agnostic combat-signal entry (built for the nomelee prompt fallback) — enemy_hp_data
         -- is our authoritative health bar, so feed every tick (name+pct starts/refreshes the fight; the spell-

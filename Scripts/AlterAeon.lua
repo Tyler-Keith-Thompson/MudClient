@@ -67,8 +67,9 @@ pcall(require, "_persist")
 if not __persist then dofile("Scripts/_persist.lua") end
 local persist = __persist
 
--- KXWT handshake: enable the protocol, hide the machinery lines.
-trigger([[^kxw[tq]_supported$]], function() send("set kxwt") end)
+-- KXWT handshake: enable the protocol, hide the machinery lines. `set kxwt on` (explicit, not the bare
+-- `set kxwt` toggle) so re-running the handshake can't accidentally turn kxwt back OFF.
+trigger([[^kxw[tq]_supported$]], function() send("set kxwt on") end)
 
 -- Gag the kxwt/kxwq telemetry lines — but PRESERVE any ANSI escape codes the server glued to the FRONT of
 -- one. AlterAeon sometimes emits a colour RESET (e.g. "\27[37m\27[0m") as the prefix of a machine line
@@ -303,9 +304,13 @@ trigger([[^kxw[tq]_spelldown (.+)$]], function(_, s)
   if __recovery_on_spelldown then __recovery_on_spelldown(s) end   -- drop to rest for the recast (Recovery.lua)
 end)
 
--- Group roster. kxwt streams the party (you + pets/groupmates) as a block bracketed by
--- kxwt_group_start .. kxwt_group_end; each member line is "chp mhp cm mm cs ms <flags> <name>".
--- Accumulate between start/end so a half-sent block never renders partial data.
+-- Group roster. kxwt streams the party (you + pets/groupmates/minions) as a block bracketed by
+-- kxwt_group_start .. kxwt_group_end; each member line is "chp mhp cm mm cs ms <flags> <name>". This is
+-- the ONLY group source that fires over the 1.105 RPC (the framed ;sgroup; event in DClientProbe.lua does
+-- NOT arrive — verified against live traces — and there is no group protobuf message), and it already
+-- carries the role flags RPC lacks: X=you, M=your minion, T=tanking, N=nomelee (e.g. a flesh beast tank
+-- shows "MT", so AutoFight's M+T tank detection and the HUD's per-flag colouring work). So we KEEP it
+-- owning state.group. Accumulate between start/end so a half-sent block never renders partial data.
 local group_capturing, group_buf = false, {}
 trigger([[^kxw[tq]_group_start$]], function() group_capturing = true; group_buf = {} end)
 trigger([[^kxw[tq]_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],

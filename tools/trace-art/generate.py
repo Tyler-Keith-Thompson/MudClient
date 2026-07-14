@@ -29,6 +29,7 @@ import json
 import os
 import random
 import re
+import subprocess
 import sys
 import time
 import urllib.request
@@ -68,7 +69,7 @@ SHIFT = 3
 WIDTH = 1024
 HEIGHT = 1024
 
-DEFAULT_MAX = 3
+DEFAULT_MAX = 10
 BACKFILL_MAX = 25
 # Cap how many top heuristic candidates we hand the LLM to re-rank (bounds LLM cost).
 LLM_RANK_POOL = 60
@@ -160,9 +161,11 @@ def detect_notify(out, text):
     if m:
         who, lvl, mob, freak = m.group(1), int(m.group(2)), m.group(3).strip(), int(m.group(4))
         mine = is_me(who)
-        # Player's own: base 200 + freak (freak64 -> 264, dominates everything).
-        # Other players' brags still high but below the player's own.
-        score = (200 if mine else 120) + freak
+        # Player's own soulsteal is prized, but NOT so much it drowns out every other moment type (the
+        # gallery was 100% soulsteals). Base put in the same band as death(100)/achievement(90) so a big
+        # kill/level-up/death can compete; freak rarity still floats the best soulsteals up WITHIN the type.
+        # (Real variety across types is enforced structurally by diversify() in process_candidates.)
+        score = (130 if mine else 100) + freak
         return {"score": score, "event": "soulsteal", "detail": f"{who} stole a level {lvl} soul from {mob} (freak {freak}!)",
                 "meta": {"player": who, "mine": mine, "mob": mob, "level": lvl, "freak": freak}}
 
@@ -621,13 +624,43 @@ def build_workflow(prompt, seed):
     }
 
 
-def comfy_up():
+COMFY_APP = os.environ.get("COMFY_APP", "Comfy Desktop")          # the CONFIGURED install (shared models);
+COMFY_START_WAIT = int(os.environ.get("COMFY_START_WAIT", "300")) # the CLI install has empty model dirs.
+_comfy_start_tried = False
+
+
+def _comfy_reachable():
     try:
         urllib.request.urlopen(f"{COMFY}/system_stats", timeout=5).read()
         return True
-    except Exception as e:
-        log(f"ComfyUI not reachable at {COMFY} ({e})")
+    except Exception:
         return False
+
+
+def comfy_up():
+    """Reachable? If not, AUTO-START ComfyUI (Comfy Desktop) once per run and wait for it to serve — so the
+    daily job / --smoke stands the renderer up on demand instead of silently holding the cursor forever."""
+    global _comfy_start_tried
+    if _comfy_reachable():
+        return True
+    if _comfy_start_tried:
+        log(f"ComfyUI not reachable at {COMFY}")
+        return False
+    _comfy_start_tried = True
+    log(f"ComfyUI down — launching '{COMFY_APP}' and waiting up to {COMFY_START_WAIT}s…")
+    try:
+        subprocess.run(["open", "-a", COMFY_APP], check=False)
+    except Exception as e:
+        log(f"couldn't launch '{COMFY_APP}': {e}")
+        return False
+    deadline = time.time() + COMFY_START_WAIT
+    while time.time() < deadline:
+        time.sleep(5)
+        if _comfy_reachable():
+            log("ComfyUI is up.")
+            return True
+    log(f"ComfyUI didn't come up within {COMFY_START_WAIT}s — holding for next run.")
+    return False
 
 
 def comfy_generate(prompt, seed, out_path):
@@ -766,6 +799,28 @@ def dedup_candidates(candidates, seen_keys):
     return list(best.values())
 
 
+def diversify(sorted_cands, limit):
+    """Spread the top picks ACROSS event types so one spammy type (soulsteals) can't monopolize the batch.
+    Round-robin by event type over the score-desc list: round 0 takes the best of each type, round 1 the
+    second-best of each, etc. So a rare player_death / level_up / big kill surfaces alongside soulsteals
+    instead of being buried under 60 of them. Within a type the score order (freak rarity) is preserved."""
+    buckets = {}                                  # dict preserves first-seen order = score-desc by type
+    for c in sorted_cands:
+        buckets.setdefault(c["event"], []).append(c)
+    out, rnd = [], 0
+    while len(out) < limit:
+        took = False
+        for b in buckets.values():
+            if rnd < len(b):
+                out.append(b[rnd]); took = True
+                if len(out) >= limit:
+                    break
+        if not took:
+            break
+        rnd += 1
+    return out
+
+
 def process_candidates(candidates, max_images, dry_run, use_llm_rank=False):
     """candidates: list of moment dicts (already deduped). Optionally LLM-rerank."""
     # Heuristic order first (guarantees player soulsteals / high-freak float up even
@@ -773,7 +828,7 @@ def process_candidates(candidates, max_images, dry_run, use_llm_rank=False):
     candidates.sort(key=lambda c: -c["score"])
 
     if use_llm_rank and candidates and llm_available():
-        pool = candidates[:LLM_RANK_POOL]
+        pool = diversify(candidates, LLM_RANK_POOL)   # feed the LLM a TYPE-DIVERSE pool, not 60 soulsteals
         scores = llm_rank(pool)
         if scores:
             for i, c in enumerate(pool):
@@ -786,7 +841,7 @@ def process_candidates(candidates, max_images, dry_run, use_llm_rank=False):
             log("LLM ranking unavailable/malformed; using heuristic order")
 
     capped = len(candidates) > max_images
-    picked = candidates[:max_images]
+    picked = diversify(candidates, max_images)   # spread the batch across event types (not all soulsteals)
     if capped:
         log(f"{len(candidates)} unique moments; capping to {max_images} this run "
             f"({len(candidates) - max_images} lower-ranked moments dropped, NOT deferred)")

@@ -52,7 +52,18 @@ struct Connect: ParsableCommand {
             for try await command in stream {
                 // Consult the optional Lua `on_send` hook per final atomic command (may drop it,
                 // replace it, or inject additional commands), then transmit and log what's sent.
-                for outbound in Container.scriptInterpreter().engine.filterOutbound(command.text) {
+                let outbounds = Container.scriptInterpreter().engine.filterOutbound(command.text)
+                if outbounds.isEmpty {
+                    // on_send suppressed the normal wire send — over the 1.105 RPC, RPC.lua's on_send
+                    // transmits the command ITSELF (via net_send as a text_block) and returns false, so the
+                    // loop below never runs. Still record the submitted command so `#sent` reflects it
+                    // (otherwise #sent is empty over RPC). Non-empty case is unchanged (telnet path).
+                    if !command.text.isEmpty {
+                        Container.transcriptStore().recordSent(command.text, origin: command.origin)
+                        Container.sessionLog().logCommand(command.text)
+                    }
+                }
+                for outbound in outbounds {
                     // Record every wire-level send with the origin of the command that produced it
                     // (on_send-injected sends inherit that origin) for the searchable transcript.
                     Container.transcriptStore().recordSent(outbound, origin: command.origin)

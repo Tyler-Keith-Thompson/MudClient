@@ -376,6 +376,48 @@ if rx then
   end)
 end
 
+-- ---- cry of victory (warrior warcry) ------------------------------------------------------------
+-- `victory` is a warrior skill (help 'warrior skill cry of victory'): used right AFTER you land the
+-- killing blow, it refunds some hp/movement (and morale) and helps stave off stuns — cheap recovery
+-- between fights. MUSH-Z ships this as `config autovictory`; we mirror it. Fire `victory` the instant a
+-- non-ally mob dies while we're engaged (the killing-blow window). Deduped so a multi-mob round that
+-- prints several "is DEAD!" lines only cries once; the game itself no-ops the skill if the last blow
+-- wasn't ours (or we lack the skill), so an occasional wasted cry is harmless. Over the 1.105 RPC the
+-- death arrives as the plain "<name> is DEAD!" text line (kxwt_mdeath is gone unless kxwt is on), so we
+-- key off that line — the same signal Corpse.lua's harvester uses.
+state.auto_victory = (state.auto_victory == nil) and true or state.auto_victory
+local VICTORY_DEDUP = 2   -- seconds; collapse a multi-kill round into one cry
+local last_victory_at = 0
+local function maybe_victory(name, now)
+  if not state.auto_victory then return end
+  if is_ally(name) then return end          -- our own minion / a groupmate died — not our kill to crow over
+  if not engaged(now) then return end       -- only right after a fight we were actually in
+  now = now or os.time()
+  if now - last_victory_at < VICTORY_DEDUP then return end
+  last_victory_at = now
+  send("victory")
+end
+if _AA_TEST then
+  _AA_TEST.maybe_victory  = maybe_victory
+  _AA_TEST.reset_victory  = function() last_victory_at = 0 end
+end
+trigger([[^(.+) is DEAD!$]], function(_, name) maybe_victory(name) end)
+
+-- Control surface: `autoVictory on|off|status` (callable table, so `#autoVictory off` works). Mirrors
+-- autoFight / autoHarvest.
+autoVictory = setmetatable(autoVictory or {}, { __call = function(_, args)
+  local verb = ((args or ""):match("^%s*(%S*)") or ""):lower()
+  if verb == "on"  then state.auto_victory = true;  echo("[victory] cry of victory ON")
+  elseif verb == "off" then state.auto_victory = false; echo("[victory] cry of victory OFF")
+  else echo("[victory] cry of victory is " .. (state.auto_victory and "ON" or "OFF")) end
+end })
+function autoVictory.on()     state.auto_victory = true end
+function autoVictory.off()    state.auto_victory = false end
+function autoVictory.status() return state.auto_victory end
+doc(autoVictory, { name = "autoVictory", sig = "autoVictory('on'|'off'|'status')", group = "combat",
+  text = "Auto-`victory` (warrior 'cry of victory' warcry): after you land a killing blow it's cried "
+      .. "automatically for the hp/move/anti-stun refund. `#autoVictory off` disables; on by default." })
+
 -- ===== test seams (the specs drive these pure helpers directly; opponents_spec / assist_spec) =====
 _AA_TEST.condition_pct     = condition_pct
 _AA_TEST.parse_opponent    = parse_opponent

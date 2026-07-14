@@ -33,7 +33,13 @@ final class ServerTextFeed: @unchecked Sendable {
         if continuation == nil { startPump() }
         let cont = continuation
         lock.unlock()
-        cont?.yield(data + Self.messageFlush)
+        // Only append the prompt-flush marker when the message does NOT already end in a newline. A message
+        // ending in \n (most game text) has already flushed its final line via that newline, so appending
+        // the flush would flush the now-EMPTY pending line — emitting a spurious BLANK line after every
+        // message (the "#received is full of blank lines" bug, and visible double-spacing). We only need the
+        // flush for a NO-newline tail (a prompt), which is exactly what it was added for.
+        let endsInNewline = data.last == 0x0a || data.last == 0x0d
+        cont?.yield(endsInNewline ? data : data + Self.messageFlush)
     }
 
     private func startPump() {

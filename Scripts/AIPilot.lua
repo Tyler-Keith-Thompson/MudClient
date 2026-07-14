@@ -2935,6 +2935,12 @@ else
 end
 
 load_map()
+-- P is rebuilt fresh on every (re)load (it's a local), so P.current_room is nil right after #reload even
+-- though _AIP.smap.cur + state.dclient_map persist — which made the minimap fall back to the block map
+-- until you moved (the server only re-sends ;smap; on a move/look). Re-apply the last stored map NOW so
+-- smap_apply re-establishes P.current_room immediately (its P.current_room~=C resync fires) and the graph
+-- minimap is live the instant you reload. Runs AFTER load_map() so P.rooms is already populated.
+if smap_on_map_update then smap_on_map_update() end
 local brain_desc = set_brain(cfg.brain)                         -- apply the default decision model NOW
 if cfg.use_memory then ai_set_memory_model(cfg.mem_model) end   -- endpoint+key come from Swift (Anthropic + env)
 if cfg.use_rag then ai_rag_load(cfg.rag_index) end              -- prebuilt doc embeddings (if present)
