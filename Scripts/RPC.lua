@@ -40,6 +40,29 @@ end
 -- "ogg_v1/soundtrack/track_area_dragontooth" → SOUNDPACK .. name .. ".ogg").
 local SOUNDPACK = (os.getenv("HOME") or "") .. "/Library/AlterAeon/soundpack/"
 
+-- AlterAeon `~`-tilde color codes → ANSI (game `help colors`). ~R/~Y/~G/~C/~B/~P/~W set a color, ~O
+-- resets, ~H = bright/highlight, ~F = faint/dim, ~U reverts to the PREVIOUS color, ~~ = a literal ~.
+-- Used to render chat (channel_send_data) which arrives with these codes inline instead of ANSI.
+local TILDE = { O = "\27[0m", R = "\27[31m", Y = "\27[33m", G = "\27[32m", C = "\27[36m",
+                B = "\27[34m", P = "\27[35m", W = "\27[37m", H = "\27[1m", F = "\27[2m" }
+local function tilde_to_ansi(s)
+  local out, i, n, prev, cur = {}, 1, #s, "\27[0m", "\27[0m"
+  while i <= n do
+    local c = s:sub(i, i)
+    if c == "~" and i < n then
+      local x = s:sub(i + 1, i + 1)
+      if x == "~" then out[#out + 1] = "~"
+      elseif x == "U" then out[#out + 1] = prev; cur = prev
+      elseif TILDE[x] then
+        if x:match("[ORYGCBPW]") then prev = cur; cur = TILDE[x] end   -- track color for ~U (not H/F)
+        out[#out + 1] = TILDE[x]
+      else out[#out + 1] = "~" .. x end                                -- unknown ~X → literal
+      i = i + 2
+    else out[#out + 1] = c; i = i + 1 end
+  end
+  return table.concat(out) .. "\27[0m"
+end
+
 -- RPC message debugger (`#rpc ...`). Globals so they persist across #reload and the user drives them:
 --   _RPC_DEBUG   — master on/off (default ON). When on, EVERY decoded message (except text_block, which
 --                  is the rendered game text) is echoed as a one-line summary — UNLESS its name is ignored.
@@ -291,7 +314,18 @@ local function route(frameinfo, payload)
       if m.printed_time_of_day_string and m.printed_time_of_day_string ~= "" then
         state.clock = m.printed_time_of_day_string
       end
+      -- Weather/sky flags → HUD weather block (outdoors/sky_visible/overcast → moon/sun/cloud icons).
+      -- BEST-GUESS from the fields (they vary by location at the same time): f2 tracks sky-visible/outdoors,
+      -- f1 an overcast-ish flag. f5 = minutes-since-midnight. VERIFY LIVE and swap if the icons are wrong.
+      state.outdoors    = (m.f2 == 1)
+      state.sky_visible = (m.f2 == 1)
+      state.overcast    = (m.f1 == 1)
       if on_update then on_update() end
+    elseif r.full == "xirr_client_rpc.channel_send_data" and m then
+      -- A chat-channel line (gossip/tell/etc). It arrives with AlterAeon ~-tilde color codes inline; parse
+      -- them to ANSI and just echo it as game content. RETURN so it isn't also shown as an [rpc] debug line.
+      if m.sent_message and #m.sent_message > 0 then echo(tilde_to_ansi(m.sent_message)) end
+      return
     elseif r.full == "dclient_rpc.enemy_hp_data" and m then
       local name = m.enemy_name
       if name and #name > 0 then
@@ -301,13 +335,10 @@ local function route(frameinfo, payload)
       end
       if on_update then on_update() end
     elseif r.full == "dclient_rpc.exp_to_level" and m then
-      -- GUESS (unverified live — flag for correction): f1 is a flat packed int32 array that's very
-      -- likely 3 classes × (current_progress, needed_for_level) pairs — e.g. an observed
-      -- 603,944,517,944,723,804 reads as class A 603/944, class B 517/944, class C 723/804, matching the
-      -- old telnet `;sxpp;` 6-number shape. No class NAMES ride this message, so we can't label them —
-      -- just stash the raw array; HUD.lua's exp widget pairs it up and shows the class closest to
-      -- levelling. If this guess is wrong (e.g. it's actually (needed, current) or a different class
-      -- count), fix the pairing here — HUD.lua reads state.exp_to_level as-is.
+      -- CONFIRMED against the game's `level` display: f1 is a flat int32 array of PER-CLASS % to next
+      -- level, in PER-MILLE (0-1000). Observed 603,944,517,944,724,804 = 60.3/94.4/51.7/94.4/72.4/80.4%,
+      -- matching the game's per-class percents. No class names ride this message; HUD.lua's exp widget
+      -- shows the class closest to levelling (the max). Stash the raw array as-is.
       state.exp_to_level = m.f1
       if on_update then on_update() end
     end

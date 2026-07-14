@@ -150,21 +150,21 @@ test("exp_spans flags a partial (micro) level-up instead of showing a full next 
   state = saved
 end)
 
--- ---- exp widget on the new 1.105 RPC model (no pool/class names, just state.exp_to_level pairs) ------
+-- ---- exp widget on the new 1.105 RPC model: state.exp_to_level = per-class % to next level, PER-MILLE --
 
-test("exp_spans falls back to state.exp_to_level pairs when there's no exp pool (1.105 RPC)", function()
+test("exp_spans surfaces the class CLOSEST to levelling (max %) from state.exp_to_level (1.105 RPC)", function()
   local saved = state
-  -- 3 pairs (current, needed); the middle pair (517/944) needs the least (427) so it's "closest".
-  state = { exp_to_level = { 603, 944, 517, 944, 723, 804 } }
+  -- Per-mille %s (matches the game's `level` display): 60.3 94.4 51.7 94.4 72.4 80.4 — closest is 94%.
+  state = { exp_to_level = { 603, 944, 517, 944, 724, 804 } }
   local t = exp_text()
-  expect(t):contains("next lvl: 427")
-  expect(t):contains("603/944 517/944 723/804")
+  expect(t):contains("next lvl: 94%")
+  expect(t):contains("60 94 52 94 72 80%")
   state = saved
 end)
 
-test("exp_spans shows 'level now' when a exp_to_level pair is already affordable", function()
+test("exp_spans shows 'level now' when a class has hit 100% (1000 per-mille)", function()
   local saved = state
-  state = { exp_to_level = { 950, 944 } }
+  state = { exp_to_level = { 500, 1000, 300 } }
   expect(exp_text()):contains("level now")
   state = saved
 end)

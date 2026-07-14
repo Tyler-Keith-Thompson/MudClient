@@ -326,31 +326,26 @@ local function next_level(exp, classes)
            micro = micro_of[names[1]], cost = min_cost, need = min_cost - (exp or 0) }
 end
 
--- NEW 1.105 model: dclient_rpc.exp_to_level gives a flat array, GUESSED (see RPC.lua's route() comment)
--- to be 3 classes x (current_progress, needed_for_level) pairs — no pool, no class names. Pair the
--- values up and surface the class CLOSEST to levelling (min needed-current across pairs). Returns nil
--- when there's nothing to show (absent/odd-length/empty array).
+-- 1.105 model (CONFIRMED against the game's `level` display): dclient_rpc.exp_to_level is a flat array of
+-- PER-CLASS progress toward next level, in PER-MILLE (0-1000 = tenths of a percent). E.g. 603,944,517,944,
+-- 724,804 = 60.3% 94.4% 51.7% 94.4% 72.4% 80.4% — matching the game's Necro 72 / Mage 60 / Cleric 94 /
+-- Druid 80 / Warrior 94 / Thief 51 (order differs, values match). No pool or class names ride this message,
+-- so we surface the class CLOSEST to levelling: the MAX percent. Returns nil when there's nothing to show.
 local function exp_pairs_spans()
   local vals = state.exp_to_level
-  if not vals or #vals < 2 then return nil end
-  local pairs_list, best_i, best_remaining = {}, nil, nil
-  for i = 1, #vals - 1, 2 do
-    local cur, need = vals[i], vals[i + 1]
-    pairs_list[#pairs_list + 1] = { cur = cur, need = need }
-    local remaining = (need or 0) - (cur or 0)
-    if not best_remaining or remaining < best_remaining then best_remaining = remaining; best_i = #pairs_list end
-  end
-  if not best_i then return nil end
+  if not vals or #vals == 0 then return nil end
+  local best = 0
+  for _, v in ipairs(vals) do if (v or 0) > best then best = v end end
   local b = { { text = "exp ", dim = true } }
-  if best_remaining <= 0 then
+  if best >= 1000 then
     b[#b + 1] = { text = "level now", fg = "brightgreen", bold = true }
   else
-    b[#b + 1] = { text = string.format("next lvl: %d", best_remaining), fg = "magenta" }
+    b[#b + 1] = { text = string.format("next lvl: %.0f%%", best / 10), fg = "magenta" }
   end
-  -- Each pair's raw current/needed, so the guessed pairing is easy to eyeball/correct live.
+  -- Every class's percent (dim), easy to eyeball against the game's `level` display.
   local figs = {}
-  for _, p in ipairs(pairs_list) do figs[#figs + 1] = string.format("%s/%s", tostring(p.cur), tostring(p.need)) end
-  b[#b + 1] = { text = "  (" .. table.concat(figs, " ") .. ")", dim = true }
+  for _, v in ipairs(vals) do figs[#figs + 1] = string.format("%.0f", (v or 0) / 10) end
+  b[#b + 1] = { text = "  (" .. table.concat(figs, " ") .. "%)", dim = true }
   return b
 end
 
