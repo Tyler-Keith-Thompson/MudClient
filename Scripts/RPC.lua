@@ -327,9 +327,12 @@ local function route(frameinfo, payload)
       if m.sent_message and #m.sent_message > 0 then echo(tilde_to_ansi(m.sent_message)) end
       return
     elseif r.full == "dclient_rpc.enemy_hp_data" and m then
-      local name = m.enemy_name
-      if name and #name > 0 then
-        state.fighting, state.fight_name, state.fight_pct = true, name, m.f2
+      -- f2 = enemy HP as a 0-100 percentage (capture shows 84→…→10 then a final hp=nil at death). Treat a
+      -- name with a real HP as an active fight; a MISSING/zero HP (the death beat) OR an empty name ends it
+      -- — otherwise the HUD sticks showing a phantom dead enemy pinned at 0%.
+      local name, pct = m.enemy_name, m.f2
+      if name and #name > 0 and pct and pct > 0 then
+        state.fighting, state.fight_name, state.fight_pct = true, name, pct
       else
         state.fighting, state.fight_name, state.fight_pct = false, nil, nil
       end
