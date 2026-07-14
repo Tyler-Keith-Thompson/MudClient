@@ -526,10 +526,11 @@ local function minimap_cells()
     local m = minimap(3, 2)                    -- 7×5 rooms, rendered ~25×9 (explicit connectors)
     if m then return minimap_window(m) end
   end
-  if state.dclient_map and dclient_map_usable(state.dclient_map) then
-    local out = minimap_cells_from_dclient(state.dclient_map)
-    if out then return out end
-  end
+  -- NOTE: the `;smap;` dclient_map fallback is DISABLED. Over the 1.105 RPC that text tag only ever
+  -- carries a degenerate sliver that renders as @/D junk (dclient_map_usable can't reliably tell it from
+  -- a real grid). The genuine local map is `room_terrain_metadata` (4 packed int32 arrays) — being wired
+  -- separately. Until then, show the readable AIPilot graph or nothing, never junk.
+  local _ = dclient_map_usable and minimap_cells_from_dclient   -- keep referenced (tests import them)
   return nil
 end
 

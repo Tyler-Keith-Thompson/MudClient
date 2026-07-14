@@ -353,8 +353,11 @@ local function route(frameinfo, payload)
       if key == "areaname" then
         state.area = m.kvalue or ""
         if on_update then on_update() end
-      elseif key == "dirs" then
-        local bits = m.f3 or 0
+      elseif key == "dirs" and type(m.f3) == "number" then
+        -- Two different 'dirs' events share this key: the real EXITS carry the bitmask in f3; a separate
+        -- config toggle arrives as kvalue='on'/'off' with NO f3. Only the numeric-f3 form is exits — the
+        -- toggle must NOT wipe state.exits to empty (that's what blanked the compass until you `look`ed).
+        local bits = m.f3
         local set = {}
         if bits &   1 ~= 0 then set.north     = true end
         if bits &   2 ~= 0 then set.northeast = true end
