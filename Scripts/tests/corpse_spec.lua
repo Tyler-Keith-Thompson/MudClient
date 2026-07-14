@@ -422,7 +422,7 @@ test("corpse OFF mid-pass CANCELS the promise (not resolve) and sends `stop` whe
   corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
   corpse_start()                                     -- begins the pass + its tracked promise
   expect(harvesting()):eq(true)
-  corpse_command("corpse", "off")                    -- kxwt.corpse("off") while a harvest is running
+  autoHarvest.off()                                  -- autoHarvest.off() while a harvest is running
   local stopped = false; for _, c in ipairs(sent) do if c == "stop" then stopped = true end end
   expect(stopped):eq(true)                           -- busy → interrupt the MUD action
   expect(harvesting()):eq(false)                     -- promise cancelled → row gone
@@ -439,7 +439,7 @@ test("corpse OFF when NOT busy still cancels the pass but sends no `stop`", func
   local snap = {}; for k, v in pairs(corpse) do snap[k] = v end
   corpse.on, corpse.active, corpse.settle, corpse.killed = true, false, nil, true
   corpse_start()
-  corpse_command("corpse", "off")
+  autoHarvest.off()
   local stopped = false; for _, c in ipairs(sent) do if c == "stop" then stopped = true end end
   expect(stopped):eq(false)
   expect(harvesting()):eq(false)

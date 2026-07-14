@@ -135,14 +135,12 @@ function on_connect()
 end
 
 
--- Auto-enable client-trigger telemetry (kxwt/kxwq) the moment we log in. The server fires the dclient
--- `login` tag (payload = character name) at that point, so we reply with `set kxwt` -- the same command
--- that works by hand. We can't lean on the `^kxw[tq]_supported` handshake in a dclient session: the
--- server doesn't send that line here, which is why the pilot's map/coords used to stay dark until you
--- enabled it manually.
+-- Capture the character name from the dclient `login` tag. We DELIBERATELY no longer auto-send `set kxwt`
+-- here: over the 1.105 RPC the ;slogin; tag DOES fire, and enabling kxwt makes its telemetry tags fight the
+-- RPC widgets (group roster flickered in/out). Navigation uses the ;smap; section-3 map instead. Enable
+-- kxwt by hand (`set kxwt`) only if you're on the legacy telnet path and know you want it.
 dclient.handlers["login"] = function(data)
   if data and data ~= "" then state.name = data end
-  send("set kxwt")
 end
 
 -- The server assigns our durable per-install identity via `;suuid;<token>;euuid;`. Persist it so we echo it

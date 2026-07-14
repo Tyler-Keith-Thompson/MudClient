@@ -1,4 +1,4 @@
--- AlterAeon corpse automation (kxwt_mdeath-driven).
+-- AlterAeon corpse automation (autoHarvest — fires over the 1.105 RPC, driven by game TEXT, not kxwt).
 --
 -- Split out of AlterAeon.lua. Fully stream/promise-driven. Reads the shared combat predicate
 -- in_combat()/is_ally() (Combat.lua) and the reactive + promise layers (__rx/__promise); all globals,
@@ -22,7 +22,7 @@
 -- the awaits' `:timeout(CORPSE_WATCHDOG)` — no hand-managed after/cancel id — and a tooth-progress tick
 -- re-arms it (a fresh await) so a slow multi-tooth harvest can't trip it.
 --
--- BEHAVIOUR (unchanged): ON by default (kxwt.corpse('off') to stop). Runs only after an actual KILL (not
+-- BEHAVIOUR (unchanged): ON by default (autoHarvest.off() to stop). Runs only after an actual KILL (not
 -- a flee). When OUT OF COMBAT, walk the corpses in the room BY INDEX (1.corpse, 2.corpse, …) and HARVEST
 -- each (teeth then spellcomps), then:
 --   * EMPTY corpse -> bsac -> sac. `sac` removes it, so the next corpse shifts into THIS index (re-process).
@@ -114,6 +114,11 @@ if _AA_TEST then _AA_TEST.corpse = corpse end   -- exposed so the empty/has-loot
 local function note_kill(name)
   if not name or (is_ally and is_ally(name)) then return end   -- our own minions also emit mdeath
   local k = corpse_kind_key(name); if not k then return end
+  -- Batch start (first kill since the last pass ended, kill_count 0): clear stale has-loot knowledge from a
+  -- prior room/batch. SAFE because this fires on the DEATH line, which precedes THIS kill's "…contains:"
+  -- line — so the current corpses' loot is re-recorded immediately after. (This replaces the old
+  -- kxwt_rvnum room-change reset; never reset in corpse_start — that runs after the contains: lines.)
+  if (corpse.kill_count or 0) == 0 then corpse.with_items = {} end
   corpse.kills[k] = true                                        -- kinds (dedup) for the harvest memory
   corpse.kill_count = (corpse.kill_count or 0) + 1              -- COUNT of corpses we made this batch
 end
@@ -291,6 +296,10 @@ end
 function corpse_start()
   if not corpse.on or corpse.active or in_combat() then return end
   corpse.active = true
+  -- DO NOT reset corpse.with_items here — corpse_start runs AFTER combat, but the "…contains:" loot lines
+  -- are printed DURING combat at each kill, so wiping it here erases the has-loot knowledge and SACRIFICES
+  -- a corpse holding items (the "cost me a bow" bug). The reset lives in note_kill (batch start), which
+  -- fires on the death line BEFORE its contains: line, so the loot is re-recorded intact.
   -- How many of OUR corpses to expect this pass. Decremented on each confirmed sac (bsac_then_sac). nil
   -- when we didn't count any kills → walk to the miss line (old behaviour).
   corpse.remaining = (corpse.kill_count and corpse.kill_count > 0) and corpse.kill_count or nil
@@ -331,21 +340,18 @@ local function corpse_spell_yield() if corpse.active and spellYieldS then spellY
 local function corpse_tooth()       if corpse.active and toothS then toothS:onNext() end end
 
 -- ===== live wire -> seams ========================================================================
--- A mob DIED -> remember it and try to start (usually a no-op: you're still fighting, so corpse_start
--- bails; the real start is when combat ENDS below). kxwt_fighting -1 fires when combat ends for ANY
--- reason, so only walk corpses if a kill actually happened this fight — fleeing ends combat with no
--- corpse of ours (and moves us), and must NOT trigger looting.
-trigger([[^kxw[tq]_mdeath (.+)$]], function(_, name) corpse.killed = true; note_kill(name); corpse_start() end)
-trigger([[^kxw[tq]_fighting -1$]], function() if corpse.killed then corpse_start() end end)
-
--- Room change abandons this room's corpses (they don't follow you) -> stop, so we never target a corpse
--- in the wrong room (e.g. after fleeing).
-trigger([[^kxw[tq]_rvnum (-?\d+)]], function(_, vnum)
-  if corpse.room ~= nil and corpse.room ~= vnum then
-    corpse_done()
-    corpse.with_items = {}   -- has-loot knowledge is per-room; forget it when we leave
-  end
-  corpse.room = vnum
+-- A mob DIED -> remember it, then try to start once combat actually clears. RPC text_block delivers
+-- plain game text (no kxwt tags), so this fires off the death LINE itself ("<name> is DEAD!" — the same
+-- pattern AutoFight's own enemyDead terminal matches) rather than kxwt_mdeath, which never arrives over
+-- the RPC. is_ally filters out our own minions' deaths (they print the same line). combat may still be
+-- live for a beat after the kill (multi-mob fights, or the reply ordering), so defer the start slightly
+-- and only actually kick off once in_combat() reads false — corpse_start() itself also re-checks
+-- in_combat()/corpse.active, so multiple kills in one fight coalesce into a single deferred start.
+trigger([[^(.+) is DEAD!$]], function(_, name)
+  if is_ally and is_ally(name) then return end
+  corpse.killed = true
+  note_kill(name)
+  if after then after(1.5, function() if corpse.killed and not in_combat() then corpse_start() end end) end
 end)
 
 -- Loot detection WITHOUT looting: the game auto-prints a corpse's contents at the kill — "(on ground)
@@ -418,30 +424,47 @@ trigger([[appreciates your sacrifice of]], function() corpse_sac_done("ok") end)
 trigger([[^You receive \d+ gold coins? for your sacrifice of]], function() corpse_sac_done("ok") end)
 trigger([[is too big for you to sacrifice]], function() corpse_sac_done("fail") end)
 
--- kxwt.corpse('on'|'off'|'status') (dispatched from the kxwt table). Returns true if it handled the verb.
-function corpse_command(verb, rest)
-  if verb ~= "corpse" then return false end
-  local m = (rest or ""):lower():match("^%s*(%S*)")
-  if m == "on" then
-    corpse.on = true
-    echo("[kxwt] corpse automation ON — out of combat, per corpse (by index): harvest teeth -> harvest spellcomps -> (if EMPTY) bsac -> sac; corpses holding loot are left intact (never `get all`, never sac loot)")
-  elseif m == "off" then
-    corpse.on = false
-    if corpse.active then
-      -- Mid-pass: if a timed action is actually running (state.action >= 50 — the same "busy" the HUD
-      -- can't-cast widget shows, e.g. a harvest in progress), interrupt it on the MUD with `stop`.
-      if (state.action or 0) >= 50 then send("stop") end
-      -- Abort the pass by CANCELLING its promise — not resolving it, since the harvest didn't finish.
-      -- cancel() runs the onCancel hook, which tears the pass state down (corpse_done, which fires
-      -- passEndS to unsubscribe any in-flight await). Falls back to corpse_done() if the promise layer's off.
-      if corpse.promise and corpse.promise.cancel then corpse.promise.cancel() else corpse_done() end
-    else
-      corpse_done()   -- nothing running; keep the original tidy-up
-    end
-    echo("[kxwt] corpse automation OFF")
-  else
-    echo(string.format("[kxwt] corpse %s | active=%s",
-      corpse.on and "ON" or "off", tostring(corpse.active)))
-  end
-  return true
+-- autoHarvest.on()/off()/status() — the after-kill corpse automation control (mirrors autofight/pilot).
+autoHarvest = {}
+
+function autoHarvest.on()
+  corpse.on = true
+  echo("[harvest] corpse automation ON — out of combat, per corpse (by index): harvest teeth -> harvest spellcomps -> (if EMPTY) bsac -> sac; corpses holding loot are left intact (never `get all`, never sac loot)")
 end
+doc(autoHarvest.on, { name = "autoHarvest.on", sig = "autoHarvest.on()", group = "corpse",
+  text = "Arm the after-kill corpse-harvest automation: out of combat, per corpse (by index), harvest teeth "
+      .. "-> harvest spellcomps -> (if EMPTY) bsac -> sac; corpses holding loot are left intact." })
+
+function autoHarvest.off()
+  corpse.on = false
+  if corpse.active then
+    -- Mid-pass: if a timed action is actually running (state.action >= 50 — the same "busy" the HUD
+    -- can't-cast widget shows, e.g. a harvest in progress), interrupt it on the MUD with `stop`.
+    if (state.action or 0) >= 50 then send("stop") end
+    -- Abort the pass by CANCELLING its promise — not resolving it, since the harvest didn't finish.
+    -- cancel() runs the onCancel hook, which tears the pass state down (corpse_done, which fires
+    -- passEndS to unsubscribe any in-flight await). Falls back to corpse_done() if the promise layer's off.
+    if corpse.promise and corpse.promise.cancel then corpse.promise.cancel() else corpse_done() end
+  else
+    corpse_done()   -- nothing running; keep the original tidy-up
+  end
+  echo("[harvest] off")
+end
+doc(autoHarvest.off, { name = "autoHarvest.off", sig = "autoHarvest.off()", group = "corpse",
+  text = "Disarm the corpse-harvest automation. Mid-pass, interrupts a running MUD action with `stop` "
+      .. "(if busy) and cancels the in-flight harvest promise rather than letting it resolve." })
+
+function autoHarvest.status()
+  echo(string.format("[harvest] %s | active=%s",
+    corpse.on and "ON" or "off", tostring(corpse.active)))
+end
+doc(autoHarvest.status, { name = "autoHarvest.status", sig = "autoHarvest.status()", group = "corpse",
+  text = "Report whether corpse-harvest automation is armed (on/off) and whether a loot pass is active." })
+
+-- Callable table: legacy typed forms (`autoHarvest('on')`, `autoHarvest()` for status) still work.
+setmetatable(autoHarvest, { __call = function(_, rest)
+  local m = (rest or ""):lower():match("^%s*(%S*)")
+  if m == "on" then autoHarvest.on()
+  elseif m == "off" then autoHarvest.off()
+  else autoHarvest.status() end
+end })

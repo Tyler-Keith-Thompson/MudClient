@@ -52,7 +52,7 @@ end)
 local TABLES = {
   { name = "eq",     tbl = eq,     members = { "scan", "quick", "compare", "id", "shop", "stats", "forget" }, group = "equipment" },
   { name = "pilot",  tbl = pilot,  members = { "on", "off", "once", "status", "goal", "tell", "reload", "remember" }, group = "pilot" },
-  { name = "kxwt",   tbl = kxwt,   members = { "dump", "corpse" }, group = "protocol" },
+  { name = "kxwt",   tbl = kxwt,   members = { "dump" }, group = "protocol" },
   { name = "trivia", tbl = trivia, members = { "on", "off", "status", "stats", "forget" }, group = "trivia" },
 }
 
@@ -94,13 +94,33 @@ test("eq(...) forwards legacy subcommands to the right member", function()
   expect(#c):eq(1)
 end)
 
-test("kxwt(...) forwards dump/corpse and a bare number to dump", function()
+test("kxwt(...) forwards dump and a bare number to dump", function()
   local c = with_spy(kxwt, "dump", function() kxwt("dump 5") end)
   expect(c[1][1]):eq(5)
   c = with_spy(kxwt, "dump", function() kxwt("7") end)   -- bare number => dump n
   expect(c[1][1]):eq(7)
-  c = with_spy(kxwt, "corpse", function() kxwt("corpse on") end)
-  expect(c[1][1]):eq("on")
+end)
+
+test("autoHarvest is a callable table with documented on/off/status", function()
+  expect(type(autoHarvest)):eq("table")
+  local mt = getmetatable(autoHarvest)
+  expect(mt ~= nil and type(mt.__call) == "function"):truthy()
+  for _, m in ipairs({ "on", "off", "status" }) do
+    expect(type(autoHarvest[m])):eq("function")
+    local d = __docs.by_fn[autoHarvest[m]]
+    if not d then error("autoHarvest." .. m .. " is not documented", 1) end
+    expect(d.group):eq("corpse")
+    expect(type(d.sig)):eq("string")
+  end
+end)
+
+test("autoHarvest(...) forwards legacy on/off/status strings", function()
+  local c = with_spy(autoHarvest, "on", function() autoHarvest("on") end)
+  expect(#c):eq(1)
+  c = with_spy(autoHarvest, "off", function() autoHarvest("off") end)
+  expect(#c):eq(1)
+  c = with_spy(autoHarvest, "status", function() autoHarvest("") end)
+  expect(#c):eq(1)
 end)
 
 test("trivia(...) forwards on/off/forget to the right member", function()

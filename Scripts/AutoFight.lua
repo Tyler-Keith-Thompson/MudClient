@@ -1070,7 +1070,7 @@ end
 local function tank_died()
   if not TANK.on then return end
   say("tank died — disabling corpse automation and re-summoning a clay man")
-  if kxwt and kxwt.corpse then kxwt.corpse("off") end   -- clear the way; stop auto-sac/loot
+  if autoHarvest and autoHarvest.off then autoHarvest.off() end   -- clear the way; stop auto-sac/loot
   if TANK.resummoning then return end                   -- a resummon is already in flight
   TANK.resummoning, TANK.tries = true, 0
   resummon_tick()

@@ -103,9 +103,10 @@ trigger([[^kxw[tq]_]], function(...)
 end)
 
 -- The `kxwt` protocol-inspection surface: a documented, first-class table (Phase-2 migration off the
--- old `command("kxwt", …)` string parser). kxwt.dump([n]) shows the last n captured kxwt_ lines;
--- kxwt.corpse(...) drives the corpse-automation extension. The table is *callable* so the legacy typed
--- `#kxwt dump 5` (rewritten by the host to `kxwt("dump 5")`) still dispatches to the right member.
+-- old `command("kxwt", …)` string parser). kxwt.dump([n]) shows the last n captured kxwt_ lines. The
+-- table is *callable* so the legacy typed `#kxwt dump 5` (rewritten by the host to `kxwt("dump 5")`)
+-- still dispatches to the right member. (The corpse-harvest automation moved to its own `autoHarvest`
+-- control table, Corpse.lua — it no longer lives under kxwt.)
 kxwt = {}
 
 function kxwt.dump(n)
@@ -117,14 +118,8 @@ function kxwt.dump(n)
   for i = first, #kxwt_ring do echo("  " .. kxwt_ring[i]) end
 end
 
--- kxwt.corpse(['on'|'off'|'status']) — toggle/report the after-kill corpse automation (see corpse_command,
--- defined further down; it's only called at runtime, so the later definition is fine).
-function kxwt.corpse(mode) return corpse_command("corpse", mode or "") end
-
 doc(kxwt.dump, { name = "kxwt.dump", sig = "kxwt.dump([n])", group = "protocol",
   text = "Show the last n (default 15) captured kxwt_ protocol lines — the machinery normally hidden from the display." })
-doc(kxwt.corpse, { name = "kxwt.corpse", sig = "kxwt.corpse(['on'|'off'|'status'])", group = "protocol",
-  text = "Control the after-kill corpse automation (harvest teeth/spellcomps; bsac+sac only the EMPTY corpses, leave any holding loot intact — no looting). No arg reports status." })
 
 -- Callable table: forward a legacy subcommand string to the right member.
 setmetatable(kxwt, { __call = function(_, args)
@@ -133,10 +128,8 @@ setmetatable(kxwt, { __call = function(_, args)
   local rest = args:match("^%S*%s+(.*)$") or ""
   if verb == "" or verb == "dump" or verb:match("^%d+$") then
     kxwt.dump(tonumber(rest) or tonumber(verb))
-  elseif verb == "corpse" then
-    kxwt.corpse(rest)
   else
-    echo("[kxwt] commands: kxwt.dump([n]) | kxwt.corpse('on'|'off'|'status')")
+    echo("[kxwt] commands: kxwt.dump([n])")
   end
 end })
 
@@ -218,12 +211,32 @@ field [[^kxw[tq]_prompt (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)]]
   : into("hp", "maxhp", "mana", "maxmana", "stam", "maxstam") : as (number)
   : then_(function() if __recovery_on_vitals then __recovery_on_vitals() end end)
 
--- Position. Starting a recovery sits/sleeps as appropriate.
-trigger([[^kxw[tq]_position (.+)$]], function(_, p)
+-- Position. Starting a recovery sits/sleeps as appropriate. state.position must be one of Recovery.lua's
+-- RECOVERY_DEPTH keys (standing/kneeling/sitting/resting/sleeping) for posture depth to compute.
+local function set_position(p)
   local changed = (state.position ~= p)
   state.position = p
   if __recovery_on_position then __recovery_on_position(p, changed) end   -- re-posture / refresh regen (Recovery.lua)
-end)
+end
+if _AA_TEST then _AA_TEST.set_position = set_position end
+trigger([[^kxw[tq]_position (.+)$]], function(_, p) set_position(p) end)
+
+-- Over the 1.105 RPC kxwt_position is DEAD, so posture never synced and recovery couldn't tell you were
+-- standing (the "I never sit for regen" bug). Sync it from the game's own confirmation LINES instead
+-- (patterns verbatim from live capture). `^`-anchored + the trailing period so a room description like
+-- "You stand just inside the gate…" can't match "You stand up." These fire over RPC and kxwt alike (both
+-- just set the same string), so no double-fire concern.
+trigger([[^You stand up\.]],                     function() set_position("standing") end)
+trigger([[^You are already standing]],           function() set_position("standing") end)
+trigger([[^You scramble to your feet]],          function() set_position("standing") end)
+trigger([[^You sit down and rest]],              function() set_position("resting") end)
+trigger([[^You wake up and begin resting]],      function() set_position("resting") end)
+trigger([[^You are (?:already )?resting]],       function() set_position("resting") end)
+trigger([[^You sit down\.]],                     function() set_position("sitting") end)
+trigger([[^You are (?:already )?sitting]],       function() set_position("sitting") end)
+trigger([[^You go to sleep\.]],                  function() set_position("sleeping") end)
+trigger([[^You are (?:already sound )?asleep]],  function() set_position("sleeping") end)
+trigger([[^You kneel]],                          function() set_position("kneeling") end)
 
 
 -- Update the current room from an rvnum. Ends recovery ONLY on a REAL move: the server re-sends rvnum on

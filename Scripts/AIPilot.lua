@@ -321,17 +321,23 @@ local function smap_apply(g)
     local r, c
     if SM.prev_grid then r, c = smap_grid_find(SM.prev_grid.grid, C) end
     if r then
-      SM.cur_xy = { SM.cur_xy[1] + (c - SM.prev_grid.center_c), SM.cur_xy[2] + (r - SM.prev_grid.center_r) }
+      -- x = col (east +), y = NORTH + (grid rows increase DOWNWARD = south, so negate the row delta —
+      -- fixes the inverted-N/S map: north must be up). Same convention in abs[] below.
+      SM.cur_xy = { SM.cur_xy[1] + (c - SM.prev_grid.center_c), SM.cur_xy[2] + (SM.prev_grid.center_r - r) }
     elseif SM.abs[C] then
       SM.cur_xy = { SM.abs[C][1], SM.abs[C][2] }
     end
   end
 
-  local changed = (C ~= SM.cur)
+  -- Fire on a real center change OR when P.current_room is out of sync with the map (e.g. right after a
+  -- #reload: SM.cur persists in _AIP but P.current_room may not, so at rest nothing would re-establish it
+  -- and minimap() falls back to the plain block map until you happen to move). Resyncing here keeps the
+  -- graph minimap live at rest too.
+  local changed = (C ~= SM.cur) or (P.current_room ~= C)
   SM.cur, SM.prev_grid = C, g
   for r, row in ipairs(grid) do
     for c, id in ipairs(row) do
-      if id ~= 0 then SM.abs[id] = { SM.cur_xy[1] + (c - center_c), SM.cur_xy[2] + (r - center_r) } end
+      if id ~= 0 then SM.abs[id] = { SM.cur_xy[1] + (c - center_c), SM.cur_xy[2] + (center_r - r) } end
     end
   end
 
@@ -339,7 +345,14 @@ local function smap_apply(g)
 end
 
 -- Entry point: called (guarded, from DClientProbe.lua) whenever state.dclient_map updates.
+-- True while real kxwq_rvnum room ids are flowing (set kxwt honored): those are authoritative, so the
+-- ;smap; section-3 bridge stands down (its cell values aren't globally-unique — they'd corrupt the graph).
+function kxwt_live()
+  return P.kxwt_live ~= nil and (os.time() - P.kxwt_live) < 60
+end
+
 function smap_on_map_update()
+  if kxwt_live() then return end                    -- real room ids are live → don't feed section-3 ids
   if not (state and state.dclient_map) then return end
   local g = smap_coord_grid(state.dclient_map)
   if g then smap_apply(g) end
@@ -493,6 +506,7 @@ function minimap(hw, hh)
 
   -- ---- placement: geometric (by kxwt coords), or a unit-step graph walk if we have no coords -------
   local pos, order, occ = {}, { cur }, { ["0,0"] = true }
+  local unexplored = {}   -- ;smap;-known but NOT-yet-entered rooms, placed for DIM rendering (see below)
   pos[cur] = { 0, 0 }
   local function claim(id, gx, gy)                         -- one room per cell; the first to land keeps it
     if math.abs(gx) > hw or math.abs(gy) > hh then return false end
@@ -540,6 +554,26 @@ function minimap(hw, hh)
       local o = raw[id]
       -- north is +y in kxwt coords but UP on screen, so negate y for the row.
       claim(id, math.floor(o[1] / unit + 0.5), math.floor(-o[2] / unit + 0.5))
+    end
+    -- The ;smap; grid tells us about EVERY room around us, including ones we haven't walked into yet
+    -- (they're in _AIP.smap.abs but not P.rooms). Place those into cells no explored room claimed, so the
+    -- map shows the surrounding neighbourhood DIM instead of as blank space. Explored rooms win every cell.
+    if _AIP.smap and _AIP.smap.abs and not (kxwt_live and kxwt_live()) then
+      local uids = {}
+      for id in pairs(_AIP.smap.abs) do if id ~= cur and not P.rooms[id] then uids[#uids + 1] = id end end
+      table.sort(uids)                                       -- deterministic conflict resolution
+      for _, id in ipairs(uids) do
+        local a = _AIP.smap.abs[id]
+        local dx, dy = a[1] - cx, a[2] - cy
+        if math.abs(dx) <= BOX and math.abs(dy) <= BOX then
+          local gx = math.floor(dx / unit + 0.5)
+          local gy = math.floor(-dy / unit + 0.5)           -- north is +y in coords, UP on screen
+          if math.abs(gx) <= hw and math.abs(gy) <= hh then
+            local key = gx .. "," .. gy
+            if not occ[key] then occ[key] = true; unexplored[#unexplored + 1] = { gx, gy } end
+          end
+        end
+      end
     end
   else
     -- FALLBACK: coordless current room -> topological unit-step walk over the move-graph.
@@ -605,6 +639,13 @@ function minimap(hw, hh)
         end
       end
     end
+  end
+  -- Known-but-unexplored rooms (from the ;smap; grid): dim hollow markers, UNDER the explored nodes. Shows
+  -- the surrounding neighbourhood you haven't walked yet, rather than blank space (these have no move-edges
+  -- so nothing connects to them — they're just "there's a room that way").
+  for _, g in ipairs(unexplored) do
+    local col, row = node_xy(g)
+    put(col, row, "□", "brightblack")
   end
   -- Nodes on top: colour = terrain; glyph = your mark (★) / waypoint (W) / frontier (▣) / explored (□);
   -- YOU (◉) last, so a coordinate collision (the game has some overlapping rooms) never hides your marker.
@@ -2844,6 +2885,13 @@ doc("ai", { sig = "ai(args)", group = "pilot",
 -- trigger registered for the session, identical to a plain trigger().
 if rx then
   rx.fromTrigger([[^kxw[tq]_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]]):subscribe(function(c)
+    -- Real GLOBAL room id + coords. If these flow (kxwt enabled — even over the 1.105 RPC if the server
+    -- still honors `set kxwt`), they're authoritative and the ;smap; section-3 bridge stands down (its
+    -- cell values are NOT globally-unique room ids — they collide, which corrupts pathing). See smap gate.
+    if not P.kxwt_live and echo then
+      echo("[map] kxwt telemetry is LIVE — real room ids/coords, navigation restored.", "brightgreen")
+    end
+    P.kxwt_live = os.time()
     pilot_room_change(tonumber(c[1]), { tonumber(c[2]), tonumber(c[3]), tonumber(c[4]), tonumber(c[5]) })
   end)
   rx.fromTrigger([[^kxw[tq]_rshort (.+)$]]):subscribe(function(c) pilot_room_name(c[1]) end)

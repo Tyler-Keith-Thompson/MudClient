@@ -385,8 +385,21 @@ local function route(frameinfo, payload)
         -- inferring it from a trailing enemy_hp_data hp=nil, which can be dropped/lagged). Clear the fight
         -- so the HUD combat widget stops showing a phantom enemy. (Combat START is enemy_hp_data-driven.)
         state.fighting, state.fight_name, state.fight_pct = false, nil, nil
+        -- Also clear the TEXT-inferred engaged state (engaged_until, up to ENGAGE_TTL=10s, + the opponents
+        -- table) — exactly what kxwt_fighting -1 used to do. Without this engaged()/in_combat() lingers for
+        -- ~10s after the last mob dies (the "engaged target takes 5-8s to clear" lag), which also delayed
+        -- corpse harvesting (it waits on in_combat()).
+        state.engaged_until = nil
+        state.opponents = {}
         if __autofight_prompt then __autofight_prompt(nil, nil) end   -- end AutoFight's routine authoritatively
         if on_update then on_update() end
+      elseif key == "login" then
+        if m.kvalue and m.kvalue ~= "" then state.name = m.kvalue end
+        -- NOTE: we deliberately do NOT touch kxwt here. Enabling it over the 1.105 RPC was a disaster — the
+        -- kxwt_* tags (group/hp/…) FIGHT the RPC widgets (group roster flickered as the two sources
+        -- overwrote each other). Navigation stays on the ;smap; section-3 local map. If kxwt was left on
+        -- server-side, disable it manually once with `set kxwt off`. The kxwt_live() gate still stands the
+        -- section-3 bridge down IF you ever choose to enable kxwt by hand.
       end
     end
   end
