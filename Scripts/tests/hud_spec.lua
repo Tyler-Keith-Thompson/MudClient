@@ -150,6 +150,34 @@ test("exp_spans flags a partial (micro) level-up instead of showing a full next 
   state = saved
 end)
 
+-- ---- exp widget on the new 1.105 RPC model (no pool/class names, just state.exp_to_level pairs) ------
+
+test("exp_spans falls back to state.exp_to_level pairs when there's no exp pool (1.105 RPC)", function()
+  local saved = state
+  -- 3 pairs (current, needed); the middle pair (517/944) needs the least (427) so it's "closest".
+  state = { exp_to_level = { 603, 944, 517, 944, 723, 804 } }
+  local t = exp_text()
+  expect(t):contains("next lvl: 427")
+  expect(t):contains("603/944 517/944 723/804")
+  state = saved
+end)
+
+test("exp_spans shows 'level now' when a exp_to_level pair is already affordable", function()
+  local saved = state
+  state = { exp_to_level = { 950, 944 } }
+  expect(exp_text()):contains("level now")
+  state = saved
+end)
+
+test("exp_spans shows nothing when neither exp pool nor exp_to_level data is present", function()
+  local saved = state
+  state = {}
+  expect(exp_text()):eq("")
+  state = { exp_to_level = {} }
+  expect(exp_text()):eq("")
+  state = saved
+end)
+
 -- ---- inferred multi-opponent bars ------------------------------------------------------------------
 
 local function bar_text(row)
@@ -274,4 +302,43 @@ test("lag widget: an OLD UI hitch reads dim as 'UI last', not a live alert", fun
     expect(txt):contains("UI last 350ms")
     expect(txt:find("⚠")):eq(nil)
   end)
+end)
+
+-- ---- minimap on the new 1.105 RPC model (the ;smap; server-rendered grid, state.dclient_map) ---------
+
+local map_glyph_fg = _HUD_TEST.map_glyph_fg
+local dclient_map_rows = _HUD_TEST.dclient_map_rows
+local minimap_cells_from_dclient = _HUD_TEST.minimap_cells_from_dclient
+
+test("dclient_map_rows splits \\r\\n-separated rows and drops a trailing blank", function()
+  local rows = dclient_map_rows("@@@\r\nABC\r\n@@@")
+  expect(#rows):eq(3)
+  expect(rows[1]):eq("@@@"); expect(rows[2]):eq("ABC"); expect(rows[3]):eq("@@@")
+  -- a trailing \r\n shouldn't add a phantom 4th blank row
+  local rows2 = dclient_map_rows("@@@\r\nABC\r\n")
+  expect(#rows2):eq(2)
+end)
+
+test("map_glyph_fg dims unexplored '@'/blank and colors letters", function()
+  expect(map_glyph_fg("@")):eq("brightblack")
+  expect(map_glyph_fg(" ")):eq("brightblack")
+  expect(map_glyph_fg("")):eq("brightblack")
+  expect(map_glyph_fg("A")):eq("green")        -- first palette color
+  expect(map_glyph_fg("B")):eq("brightgreen")   -- second palette color
+end)
+
+test("minimap_cells_from_dclient parses a raw grid into fixed-width cell rows, clipped/centered", function()
+  local raw = "@@@@@@@@@@@\r\n@@@DD@@@@@D\r\n@@@D@@D@DB@\r\n@@@@@@@@@@@"
+  local out = minimap_cells_from_dclient(raw)
+  expect(out):truthy()
+  expect(#out):eq(4)                          -- shorter than the clip height -> keeps every row
+  expect(out[1].width):eq(11 + 2)             -- row width + the 2-space gutter
+  -- first two spans: the gutter, then the first grid cell
+  expect(out[1].spans[1].text):eq("  ")
+  expect(out[1].spans[2].text):eq("@")
+  expect(out[1].spans[2].fg):eq("brightblack")
+end)
+
+test("minimap_cells_from_dclient returns nil for an empty/blank grid", function()
+  expect(minimap_cells_from_dclient("")):eq(nil)
 end)

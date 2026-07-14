@@ -193,6 +193,16 @@ end
 
 dclient.handlers["areaname"] = function(data) state.area = data end
 
+-- The server's pre-rendered LOCAL map grid: rows of glyph chars separated by \r\n (observed e.g.
+-- "@@@@@@@@@@@@\r\n@@@DD@@@@@D\r\n@@@D@@D@DB@\r\n..."), `@` = unexplored/empty, letters = terrain/
+-- features/rooms. Per the decompiled protocol notes this is a ~23x23 local grid with the player near
+-- its center — NOT the rvnum room graph the old AIPilot minimap used (that graph gets no data over
+-- RPC now, since rvnum tags are gone). Stash the raw text; HUD.lua's minimap_cells() parses/renders it.
+dclient.handlers["map"] = function(data)
+  state.dclient_map = data
+  if on_update then on_update() end
+end
+
 dclient.handlers["skystate"] = function(data)   -- e.g. "110 3 870 2:30 pm" -- trailing token is the clock
   local clock = data:match("(%d+:%d+ %a%a)%s*$")
   if clock then state.clock = clock end

@@ -326,8 +326,38 @@ local function next_level(exp, classes)
            micro = micro_of[names[1]], cost = min_cost, need = min_cost - (exp or 0) }
 end
 
+-- NEW 1.105 model: dclient_rpc.exp_to_level gives a flat array, GUESSED (see RPC.lua's route() comment)
+-- to be 3 classes x (current_progress, needed_for_level) pairs — no pool, no class names. Pair the
+-- values up and surface the class CLOSEST to levelling (min needed-current across pairs). Returns nil
+-- when there's nothing to show (absent/odd-length/empty array).
+local function exp_pairs_spans()
+  local vals = state.exp_to_level
+  if not vals or #vals < 2 then return nil end
+  local pairs_list, best_i, best_remaining = {}, nil, nil
+  for i = 1, #vals - 1, 2 do
+    local cur, need = vals[i], vals[i + 1]
+    pairs_list[#pairs_list + 1] = { cur = cur, need = need }
+    local remaining = (need or 0) - (cur or 0)
+    if not best_remaining or remaining < best_remaining then best_remaining = remaining; best_i = #pairs_list end
+  end
+  if not best_i then return nil end
+  local b = { { text = "exp ", dim = true } }
+  if best_remaining <= 0 then
+    b[#b + 1] = { text = "level now", fg = "brightgreen", bold = true }
+  else
+    b[#b + 1] = { text = string.format("next lvl: %d", best_remaining), fg = "magenta" }
+  end
+  -- Each pair's raw current/needed, so the guessed pairing is easy to eyeball/correct live.
+  local figs = {}
+  for _, p in ipairs(pairs_list) do figs[#figs + 1] = string.format("%s/%s", tostring(p.cur), tostring(p.need)) end
+  b[#b + 1] = { text = "  (" .. table.concat(figs, " ") .. ")", dim = true }
+  return b
+end
+
 local function exp_spans()
-  if not state.exp then return {} end
+  if not state.exp then
+    return exp_pairs_spans() or {}
+  end
   local b = { { text = "exp ", dim = true }, { text = tostring(state.exp), fg = "brightmagenta" } }
   -- Experience to level the cheapest class (the actually-useful number). Uses live exp + cached costs.
   -- On a tie for cheapest, name EVERY tied class ("warrior/thief") so the pick reads as deliberate
@@ -410,9 +440,70 @@ local function group_member_row(m)
   } }
 end
 
--- Minimap (top-right). Pulls the local map grid from AIPilot's `minimap()` and turns each grid line
--- into a fixed-width cell (a 2-space gutter keeps it off the left content). nil if the map is unknown.
+-- Split the raw `;smap;` grid text (rows separated by \r\n or \n) into an array of row strings,
+-- dropping any trailing blank rows the split/trailing-newline can produce.
+local function dclient_map_rows(raw)
+  local rows = {}
+  for line in (raw .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = (line:gsub("\r$", "")) end
+  while #rows > 0 and rows[#rows] == "" do rows[#rows] = nil end
+  return rows
+end
+
+-- GUESS (unverified live — flag for correction): `@` = unexplored/empty (dim), letters cycle through a
+-- readable palette so adjacent terrain types are visually distinct. Glyph MEANINGS beyond "letter vs.
+-- blank" aren't recovered, so this is deliberately generic rather than invented per-letter semantics.
+local MAP_PALETTE = { "green", "brightgreen", "yellow", "brightyellow", "cyan", "brightcyan",
+                      "blue", "brightblue", "magenta", "brightmagenta", "red", "brightred" }
+local function map_glyph_fg(ch)
+  if ch == "" or ch == " " or ch == "@" then return "brightblack" end
+  local idx = ch:byte() - string.byte("A") + 1
+  if idx >= 1 and idx <= 26 then return MAP_PALETTE[((idx - 1) % #MAP_PALETTE) + 1] end
+  return "white"
+end
+
+-- The raw dclient grid is reportedly ~23x23 with the player near its center (per the decompiled
+-- protocol notes); clip a window sized like the old rvnum-graph minimap (~25x9) centered on the middle
+-- of the grid so it fits the widget. The dead-center cell is highlighted as "you" — the RPC payload
+-- doesn't mark your position explicitly, so this ASSUMES the server centers the grid on the player
+-- (again per the decompiled notes); verify live and adjust if you're not actually dead-center.
+local MAP_CLIP_H, MAP_CLIP_W = 9, 23
+local function minimap_cells_from_dclient(raw)
+  local rows = dclient_map_rows(raw)
+  if #rows == 0 then return nil end
+  local total_h = #rows
+  local total_w = 0
+  for _, line in ipairs(rows) do if #line > total_w then total_w = #line end end
+  if total_w == 0 then return nil end
+  local h = math.min(MAP_CLIP_H, total_h)
+  local w = math.min(MAP_CLIP_W, total_w)
+  local row_off = math.floor((total_h - h) / 2)
+  local col_off = math.floor((total_w - w) / 2)
+  local center_r, center_c = math.floor(h / 2) + 1, math.floor(w / 2) + 1
+  local out = {}
+  for r = 1, h do
+    local line = rows[row_off + r] or ""
+    local spans = { { text = "  " } }
+    for c = 1, w do
+      local ch = line:sub(col_off + c, col_off + c)
+      local is_you = (r == center_r and c == center_c)
+      spans[#spans + 1] = { text = ch ~= "" and ch or " ",
+                             fg = is_you and "brightwhite" or map_glyph_fg(ch), bold = is_you or nil }
+    end
+    out[r] = { spans = spans, width = w + 2 }
+  end
+  return out
+end
+
+-- Minimap (top-right). Prefers the `;smap;` server-rendered grid (state.dclient_map, set by
+-- DClientProbe's "map" handler) — the ONLY map source over the 1.105 RPC, since rvnum tags (which the
+-- old AIPilot room-graph minimap needs) no longer arrive. Falls back to AIPilot's `minimap()` room-graph
+-- rendering when there's no dclient grid yet (e.g. still on the legacy telnet/kxwt path), so nothing
+-- regresses for anyone not yet on the new protocol. nil if neither source has data.
 local function minimap_cells()
+  if state.dclient_map and state.dclient_map ~= "" then
+    local out = minimap_cells_from_dclient(state.dclient_map)
+    if out then return out end
+  end
   if not minimap then return nil end          -- AIPilot (which owns the map) not loaded
   local m = minimap(3, 2)                      -- 7×5 rooms, rendered ~25×9 (explicit connectors)
   if not m then return nil end
@@ -617,4 +708,6 @@ _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next
               exp_spans = exp_spans, compass = compass, group_member_row = group_member_row,
               append_col = append_col, opponent_bars = opponent_bars,
               target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
-              truncate_middle = truncate_middle, lag_rows = lag_rows }
+              truncate_middle = truncate_middle, lag_rows = lag_rows,
+              minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph_fg = map_glyph_fg,
+              dclient_map_rows = dclient_map_rows }

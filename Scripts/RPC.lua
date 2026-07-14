@@ -47,10 +47,15 @@ local SOUNDPACK = (os.getenv("HOME") or "") .. "/Library/AlterAeon/soundpack/"
 --                  message's proto_name AND rpc_service_name. The user tracks what's noise, not the code.
 _RPC_DEBUG = _RPC_DEBUG == nil and true or _RPC_DEBUG
 _RPC_IGNORE = _RPC_IGNORE or {}
+-- Normalize a name for matching: lowercase + drop underscores, so the user can `#rpc ignore` by whatever
+-- they SEE — the pretty camelCase summary label ("audioPlayout", "enemyHP") OR the raw snake proto name
+-- ("audio_playout_data", "enemy_hp_data"). Without this, "audioPlayout" never matched "audio_playout_data".
+local function rpc_norm(s) return (s or ""):lower():gsub("_", "") end
 local function rpc_ignored(proto_name, service_name)
+  local pn, sn = rpc_norm(proto_name), rpc_norm(service_name)
   for pat in pairs(_RPC_IGNORE) do
-    if (proto_name ~= "" and proto_name:find(pat, 1, true)) or
-       (service_name ~= "" and service_name:find(pat, 1, true)) then return true end
+    local p = rpc_norm(pat)
+    if p ~= "" and (pn:find(p, 1, true) or sn:find(p, 1, true)) then return true end
   end
   return false
 end
@@ -280,6 +285,13 @@ local function route(frameinfo, payload)
       state.stam, state.maxstam = m.f5, m.f6
       if __recovery_on_vitals then __recovery_on_vitals() end
       if on_update then on_update() end
+    elseif r.full == "dclient_rpc.sky_and_time" and m then
+      -- Time/weather → HUD. printed_time_of_day_string ("2:10 pm") is the clock the time widget shows.
+      -- (sky_and_time isn't a ;s tag over RPC, so DClientProbe's skystate handler never fires — wire here.)
+      if m.printed_time_of_day_string and m.printed_time_of_day_string ~= "" then
+        state.clock = m.printed_time_of_day_string
+      end
+      if on_update then on_update() end
     elseif r.full == "dclient_rpc.enemy_hp_data" and m then
       local name = m.enemy_name
       if name and #name > 0 then
@@ -287,6 +299,16 @@ local function route(frameinfo, payload)
       else
         state.fighting, state.fight_name, state.fight_pct = false, nil, nil
       end
+      if on_update then on_update() end
+    elseif r.full == "dclient_rpc.exp_to_level" and m then
+      -- GUESS (unverified live — flag for correction): f1 is a flat packed int32 array that's very
+      -- likely 3 classes × (current_progress, needed_for_level) pairs — e.g. an observed
+      -- 603,944,517,944,723,804 reads as class A 603/944, class B 517/944, class C 723/804, matching the
+      -- old telnet `;sxpp;` 6-number shape. No class NAMES ride this message, so we can't label them —
+      -- just stash the raw array; HUD.lua's exp widget pairs it up and shows the class closest to
+      -- levelling. If this guess is wrong (e.g. it's actually (needed, current) or a different class
+      -- count), fix the pairing here — HUD.lua reads state.exp_to_level as-is.
+      state.exp_to_level = m.f1
       if on_update then on_update() end
     end
   end
@@ -458,8 +480,13 @@ doc(rpc, { name = "rpc", sig = "rpc('debug on|off' | 'ignore <name>' | 'show <na
 if net_connect and not (net_is_connected and net_is_connected()) then
   dclient_rpc.start()
 elseif net_is_connected and net_is_connected() then
+  -- #reload while live: force binary phase (so on_net decodes frames, not misreads them as an ACK line)
+  -- and RE-CREATE the block reader so any framer/reader CODE changes actually take effect. (Persisting the
+  -- old closure would freeze its code at the version that first created it — that's why stale debug/logic
+  -- lingered after edits.) A fresh reader starts at a frame boundary; on an idle #reload there's no partial
+  -- frame buffered, so nothing desyncs.
   __rpc.phase = PHASE_BINARY
-  if not __rpc.block_reader then __rpc.block_reader = new_block_reader() end
+  __rpc.block_reader = new_block_reader()
 end
 
 --------------------------------------------------------------------------------
