@@ -374,6 +374,12 @@ local function route(frameinfo, payload)
         if bits & 512 ~= 0 then set.down      = true end
         state.exits = set
         if on_update then on_update() end
+      elseif key == "ncombat" then
+        -- AUTHORITATIVE combat-END signal (fires the instant a fight is fully over — more reliable than
+        -- inferring it from a trailing enemy_hp_data hp=nil, which can be dropped/lagged). Clear the fight
+        -- so the HUD combat widget stops showing a phantom enemy. (Combat START is enemy_hp_data-driven.)
+        state.fighting, state.fight_name, state.fight_pct = false, nil, nil
+        if on_update then on_update() end
       end
     end
   end
