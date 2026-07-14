@@ -3,8 +3,8 @@
 //  MudClient
 //
 //  Lets Lua hand decoded game text back to the SAME inbound display/trigger pipeline the telnet
-//  connection uses (`feed_server` builtin). Structured exactly like RPCConnection's text_block pump:
-//  an AsyncThrowingStream fed by `feed`, run through captureRaw → IAC → line-endings → server-stream
+//  connection uses (`feed_server` builtin): an AsyncThrowingStream fed by `feed`, run through
+//  captureRaw → IAC → line-endings → server-stream
 //  filter → line assembly → MSP → script processing, then rendered + logged. Independent of
 //  NetConnection/ConnectionManager — works whether or not a socket is connected, since the bytes
 //  originate from Lua (e.g. a decoded protobuf payload), not a live wire read.

@@ -203,7 +203,7 @@ dclient.handlers["areaname"] = function(data) state.area = data end
 -- the payload with EVERY control byte escaped (\r \n \xNN) so section delimiters and the +0x40 terrain
 -- encoding are visible without the terminal eating them. Toggle with `dclient.capture_map`; on by default
 -- while we reverse the grid. File: ~/Documents/MudClient/smap_capture.log.
-dclient.capture_map = false   -- format reversed (see HUD.lua minimap_cells_from_dclient); flip on to re-capture
+dclient.capture_map = true   -- re-capturing across DISTINCT rooms to decode section-3 (room-id/coords)
 local SMAP_CAPTURE_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/smap_capture.log"
 local function smap_escape(s)
   return (s:gsub("[^\32-\126]", function(c)

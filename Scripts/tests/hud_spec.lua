@@ -348,16 +348,16 @@ test("dclient_terrain_section picks the widest-run terrain grid, ignoring the co
   expect(#sec[1]):eq(11)                               -- width 11 (not the 44-wide coord section)
 end)
 
-test("minimap_cells_from_dclient renders the terrain section, player-centered", function()
+test("minimap_cells_from_dclient renders a compact, player-centered terrain layer", function()
   local out = minimap_cells_from_dclient(SMAP)
   expect(out):truthy()
-  expect(#out):eq(11)
+  expect(#out):eq(9)                                   -- 11-row layer clipped to MAP_CLIP_H, centered
   expect(out[1].width):eq(11 + 2)                      -- width + 2-space gutter
   expect(out[1].spans[1].text):eq("  ")                -- gutter
   expect(out[1].spans[2].text):eq("·")                 -- code 0 -> dim dot
-  -- dead-center cell (row 6, col 6) is marked as "you"
-  expect(out[6].spans[1 + 6].text):eq("◉")
-  expect(out[6].spans[1 + 6].fg):eq("brightwhite")
+  -- the middle of the 11-row grid (you_r=6) lands on displayed row 5 after the centering clip (row_off=1)
+  expect(out[5].spans[1 + 6].text):eq("◉")
+  expect(out[5].spans[1 + 6].fg):eq("brightwhite")
 end)
 
 test("minimap_cells_from_dclient returns nil when there is no terrain section", function()

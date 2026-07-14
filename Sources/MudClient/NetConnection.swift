@@ -2,9 +2,8 @@
 //  NetConnection.swift
 //  MudClient
 //
-//  A GENERIC outbound binary socket — no game/protocol/framing knowledge. Mirrors RPCConnection's
-//  NIO/TLS setup, minus the dclient handshake/RSA-auth/protobuf framer: this is just "open a socket
-//  to host:port (optionally TLS), move raw bytes". Lua owns everything above the wire (framing,
+//  A GENERIC outbound binary socket — no game/protocol/framing knowledge. Just "open a socket to
+//  host:port (optionally TLS), move raw bytes". Lua owns everything above the wire (framing,
 //  handshake, protobuf) via `net_connect`/`net_send`/`net_disconnect`/`net_is_connected` and the
 //  `on_net`/`on_net_connect`/`on_net_disconnect` hooks (see LuaScriptEngine).
 //
@@ -17,6 +16,11 @@ import DependencyInjection
 final class NetConnection: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var channel: (any Channel)?
+    /// All three Lua-facing notifications (connect/data/disconnect) are dispatched onto this single
+    /// serial queue, in the order NIO delivers them, so the NIO thread never blocks inside `notifyNet`
+    /// (which takes a process-wide lock shared with slow Lua ops) — it just enqueues and keeps draining
+    /// the socket. Serial + async preserves connect-before-data-before-disconnect ordering.
+    private let inboundQueue = DispatchQueue(label: "net.inbound")
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return channel != nil }
 
@@ -35,12 +39,16 @@ final class NetConnection: @unchecked Sendable {
                     onData: { [weak self] data in self?.handleInbound(data) },
                     onActive: { [weak self] in
                         self?.log("connected")
-                        Container.scriptInterpreter().engine.notifyNetConnect()
+                        self?.inboundQueue.async {
+                            Container.scriptInterpreter().engine.notifyNetConnect()
+                        }
                     },
                     onInactive: { [weak self] reason in
                         self?.log("disconnected: \(reason)")
                         self?.lock.lock(); self?.channel = nil; self?.lock.unlock()
-                        Container.scriptInterpreter().engine.notifyNetDisconnect(reason: reason)
+                        self?.inboundQueue.async {
+                            Container.scriptInterpreter().engine.notifyNetDisconnect(reason: reason)
+                        }
                     })
                 guard tls else {
                     return channel.pipeline.addHandler(handler)
@@ -84,7 +92,9 @@ final class NetConnection: @unchecked Sendable {
     }
 
     private func handleInbound(_ data: Data) {
-        Container.scriptInterpreter().engine.notifyNet(data)
+        inboundQueue.async {
+            Container.scriptInterpreter().engine.notifyNet(data)
+        }
     }
 
     private func log(_ message: String) {

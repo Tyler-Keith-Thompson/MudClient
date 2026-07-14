@@ -503,16 +503,6 @@ doc("telnet_send", { sig = "telnet_send(option, payload)", group = "connection",
   example = "telnet_send(90, \"!!SOUND(ding)\")" })
 doc("on_stream", { sig = "on_stream(fn)", group = "connection",
   text = "Register fn(chunk) -> string as a filter over the raw incoming server text stream, run BEFORE line assembly. The host displays whatever string fn returns; use it to peel out a custom in-band protocol (e.g. AlterAeon's `;`-framed dclient channel) that isn't newline-delimited. Only the most recently registered fn is active." })
-doc("rpc_connect", { sig = "rpc_connect(uuid)", group = "connection",
-  text = "Open the SECOND TLS connection (AlterAeon's dclient RPC/telemetry channel, www.alteraeon.com:3103) with the given client uuid, and run the version_info + RSA channel-auth handshake. Progress and every decoded RPC message are echoed as `[rpc] ...` lines while this is being worked out live; this is separate from the main game connection (connect()/disconnect()).",
-  example = "rpc_connect(\"6nxn1ftm5tbcyq3kteam\")" })
-doc("rpc_disconnect", { sig = "rpc_disconnect()", group = "connection",
-  text = "Close the RPC/telemetry connection opened by rpc_connect()." })
-doc("rpc_is_connected", { sig = "rpc_is_connected()", group = "connection",
-  text = "True once the RPC game connection (:3103) is open. Used to guard the auto-connect on load." })
-doc("rpc_send", { sig = "rpc_send(text)", group = "connection",
-  text = "Send user input / a command / login text over the RPC connection (:3103). PROVISIONAL outbound message format while the exact one is confirmed from the client binary. Use to try driving the game over the RPC.",
-  example = "rpc_send(\"look\")" })
 doc("net_connect", { sig = "net_connect(host, port[, opts])", group = "connection",
   text = "Open a THIRD, wholly generic binary socket (no protocol/framing/handshake knowledge — that's entirely Lua's job). opts.tls (bool, default false) wraps it in TLS. Inbound bytes arrive via on_net(data); on_net_connect()/on_net_disconnect(reason) fire on lifecycle. Independent of connect()/rpc_connect().",
   example = "net_connect(\"example.com\", 443, { tls = true })" })

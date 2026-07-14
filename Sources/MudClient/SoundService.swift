@@ -52,6 +52,13 @@ final class SoundService: @unchecked Sendable {
     /// dclient's `soundtrack/` sound tags). Pool nodes are wired once at the fixed `channelFormat`; loop
     /// buffers are decoded AND converted to it OFF the main queue, so the main queue only schedules/plays.
     private let channelFormat = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2)!
+    /// Ogg decode (AVAudioFile read + PCM convert) is heavy — 1–2 MB soundtracks take real time. It MUST NOT
+    /// run on the caller's thread: play()/playOnce() are invoked from Lua under the process-wide script lock
+    /// on the inbound-processing queue, so a synchronous decode there freezes ALL inbound game data (the
+    /// area-exit / post-combat lag — an area change pushes two new soundtracks + effects at once). Decode
+    /// here instead, then hop to main to schedule. Serial: decodes are quick individually and this bounds
+    /// concurrent memory; a big music decode can't starve the render.
+    private let decodeQueue = DispatchQueue(label: "com.mudclient.sound.decode", qos: .userInitiated)
     private var channelPool: [AVAudioPlayerNode] = []       // main-queue only, pre-wired once
     private var channelAssign: [String: Int] = [:]          // channel name -> channelPool index
     private static let channelPoolSize = 4
@@ -97,42 +104,49 @@ final class SoundService: @unchecked Sendable {
             }
             return
         }
-        // Decode AND convert to the pool format OFF the main queue — soundtracks are 1–2 MB, so doing this
-        // on main would stall the UI. The main queue then only schedules the ready buffer on a pooled node;
-        // it never touches the engine graph, so it can't deadlock.
-        guard let audio = try? AVAudioFile(forReading: file), audio.length > 0,
-              let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                                         frameCapacity: AVAudioFrameCount(audio.length)),
-              (try? audio.read(into: src)) != nil,
-              let buffer = convert(src, to: channelFormat)
-        else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.startEngine(), let node = self.claimChannelNode(for: channel) else { return }
-            self.channels[channel]?.stop()          // stop whatever was on this channel (same pooled node)
-            node.stop()
-            let voice = PooledChannelVoice(node: node, buffer: buffer)
-            self.channels[channel] = voice
-            voice.volume = 0
-            voice.start()
-            self.fade(voice, to: self.musicVolume, duration: self.crossfade)
+        // Decode AND convert to the pool format on the decode queue (NOT the caller's inbound thread — see
+        // decodeQueue), then hop to main to schedule the ready buffer on a pooled node. Main never touches
+        // the engine graph, so it can't deadlock.
+        decodeQueue.async { [weak self] in
+            guard let self,
+                  let audio = try? AVAudioFile(forReading: file), audio.length > 0,
+                  let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
+                                             frameCapacity: AVAudioFrameCount(audio.length)),
+                  (try? audio.read(into: src)) != nil,
+                  let buffer = self.convert(src, to: self.channelFormat)
+            else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.startEngine(), let node = self.claimChannelNode(for: channel) else { return }
+                self.channels[channel]?.stop()          // stop whatever was on this channel (same pooled node)
+                node.stop()
+                let voice = PooledChannelVoice(node: node, buffer: buffer)
+                self.channels[channel] = voice
+                voice.volume = 0
+                voice.start()
+                self.fade(voice, to: self.musicVolume, duration: self.crossfade)
+            }
         }
     }
 
     /// Play `track` ONCE (a sound effect — footsteps, spell casts, etc.), overlapping anything already
     /// playing. The node is retained until it finishes so it isn't cut off. No-op if nothing matches.
     func playOnce(track: String) {
-        // Decode the whole file up front (off the main queue) into a resident PCM buffer — one-shots are
-        // tiny, and a buffer plays with no render-thread file latency.
-        guard let file = resolve(track),
-              let audio = try? AVAudioFile(forReading: file),
-              audio.length > 0,
-              let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
-                                         frameCapacity: AVAudioFrameCount(audio.length)),
-              (try? audio.read(into: src)) != nil
-        else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.startEngine(), let fmt = self.oneShotFormat,
-                  !self.oneShotPool.isEmpty else { return }
+        guard let file = resolve(track) else { return }
+        // Decode the whole file up front into a resident PCM buffer — but on the decode queue, NOT the
+        // caller's inbound thread (see decodeQueue: a synchronous decode there stalls all inbound game text
+        // behind the sound — the "heard the effect, text arrived seconds later" lag). One-shots are small,
+        // so this is quick; then hop to main to schedule.
+        decodeQueue.async { [weak self] in
+            guard let self,
+                  let audio = try? AVAudioFile(forReading: file),
+                  audio.length > 0,
+                  let src = AVAudioPCMBuffer(pcmFormat: audio.processingFormat,
+                                             frameCapacity: AVAudioFrameCount(audio.length)),
+                  (try? audio.read(into: src)) != nil
+            else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.startEngine(), let fmt = self.oneShotFormat,
+                      !self.oneShotPool.isEmpty else { return }
             // The pool's nodes render at `fmt`, so a buffer must match it (source files vary in rate/
             // channel count). Convert if needed; skip the effect rather than risk a format-mismatch crash.
             guard let buffer = self.convert(src, to: fmt) else { return }
@@ -144,6 +158,7 @@ final class SoundService: @unchecked Sendable {
             node.volume = self.effectVolume
             node.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
             node.play()
+            }
         }
     }
 

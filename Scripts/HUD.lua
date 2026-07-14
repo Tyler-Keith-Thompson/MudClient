@@ -454,42 +454,48 @@ local function map_glyph(code)
   return "▪", MAP_PALETTE[((code - 1) % #MAP_PALETTE) + 1]         -- terrain, coloured by class
 end
 
--- Pull the TERRAIN section out of a raw `;smap;` block. The block stacks several fixed-width layer grids
--- (plus a final 4-chars-per-cell room-id/coords section, ~4× wider). The terrain layer is the FIRST
--- maximal run of same-width rows in a sane grid range — take that and ignore the rest. Returns the row
--- list (each a string of `char-0x40` codes) or nil. (Earlier code treated the WHOLE block as one grid,
--- which is why it rendered a garbled sliver.)
+-- Pull ONE terrain layer out of a raw `;smap;` block. The block STACKS several fixed-width layer grids
+-- (terrain, then roads/features/…), plus a final 4-chars-per-cell room-id/coords section (~4× wider). The
+-- layers are ~11 rows each. We want a SINGLE layer, so take the FIRST run of same-width rows in a sane
+-- grid range and cap it to one layer's worth (MAP_LAYER_MAX) — earlier code grabbed the LONGEST run, which
+-- merged 3 stacked layers into one 35-row skyscraper. Returns the row list (`char-0x40` codes) or nil.
+local MAP_LAYER_MAX = 13     -- a single ;smap; layer is ~11 rows; cap so merged same-width layers don't stack
 local function dclient_terrain_section(rows)
-  local best_start, best_len, i, n = nil, 0, 1, #rows
+  local i, n = 1, #rows
   while i <= n do
     local w = #rows[i]
     local j = i
     while j <= n and #rows[j] == w do j = j + 1 end
     local len = j - i
-    if w >= 6 and w <= 26 and len >= 6 and len > best_len then best_start, best_len = i, len end
+    if w >= 6 and w <= 26 and len >= 6 then           -- first plausible grid run wins
+      local sec, last = {}, math.min(j - 1, i + MAP_LAYER_MAX - 1)
+      for k = i, last do sec[#sec + 1] = rows[k] end
+      return sec
+    end
     i = j
   end
-  if not best_start then return nil end
-  local sec = {}
-  for k = best_start, best_start + best_len - 1 do sec[#sec + 1] = rows[k] end
-  return sec
+  return nil
 end
 
--- Render the terrain section as a player-centered minimap. The `;smap;` grid is server-centered on you
--- (self is a separate field, not a glyph), so the dead-center cell is marked as "you".
+-- Render a terrain layer as a compact, player-centered minimap. Clip to MAP_CLIP_H rows centered on you so
+-- it stays about as tall as the old AIPilot minimap (not a full-height column that eats the game text). The
+-- `;smap;` grid is server-centered on you (self is a separate field, not a glyph), so the middle cell = you.
+local MAP_CLIP_H = 9
 local function minimap_cells_from_dclient(raw)
   local sec = dclient_terrain_section(dclient_map_rows(raw))
   if not sec then return nil end
-  local h, w = #sec, #sec[1]
-  local center_r, center_c = math.floor(h / 2) + 1, math.floor(w / 2) + 1
+  local total_h, w = #sec, #sec[1]
+  local h = math.min(MAP_CLIP_H, total_h)
+  local row_off = math.floor((total_h - h) / 2)               -- keep the window centered on the middle (you)
+  local you_r, you_c = math.floor(total_h / 2) + 1, math.floor(w / 2) + 1
   local out = {}
   for r = 1, h do
-    local line = sec[r] or ""
+    local line = sec[row_off + r] or ""
     local spans = { { text = "  " } }
     for c = 1, w do
       local ch = line:sub(c, c)
       local code = (ch ~= "" and ch ~= " ") and (ch:byte() - 0x40) or 0
-      if r == center_r and c == center_c then
+      if (row_off + r) == you_r and c == you_c then
         spans[#spans + 1] = { text = "◉", fg = "brightwhite", bold = true }
       else
         local g, fg = map_glyph(code)
@@ -530,16 +536,17 @@ end
 -- only when it's actually grid-shaped (dclient_map_usable) — over RPC it's usually a degenerate sliver.
 -- nil if neither source has data.
 local function minimap_cells()
-  -- Prefer the server's real local map (`;smap;` terrain section) when we have a usable one — it's the
-  -- authoritative geography, player-centered. Fall back to AIPilot's dead-reckoned room-graph minimap
-  -- (the only source on the legacy telnet path, or before the first ;smap; arrives). nil if neither.
-  if state.dclient_map and dclient_map_usable(state.dclient_map) then
-    local out = minimap_cells_from_dclient(state.dclient_map)
-    if out then return out end
-  end
+  -- AIPilot's room-graph minimap is PRIMARY: it's compact and draws exit connectors, and the user prefers
+  -- it. The server `;smap;` terrain grid is only a FALLBACK for when AIPilot has nothing (legacy path, or
+  -- before it's learned any rooms) — it's accurate geography but exit-less and just a colour field. nil if
+  -- neither has data.
   if minimap then
     local m = minimap(3, 2)                    -- 7×5 rooms, rendered ~25×9 (explicit connectors)
     if m then return minimap_window(m) end
+  end
+  if state.dclient_map and dclient_map_usable(state.dclient_map) then
+    local out = minimap_cells_from_dclient(state.dclient_map)
+    if out then return out end
   end
   return nil
 end

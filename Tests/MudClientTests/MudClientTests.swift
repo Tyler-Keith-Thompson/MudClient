@@ -177,7 +177,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     // Debug tool: replay a MUD_RAW_LOG capture through the real IAC + MSP path.
     // Run with: bazel test ... --test_filter=replayCapturedRawLog --test_env=REPLAY_FILE=/path
@@ -226,7 +225,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     // Regression: a `kxwt_` protocol line split across a TCP read leaks its orphaned tail. The head
     // fragment still matches the `^kxwt_` gag and is hidden, but the tail (here "ground_01") matches
@@ -433,7 +431,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     // Regression for "a bunch of blank lines before my command". When the player is idle, AlterAeon
     // streams kxwt_ status batches (group HP, prompt, sky/time) as their OWN network packets. Each
@@ -521,7 +518,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     // `#` commands are owned by scripts via the `command` BRIDGE: command("kxwt", h) defines a global
     // `kxwt`, and the REPL's legacy rewrite turns typed `#kxwt dump 5` into `kxwt("dump 5")`.
@@ -602,7 +598,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     // Load the real game scripts through the engine to catch syntax errors and missing builtins —
     // they're otherwise only exercised at runtime. Resolved relative to this source file.
@@ -629,7 +624,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     Container.terminalService.register { TerminalService() }
     Container.lagMonitor.register { LagMonitor() }
@@ -687,7 +681,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     Container.terminalService.register { TerminalService() }
     Container.lagMonitor.register { LagMonitor() }
@@ -773,7 +766,6 @@ private actor RecordedWrites {
     Container.speechService.register { speech }
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
-    Container.rpcConnection.register { RPCConnection() }
     Container.connectionManager.register { ConnectionManager() }
     // Repro from a real raw capture: run actual server bytes through the real text pipeline
     // (IAC strip + CRLF normalize + MSP strip) and the AlterAeon gag, and prove kxwt machinery and
