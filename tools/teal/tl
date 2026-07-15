@@ -1,0 +1,7 @@
+#!/bin/zsh
+# Run the Teal compiler under Lua 5.4 (the tl 0.24.x CLI shim reassigns a for-loop var, which is a
+# const error under Homebrew's Lua 5.5; 5.4 also mirrors our embedded interpreter, Lua 5.4.7).
+LUA54=/opt/homebrew/opt/lua@5.4/bin/lua5.4
+TLDIR=$(dirname $(find /opt/homebrew -name tl.lua -path '*share*' 2>/dev/null | head -1))
+export LUA_PATH="$TLDIR/?.lua;;"
+exec "$LUA54" /opt/homebrew/bin/tl "$@"

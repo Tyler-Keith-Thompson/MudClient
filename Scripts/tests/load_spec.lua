@@ -63,6 +63,43 @@ test("resolve_script honours an explicit path first", function()
   expect(got):eq("x.lua")
 end)
 
+-- ---- resolve_script + Teal: a wired compiler lets a .tl source resolve; freshness is batched (below) ----
+
+test("resolve_script does NO per-file compile when the .lua already exists (freshness is batched)", function()
+  local sk, stc = __path_kind, __teal_compile
+  local calls = 0
+  __path_kind = function(p) return (p == "Scripts/Bar.lua" or p == "Scripts/Bar.tl") and "file" or "missing" end
+  __teal_compile = function() calls = calls + 1 end          -- must NOT be called: the .lua is present
+  local got = _LOAD_TEST.resolve("Bar")
+  __path_kind, __teal_compile = sk, stc
+  expect(got):eq("Scripts/Bar.lua")
+  expect(calls):eq(0)                                         -- per-reload cost stays O(1), not O(files)
+end)
+
+test("resolve_script compiles a .tl-only module (no committed .lua) when a compiler is wired", function()
+  local sk, stc = __path_kind, __teal_compile
+  local compiled = {}
+  -- Foo.lua does not exist until the hook "compiles" it; Foo.tl does.
+  __path_kind = function(p)
+    if p == "Scripts/Foo.tl" then return "file" end
+    if p == "Scripts/Foo.lua" then return compiled["Scripts/Foo.lua"] and "file" or "missing" end
+    return "missing"
+  end
+  __teal_compile = function(_, lua) compiled[lua] = true end
+  local got = _LOAD_TEST.resolve("Foo")
+  __path_kind, __teal_compile = sk, stc
+  expect(got):eq("Scripts/Foo.lua")
+end)
+
+test("resolve_script ignores a .tl when NO compiler is wired (Lua-only deploy uses committed .lua only)", function()
+  local sk, stc = __path_kind, __teal_compile
+  __teal_compile = nil                                        -- no compiler (harness / shipped Lua-only)
+  __path_kind = function(p) return p == "Scripts/Baz.tl" and "file" or "missing" end  -- only the .tl exists
+  local got = _LOAD_TEST.resolve("Baz")
+  __path_kind, __teal_compile = sk, stc
+  expect(got):eq(nil)                                         -- a .tl alone is invisible without a compiler
+end)
+
 -- ---- full load()/reload()/require dispatch against a fake filesystem ----
 
 -- Install a fake FS + record __run_file calls; returns (runs, restore). Also clears any leftover
@@ -94,6 +131,17 @@ test("load(file.lua) runs the explicit file", function()
   load("x.lua")
   restore()
   expect(join(runs)):eq("x.lua")
+end)
+
+test("load() runs __teal_sync ONCE up front, then loads (stale Teal regenerated before resolution)", function()
+  local runs, restore = fake_fs({ ["Scripts/X.lua"] = "file" }, {})
+  local synced, ss = 0, __teal_sync
+  __teal_sync = function() synced = synced + 1 end
+  load("X")
+  __teal_sync = ss
+  restore()
+  expect(synced):eq(1)                       -- one batched sync per load, regardless of file count
+  expect(join(runs)):eq("Scripts/X.lua")     -- and the module still loads afterward
 end)
 
 test("load(dir) runs top-level scripts in case-insensitive alphabetical order via require", function()

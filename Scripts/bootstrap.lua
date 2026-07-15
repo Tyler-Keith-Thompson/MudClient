@@ -704,8 +704,33 @@ local SEARCH_ROOTS = { "Scripts", "." }
 -- package.loaded, never stdlib entries. A global so it survives bootstrap re-entry in the harness.
 __script_loaded = __script_loaded or {}
 
+-- Teal (optional): `.tl` files are TYPED source that compile to the `.lua` the loader actually runs, so
+-- the loader itself is unchanged — it still resolves `Scripts/*.lua`. Two hooks, both auto-wired to the
+-- repo's tl wrapper just below when the environment can shell out and the wrapper is present, and left nil
+-- otherwise (a Lua-only deploy or the test harness simply loads the committed `.lua`; a spec injects its
+-- own to drive the paths with no real compiler):
+--   __teal_sync()                 regenerate every STALE .tl in Scripts/ in ONE shell pass. Called once at
+--                                 the top of load()/reload — the steady-state path. Freshness-gated, so an
+--                                 unchanged tree costs a SINGLE fork regardless of how many .tl exist
+--                                 (a per-file fork was ~160x slower on reload — see bench + load_spec).
+--   __teal_compile(tl, lua)       compile ONE file unconditionally — only to resolve a .tl with no .lua yet.
+if __teal_wired == nil and os and os.execute and __path_kind and __path_kind("tools/teal/tl") == "file" then
+  __teal_wired = true
+  function __teal_sync()
+    -- One shell process loops the sources; `tl gen` fires ONLY for a .tl newer than its .lua (or a missing
+    -- .lua), so a clean tree pays just this one fork. mud.d.tl is a declaration file — never generated.
+    os.execute("for t in Scripts/*.tl; do [ \"$t\" = Scripts/mud.d.tl ] && continue; l=\"${t%.tl}.lua\"; "
+      .. "[ \"$t\" -nt \"$l\" ] && ./tools/teal/tl gen \"$t\" -o \"$l\" >/dev/null 2>&1; done; true")
+  end
+  function __teal_compile(tl_path, lua_path)
+    os.execute("./tools/teal/tl gen '" .. tl_path .. "' -o '" .. lua_path .. "' >/dev/null 2>&1")
+  end
+end
+
 -- Resolve a module/require name to an existing .lua file path, or nil. A name ending in `.lua` (or an
--- explicit path) is tried verbatim; otherwise `<name>.lua` under each search root, CWD-relative.
+-- explicit path) is tried verbatim; otherwise `<name>.lua` under each search root, CWD-relative. Steady-
+-- state freshness is handled by __teal_sync() at load() entry, so this does NO per-file fork; the only
+-- compile here is the edge case of a `.tl` with no committed `.lua` at all (when a compiler is wired).
 local function resolve_script(name)
   local cands = {}
   if name:match("%.lua$") then
@@ -717,7 +742,17 @@ local function resolve_script(name)
     end
   end
   for _, p in ipairs(cands) do
-    if __path_kind(p) == "file" then return p end
+    if __path_kind(p) == "file" then return p end               -- committed / synced .lua (fresh already)
+  end
+  -- No committed .lua found — but a Teal source may compile to one.
+  if __teal_compile then
+    for _, p in ipairs(cands) do
+      local tl = p:gsub("%.lua$", ".tl")
+      if __path_kind(tl) == "file" then
+        __teal_compile(tl, p)
+        if __path_kind(p) == "file" then return p end
+      end
+    end
   end
   return nil
 end
@@ -758,6 +793,7 @@ end
 
 function load(arg)
   if type(arg) ~= "string" then return loadchunk(arg) end   -- non-string → stdlib chunk-reader
+  if __teal_sync then __teal_sync() end                      -- regenerate any stale Teal source up front (one pass)
   local kind = __path_kind(arg)
   if kind == "dir" then
     table.insert(SEARCH_ROOTS, 1, arg)                       -- resolve siblings within this dir
