@@ -161,8 +161,13 @@ test("enemy_hp_data drives AutoFight via __autofight_prompt and clears the fight
   expect(#calls):eq(1)
   expect(calls[1].pct):eq(84); expect(calls[1].name):eq("A screech-Owl")
   expect(state.fighting):truthy()
-  -- The death beat (hp=nil/0) must NOT keep the fight alive.
+  -- 0% is NEAR-DEATH, NOT dead — a named enemy at 0 must STAY an active fight (the fight ends on the
+  -- authoritative signals: kxwq_fighting -1 / ncombat / "is DEAD!", not on a 0 reading).
   _RPC_TEST.route(fi, pb.encode("dclient_rpc.enemy_hp_data", { enemy_name = "A screech-Owl", f2 = 0 }))
+  expect(state.fighting):truthy()
+  expect(state.fight_pct):eq(0)
+  -- An EMPTY name (no target) DOES clear it.
+  _RPC_TEST.route(fi, pb.encode("dclient_rpc.enemy_hp_data", { enemy_name = "", f2 = 0 }))
   expect(state.fighting):falsy()
   __autofight_prompt = prior
 end)

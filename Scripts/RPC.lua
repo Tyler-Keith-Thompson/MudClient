@@ -328,13 +328,17 @@ local function route(frameinfo, payload)
       if m.sent_message and #m.sent_message > 0 then echo(tilde_to_ansi(m.sent_message)) end
       return
     elseif r.full == "dclient_rpc.enemy_hp_data" and m then
-      -- f2 = enemy HP as a 0-100 percentage (capture shows 84→…→10 then a final hp=nil at death). Treat a
-      -- name with a real HP as an active fight; a MISSING/zero HP (the death beat) OR an empty name ends it
-      -- — otherwise the HUD sticks showing a phantom dead enemy pinned at 0%.
+      -- f2 = enemy HP as a 0-100 percentage. 0% is NEAR-DEATH, NOT dead — VERIFIED in the raw log the enemy
+      -- streams "…5, 4, 0, 0…" and keeps fighting to the real end. And enemy_hp_data CAN'T tell 0% from dead
+      -- anyway (proto3 decodes an absent f2 to 0, same as a real 0% bar). So enemy_hp_data only STARTS/REFRESHES
+      -- the fight — a NAMED enemy (any HP, 0 included) is active — and it NEVER ends the fight on a low/zero
+      -- reading. Ending is left to the AUTHORITATIVE signals that are unambiguous: kxwq_fighting -1 (→
+      -- fighting_from_prompt), generic_kv 'ncombat', and the "is DEAD!" line. (Treating 0 as death is what
+      -- dropped the fight early and made autofight lose track.) An EMPTY name = no target → clear.
       local name, pct = m.enemy_name, m.f2
-      if name and #name > 0 and pct and pct > 0 then
+      if name and #name > 0 then
         local was_fighting = state.fighting
-        state.fighting, state.fight_name, state.fight_pct = true, name, pct
+        state.fighting, state.fight_name, state.fight_pct = true, name, pct or 0
         -- Combat START (transition into fighting): CANCEL any in-progress recovery — resting/sleeping
         -- through a fight is dangerous. kxwt_fighting used to do this (Combat.lua); over RPC enemy_hp_data
         -- is the earliest combat-start signal (fires before/instead of a melee line, incl. ranged/spell
@@ -344,9 +348,12 @@ local function route(frameinfo, payload)
         -- is its transport-agnostic combat-signal entry (built for the nomelee prompt fallback) — enemy_hp_data
         -- is our authoritative health bar, so feed every tick (name+pct starts/refreshes the fight; the spell-
         -- landed TEXT triggers still fire through the text_block pipeline, so the rest of the routine works).
-        if __autofight_prompt then __autofight_prompt(pct, name) end
+        if __autofight_prompt then __autofight_prompt(pct or 0, name) end
       else
+        -- EMPTY name = no target → clear the HUD state + AutoFight. (Reached only when there's no enemy
+        -- name at all — NOT on a 0% reading, which keeps the fight above.)
         state.fighting, state.fight_name, state.fight_pct = false, nil, nil
+        if __autofight_prompt then __autofight_prompt(nil, nil) end
       end
       if on_update then on_update() end
     elseif r.full == "dclient_rpc.exp_to_level" and m then
