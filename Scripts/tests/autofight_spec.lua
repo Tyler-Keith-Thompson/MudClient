@@ -1038,7 +1038,7 @@ end
 
 local function tank_reset()
   AF.reset()
-  local T = AF.tank(); T.on, T.name, T.resummoning, T.tries, T.timer = true, nil, false, 0, nil
+  local T = AF.tank(); T.on, T.name, T.resummoning, T.tries, T.timer, T.death_at = true, nil, false, 0, nil, nil
   _AA_TEST.corpse.on = true                          -- start with corpse automation ON
   state.name, state.group, state.group_flags = "Vaelith", nil, nil
 end
@@ -1072,6 +1072,23 @@ test("tank dies (kxwt_ydeath then roster drops it): corpse automation OFF + re-c
   AF.tank_refresh()
   expect(_AA_TEST.corpse.on):eq(false)               -- (1) corpse automation disabled
   expect(AF.sent[#AF.sent]):eq(AF.cfg.clay_cmd)      -- (2) first re-summon cast went out
+  expect(#AF.sent):eq(before + 1)
+end)
+
+test("tank death survives STALE rosters over RPC (ydeath, roster still lists it, THEN removal → rescue)", function()
+  -- The RPC bug: kxwt_group streams every tick, so a roster still showing the tank fires BETWEEN the ydeath
+  -- and the removal. The old latch was wiped on every roster → rescue never fired. The windowed latch holds.
+  tank_reset()
+  tgroup({ { name = "A flesh beast", flags = "MT" } })
+  AF.tank_refresh()                                   -- track the tank
+  AF.tank_ydeath()                                   -- flesh beast died
+  tgroup({ { name = "A flesh beast", flags = "MT" } })  -- STALE roster: RPC still lists it (used to wipe the latch)
+  AF.tank_refresh()                                   -- must NOT consume the latch — tank still listed
+  tgroup({})                                          -- the roster finally drops it
+  local before = #AF.sent
+  AF.tank_refresh()
+  expect(_AA_TEST.corpse.on):eq(false)               -- rescue STILL fired despite the stale roster in between
+  expect(AF.sent[#AF.sent]):eq(AF.cfg.clay_cmd)
   expect(#AF.sent):eq(before + 1)
 end)
 

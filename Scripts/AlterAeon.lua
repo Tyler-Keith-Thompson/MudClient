@@ -269,6 +269,14 @@ trigger([=[^\[Exits: (.*?)\]]=], function(_, list)
   state.exits = set
 end)
 
+-- dsac <target> — "drop and sacrifice": drop the item, then sacrifice it. A straight-input alias (no `#`,
+-- like goto/autofight), for quickly dumping junk/loot for favor. Two separate sends so neither arg is split.
+alias([[^dsac (.+)$]], function(_, t)
+  t = t:gsub("^%s+", ""):gsub("%s+$", "")
+  send("drop " .. t)
+  send("sac " .. t)
+end)
+
 -- Spells that the mage "maintaining spells" skill can keep up continuously (from
 -- `help maintaining spells` — the game's authoritative list). When one of these comes up we
 -- auto-issue `maintain <spell>` so it never expires and we stop re-casting it. Set for O(1) lookup,

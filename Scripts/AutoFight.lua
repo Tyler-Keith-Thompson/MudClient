@@ -1034,7 +1034,7 @@ end
 -- off to sac/loot the corpse the moment combat ends, and we need a clean shot at re-summoning instead —
 -- and (2) re-cast 'clay man' on a pace until one joins the group, restoring the tank. Runs regardless of
 -- F.on (a dead tank is worth handling whether or not auto-fight is armed); disable with autofight.tank('off').
-local TANK = { on = true, name = nil, resummoning = false, tries = 0, timer = nil, death_pending = false }
+local TANK = { on = true, name = nil, resummoning = false, tries = 0, timer = nil, death_at = nil }
 
 -- Which grouped minion is currently tanking (flags contain both M = ours and T = tanking)? Read from
 -- state.group_flags — kxwt's OWN roster+flags (AlterAeon.lua), the kxwt supplement RPC can't provide. This
@@ -1101,22 +1101,25 @@ end
 -- kxwt_ydeath <name> — one of YOUR OWN minions just DIED (enemies emit kxwt_mdeath; a benign leave — you
 -- dismiss it, it flees — emits NEITHER). The death name is a pet nickname ("flesh beastie") that does NOT
 -- match the group-roster name ("A flesh beast"), so we can't tell FROM this line whether it was the tank;
--- we just latch "a minion died" and let the next roster say which one.
-local function tank_ydeath() TANK.death_pending = true end
+-- we TIMESTAMP "a minion died" and let a following roster say which one is gone.
+local TANK_DEATH_WINDOW = 6   -- seconds a ydeath stays "fresh" while we wait for the roster to drop the tank
+local function tank_ydeath() TANK.death_at = os.time() end
 
 -- kxwt_group_end: (re)track the tank and, using the ydeath latch, detect the TANK's death specifically.
--- The roster update immediately follows the death, so we consume the latch here: if our remembered tank is
--- now gone from the group AND a minion death was just announced, the tank was the one that died → rescue.
--- Gone WITHOUT a death (dismiss/flee — no ydeath) just drops the tracking, no rescue. A tank merely between
--- fights stays listed (just without the T flag), so it's never seen as "gone".
+-- If our remembered tank is now gone from the roster AND a minion death was announced RECENTLY, the tank was
+-- the one that died → rescue. CRITICAL over the 1.105 RPC: kxwt_group streams every tick, so SEVERAL stale
+-- rosters (tank still listed) fire between the ydeath and the roster that finally drops it. So we must NOT
+-- clear the latch on every call (that's why the rescue never fired over RPC) — we keep it until the tank is
+-- confirmed gone, and use a time WINDOW so a stale latch from some OTHER minion's death can't linger and
+-- fire on a later benign departure. Gone WITHOUT a recent death (dismiss/flee — no ydeath) → no rescue.
 local function refresh_tank()
   local t = current_tank_name()
-  local died = TANK.death_pending
-  TANK.death_pending = false                       -- this roster reflects any just-announced death
-  if t then TANK.name = t; return end              -- someone's tanking → track it
+  if t then TANK.name = t; return end              -- someone's tanking → track it (leave the latch alone)
   if TANK.name and not minion_in_group(TANK.name) then
+    local recent = TANK.death_at and (os.time() - TANK.death_at) <= TANK_DEATH_WINDOW
+    TANK.death_at = nil                            -- consume the latch now the tank is confirmed gone
     TANK.name = nil
-    if died then tank_died() end                   -- gone + a minion death announced → the tank died
+    if recent then tank_died() end                 -- gone + a RECENT minion death → the tank died
   end
 end
 
