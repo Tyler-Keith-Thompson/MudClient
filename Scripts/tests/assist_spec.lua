@@ -37,14 +37,14 @@ test("does NOT assist when auto-assist is off", function()
   end)
 end)
 
-test("debounces: a repeat within the cooldown is suppressed; allowed again after it", function()
+test("latches: fires ONCE per fight (the burst of melee lines can't re-assist); re-arms after the fight ends", function()
   with_combat(false, true, function(sent)
-    AA.maybe_assist(1000)        -- assist
-    AA.maybe_assist(1001)        -- within the 3s cooldown → nothing (rounds fire many times/sec)
-    AA.maybe_assist(1002)        -- still within → nothing
-    AA.maybe_assist(1005)        -- past the cooldown → assist again
+    AA.maybe_assist()            -- jump into the fight → assist
+    AA.maybe_assist()            -- same fight, latched → nothing (rounds fire many times/sec)
+    AA.maybe_assist()            -- still latched → nothing (this was the "assist fired again at the tail" bug)
+    expect(#sent):eq(1)
+    AA.reset_assist()            -- the fight ended (over RPC, ncombat clears state.assisted)
+    AA.maybe_assist()            -- next fight → assists again
     expect(#sent):eq(2)
-    expect(sent[1]):eq("assist")
-    expect(sent[2]):eq("assist")
   end)
 end)

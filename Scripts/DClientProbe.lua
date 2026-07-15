@@ -171,22 +171,35 @@ end
 -- "M" (your minion → cyan in HUD.group_member_row). That's right for the common solo-with-minions case;
 -- we can't recover tank/nomelee (T/N) badges or distinguish other players' minions — the flags simply
 -- aren't in the framed payload — but it puts the roster (you + your minions) back on the HUD.
+-- THE SINGLE WRITER of state.group (the group widget's source) — RPC owns the roster + member HP. kxwt,
+-- when on, fills in only the role flags via state.group_flags (AlterAeon.lua); we merge them here. Flags
+-- fall back to X (you) / M (minion) when kxwt is off. Because this is the ONLY thing that writes state.group,
+-- the widget can't flicker even with kxwt streaming its own group block at the same time.
 dclient.handlers["group"] = function(data)
+  local flags_for = state.group_flags or {}
   local g = {}
   if state.name and state.name ~= "" then
     g[1] = { hp = state.hp, maxhp = state.maxhp, mana = state.mana, maxmana = state.maxmana,
-             stam = state.stam, maxstam = state.maxstam, name = state.name, flags = "X", is_self = true }
+             stam = state.stam, maxstam = state.maxstam, name = state.name,
+             flags = flags_for[state.name] or "X", is_self = true }
   end
   for line in (data .. "\n"):gmatch("(.-)\n") do
     local hp, mhp, m, mm, s, ms, name =
       line:match("^(%d+) (%d+) (%d+) (%d+) (%d+) (%d+) %-(.-)%-%s*$")
     if hp then
       g[#g + 1] = { hp = tonumber(hp), maxhp = tonumber(mhp), mana = tonumber(m), maxmana = tonumber(mm),
-                    stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = "M" }
+                    stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = flags_for[name] or "M" }
     end
   end
   state.group = g
   if on_update then on_update() end
+  -- Over the 1.105 RPC ;sgroup; IS the group/minion-HP source (fires ~1000×/session; kxwt_group is dead).
+  -- Recovery re-picks the next minion to heal and re-checks completion ONLY when notified of a fresh roster
+  -- via __recovery_on_group — and kxwt_group_end (its only other caller) never fires here. WITHOUT this call
+  -- the heal sweep starves after its first cast and recovery completes on a stale "minion = full" reading,
+  -- leaving a hurt skeletal minion un-topped (the "recover won't soothe my skeletal knight" bug — VERIFIED
+  -- against a live capture: the knight sat at 263/269 while recovery stood up). Guarded on state.recover.
+  if state.recover and __recovery_on_group then __recovery_on_group() end
 end
 
 dclient.handlers["areaname"] = function(data) state.area = data end

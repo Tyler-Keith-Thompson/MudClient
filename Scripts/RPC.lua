@@ -397,6 +397,7 @@ local function route(frameinfo, payload)
         -- corpse harvesting (it waits on in_combat()).
         state.engaged_until = nil
         state.opponents = {}
+        state.assisted = nil                                          -- fight over → re-arm auto-assist (Combat.lua)
         if __autofight_prompt then __autofight_prompt(nil, nil) end   -- end AutoFight's routine authoritatively
         if on_update then on_update() end
       elseif key == "login" then

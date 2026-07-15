@@ -98,23 +98,45 @@ local function apply_prompt(p)
   state.position = p.position
   if __recovery_on_position then __recovery_on_position(p.position, changed) end
 
-  if p.fight_name then
-    state.fighting, state.fight_pct, state.fight_name = true, p.fight_pct, p.fight_name
-  else
-    state.fighting, state.fight_name, state.fight_pct = false, nil, nil
-  end
-
-  if __autofight_prompt then
-    if p.fight_name then __autofight_prompt(p.fight_pct, p.fight_name)
-    else __autofight_prompt(nil, nil) end
-  end
+  apply_fight(p.fight_pct, p.fight_name)   -- shared with the kxwq_fighting-as-prompt path (see on_prompt)
 
   if on_update then on_update() end
 end
 
+-- Drive ONLY the combat state (state.fighting + AutoFight), shared by apply_prompt and the kxwq_fighting
+-- prompt handler. fight_name nil = not fighting. Kept separate so the fighting bar can update WITHOUT
+-- touching vitals/position (the kxwq_fighting prompt carries no vitals — feeding it through apply_prompt
+-- would wipe state.hp/etc).
+function apply_fight(fight_pct, fight_name)
+  if fight_name then
+    state.fighting, state.fight_pct, state.fight_name = true, fight_pct, fight_name
+  else
+    state.fighting, state.fight_name, state.fight_pct = false, nil, nil
+  end
+  if __autofight_prompt then
+    if fight_name then __autofight_prompt(fight_pct, fight_name) else __autofight_prompt(nil, nil) end
+  end
+end
+
+-- The enemy health bar arrives as its OWN line "kxwq_fighting <pct> <gender> <name>" (or "… -1" at combat
+-- end). Over the 1.105 RPC the server GLUES it to the following ;sgroup; frame with a Telnet GO-AHEAD
+-- (IAC GA) between them — VERIFIED in the raw log: `kxwq_fighting 52 male A doctor\xff\xf9;sgroup;…`. The
+-- GA makes the line-assembler flush "kxwq_fighting 52 male A doctor" as a PROMPT, so Combat.lua's
+-- kxwt_fighting TRIGGER never sees it (triggers run on newline lines, not prompts) — the HUD didn't know we
+-- were fighting. on_prompt DOES get the clean text, so parse the fighting bar here and drive the state.
+-- Idempotent with Combat.lua's trigger (only one of the two ever sees a given tag), so no double-fire.
+local function fighting_from_prompt(text)
+  local pct, name = text:match("^kxw[tq]_fighting (%d+) %S+ (.+)$")
+  if pct then apply_fight(tonumber(pct), name); if on_update then on_update() end; return true end
+  if text:match("^kxw[tq]_fighting %-1%f[%D]") then apply_fight(nil, nil); if on_update then on_update() end; return true end
+  return false
+end
+
 function on_prompt(text)
+  if fighting_from_prompt(text) then return end
   apply_prompt(parse_prompt(text))
 end
 
 _PROMPT_TEST.parse_prompt = parse_prompt
 _PROMPT_TEST.apply_prompt = apply_prompt
+_PROMPT_TEST.fighting_from_prompt = fighting_from_prompt

@@ -105,7 +105,13 @@ local POSTURE_CONFIRM_WAIT = 8   -- self-heal window; comfortably exceeds real c
 -- `sleep` -> sleeping (2). A command is "confirmed" once state.position has reached that depth (>= for the
 -- recovery postures; == 0 for stand, since a deeper posture is NOT a confirmed stand).
 local POSTURE_TARGET_DEPTH = { stand = 0, rest = 1, sleep = 2 }
-local last_posture_cmd, last_posture_at = nil, 0
+-- "Stick to its guns": suppress an OSCILLATION — a flip straight BACK to the posture we just left
+-- (rest->sleep->rest) — within this window, so the chooser can't bounce rest<->sleep every couple seconds
+-- when a vital sits right on a threshold (e.g. lifetap bleeding hp down then it climbing back). A first-time
+-- deepen/downgrade (standing->rest->sleep, or sleep->rest) is NOT an oscillation and still goes through
+-- immediately; only the back-flip is held. `stand` (completion) is always exempt.
+local POSTURE_FLIP_HOLD = 5
+local last_posture_cmd, last_posture_at, prev_posture_cmd = nil, 0, nil
 local function posture_confirmed(cmd)
   local target = POSTURE_TARGET_DEPTH[cmd]
   if target == nil then return false end
@@ -122,10 +128,18 @@ local function send_posture(cmd)
      and (now - last_posture_at) < POSTURE_CONFIRM_WAIT then
     return
   end
+  -- OSCILLATION guard: suppress a flip straight BACK to the posture we just left (cmd == the posture before
+  -- last) within POSTURE_FLIP_HOLD. `stand` is exempt (completion). A genuine deepen/downgrade — a command
+  -- we're NOT bouncing back to — goes through immediately, so escalation stays responsive.
+  if cmd ~= "stand" and cmd == prev_posture_cmd and cmd ~= last_posture_cmd
+     and (now - last_posture_at) < POSTURE_FLIP_HOLD then
+    return
+  end
+  prev_posture_cmd = last_posture_cmd
   last_posture_cmd, last_posture_at = cmd, now
   send(cmd)
 end
-local function reset_posture() last_posture_cmd, last_posture_at = nil, 0 end
+local function reset_posture() last_posture_cmd, last_posture_at, prev_posture_cmd = nil, 0, nil end
 
 -- The game told us we're ALREADY in a posture we (redundantly) commanded ("You are already sound asleep!"
 -- / "You are already resting." / "You are already standing." — exact wire wordings verified against real

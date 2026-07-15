@@ -201,24 +201,24 @@ end
 doc(engaged, { name = "engaged", sig = "engaged([now])", group = "combat",
   text = "True when you're in a fight: the kxwt_fighting target is live OR combat text (melee-round lines) was seen within the last ~10s. Covers nomelee fights, where the server sends NO kxwt_fighting at all." })
 
--- ---- auto-assist (pure decision + debounce) -----------------------------------------------------
--- When your minions (or you) are getting hit by an enemy but you're NOT in the melee round yourself —
--- engaged() is true from the combat text, yet state.fighting is false (no kxwt_fighting), the "dimmed
--- target" state — jump into the fight with `assist` so you (and AutoFight) actually engage. Called off
--- the melee-round stream (which has already identified the enemy and confirmed your side is in it),
--- debounced so the many rounds-per-second lines don't spam `assist`. Off via `autoassist off`.
-local ASSIST_COOLDOWN = 3   -- seconds between assist attempts (retries if the first didn't pull you in)
-local assist_at = 0
-local function maybe_assist(now)
+-- ---- auto-assist (a ONE-SHOT fight-starter) -----------------------------------------------------
+-- Auto-assist is for when you're NOT yet in a fight your minions started — the "dimmed target" state where
+-- the combat text shows your side fighting but you aren't in it. It fires `assist` to jump you in, and that
+-- is ITS WHOLE JOB: once a fight has started it LATCHES (state.assisted) and does nothing more for the rest
+-- of that fight. Without the latch the many melee-round lines each re-evaluated it, so it fired again at the
+-- TAIL of a fight — even one `assist` landing just AFTER the mob died ("No-one in your group is fighting…").
+-- The latch clears when the fight ENDS (reset_assist below, and RPC's ncombat clears state.assisted), so the
+-- NEXT fight assists again. Off via `autoassist off`.
+local function maybe_assist()
   if not state.auto_assist then return end
-  if state.fighting then return end          -- already in the melee round → nothing to assist into
-  now = now or os.time()
-  if now < assist_at + ASSIST_COOLDOWN then return end
-  assist_at = now
+  if state.assisted then return end          -- already jumped into THIS fight → auto-assist is done until it ends
+  state.assisted = true                        -- latch immediately so the burst of melee lines can't re-assist
+  if state.fighting then return end            -- you're already in the melee round → nothing to assist into
   send("assist")
 end
--- kxwt_fighting -1 (combat ended) resets the debounce so the NEXT fight assists immediately.
-local function reset_assist() assist_at = 0 end
+-- Combat ended → drop the latch so the NEXT fight can auto-assist. (kxwt_fighting -1 calls this; over the
+-- 1.105 RPC the authoritative end is ncombat, which clears state.assisted directly — RPC.lua.)
+local function reset_assist() state.assisted = nil end
 
 -- Just YOU (not your minions): the melee lines' pronoun "you", or your kxwt_myname. Lets us tell "I'm in
 -- this fight" from "my MINIONS are" — a mob brawling only with your pets shouldn't pin YOU in combat.

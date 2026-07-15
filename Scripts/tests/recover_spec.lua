@@ -144,6 +144,24 @@ test("a DIFFERENT posture command always goes through immediately (escalate / do
   end)
 end)
 
+test("oscillation guard: a flip straight BACK to the posture just left is HELD (kills the rest/sleep flap)", function()
+  with_clock("resting", function(sent)
+    send_posture("rest")        -- commit to rest
+    send_posture("sleep")       -- deepen (different, not a back-flip) → goes through
+    send_posture("rest")        -- flip BACK to rest within the hold → suppressed (this is the flap)
+    expect(#sent):eq(2); expect(sent[2]):eq("sleep")
+  end)
+end)
+
+test("oscillation guard: the held back-flip goes through once POSTURE_FLIP_HOLD passes", function()
+  with_clock("resting", function(sent, advance)
+    send_posture("rest"); send_posture("sleep")
+    advance(6)                  -- past the flip-hold window
+    send_posture("rest")        -- no longer an immediate back-flip → allowed
+    expect(#sent):eq(3); expect(sent[3]):eq("rest")
+  end)
+end)
+
 test("chooser under command-lag does not issue `sleep` twice (the reported double-sleep bug)", function()
   local saved_state, saved_send, saved_time = state, send, os.time
   local sent, clock = {}, 3000

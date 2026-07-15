@@ -304,31 +304,32 @@ trigger([[^kxw[tq]_spelldown (.+)$]], function(_, s)
   if __recovery_on_spelldown then __recovery_on_spelldown(s) end   -- drop to rest for the recast (Recovery.lua)
 end)
 
--- Group roster. kxwt streams the party (you + pets/groupmates/minions) as a block bracketed by
--- kxwt_group_start .. kxwt_group_end; each member line is "chp mhp cm mm cs ms <flags> <name>". This is
--- the ONLY group source that fires over the 1.105 RPC (the framed ;sgroup; event in DClientProbe.lua does
--- NOT arrive — verified against live traces — and there is no group protobuf message), and it already
--- carries the role flags RPC lacks: X=you, M=your minion, T=tanking, N=nomelee (e.g. a flesh beast tank
--- shows "MT", so AutoFight's M+T tank detection and the HUD's per-flag colouring work). So we KEEP it
--- owning state.group. Accumulate between start/end so a half-sent block never renders partial data.
-local group_capturing, group_buf = false, {}
-trigger([[^kxw[tq]_group_start$]], function() group_capturing = true; group_buf = {} end)
+-- Group ROLE FLAGS — kxwt SUPPLEMENTS the RPC roster; it does NOT own it. THE RULE: trust RPC, use kxwt
+-- only for what RPC lacks. The roster + per-member HP comes from the framed ;sgroup; event (DClientProbe.lua)
+-- and is the SINGLE writer of state.group — so the group widget never flickers. kxwt's group block carries
+-- the one thing ;sgroup; can't: the role flags (X=you, M=your minion, T=tanking, N=nomelee; a flesh-beast
+-- tank shows "MT"). So when kxwt is on we harvest ONLY the flags here into state.group_flags[name] and merge
+-- them onto the RPC roster — NEVER touching HP. Both events can fire at once (kxwt on) with no fight: one
+-- writes HP (RPC), the other only tags flags. kxwt streams "chp mhp cm mm cs ms <flags> <name>"; we keep
+-- just <flags> and <name>.
+state.group_flags = state.group_flags or {}
+local gflag_capturing, gflag_buf = false, {}
+trigger([[^kxw[tq]_group_start$]], function() gflag_capturing = true; gflag_buf = {} end)
 trigger([[^kxw[tq]_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
-  function(_, chp, mhp, cm, mm, cs, ms, flags, name)
-    if not group_capturing then return end
-    group_buf[#group_buf + 1] = {
-      hp = tonumber(chp), maxhp = tonumber(mhp),
-      mana = tonumber(cm), maxmana = tonumber(mm),
-      stam = tonumber(cs), maxstam = tonumber(ms),
-      flags = flags, name = name,
-    }
+  function(_, _chp, _mhp, _cm, _mm, _cs, _ms, flags, name)
+    if not gflag_capturing then return end
+    gflag_buf[name] = flags
   end)
 trigger([[^kxw[tq]_group_end$]], function()
-  if group_capturing then state.group = group_buf end
-  group_capturing = false
-  -- Fresh roster: while recovering, (re)pick the next minion to heal and re-check completion — minion HP
-  -- only changes here, not on the player prompt (Recovery.lua).
-  if state.recover and __recovery_on_group then __recovery_on_group() end
+  if not gflag_capturing then return end
+  gflag_capturing = false
+  state.group_flags = gflag_buf                       -- the roster's authoritative role flags (wholesale)
+  -- Merge the flags onto the live RPC-owned roster IN PLACE (HP untouched) so tank/nomelee badges show
+  -- without waiting for the next ;sgroup;. This is the ONLY thing kxwt does to the group.
+  for _, m in ipairs(state.group or {}) do
+    if gflag_buf[m.name] then m.flags = gflag_buf[m.name] end
+  end
+  if on_update then on_update() end
 end)
 
 

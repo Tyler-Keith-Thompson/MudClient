@@ -1036,12 +1036,16 @@ end
 -- F.on (a dead tank is worth handling whether or not auto-fight is armed); disable with autofight.tank('off').
 local TANK = { on = true, name = nil, resummoning = false, tries = 0, timer = nil, death_pending = false }
 
--- Which grouped minion is currently tanking (flags contain both M = ours and T = tanking)? Its name is
--- remembered stickily (see refresh_tank) so we still know who the tank WAS the moment it leaves the group.
+-- Which grouped minion is currently tanking (flags contain both M = ours and T = tanking)? Read from
+-- state.group_flags — kxwt's OWN roster+flags (AlterAeon.lua), the kxwt supplement RPC can't provide. This
+-- is deliberately NOT state.group: over the 1.105 RPC state.group's membership comes from the framed
+-- ;sgroup; event, whose timing is decoupled from the kxwt_group_end that drives refresh_tank — so a
+-- just-dead tank could still be listed there. state.group_flags is refreshed in the SAME kxwt_group_end,
+-- so it's self-consistent with the kxwt_ydeath that latched the death. Name is remembered stickily
+-- (refresh_tank) so we still know who the tank WAS the moment it leaves.
 local function current_tank_name()
-  for _, m in ipairs(state.group or {}) do
-    local f = m.flags or ""
-    if f:find("M", 1, true) and f:find("T", 1, true) then return m.name end
+  for name, f in pairs(state.group_flags or {}) do
+    if f:find("M", 1, true) and f:find("T", 1, true) then return name end
   end
   return nil
 end
@@ -1083,11 +1087,13 @@ local function tank_resummoned()
   stop_resummon()
 end
 
+-- Is `name` still in kxwt's roster? Checked against state.group_flags (kxwt's own membership) to match
+-- current_tank_name — self-consistent with the kxwt_group_end/kxwt_ydeath pair, unlike RPC's ;sgroup;.
 local function minion_in_group(name)
   if not name then return false end
   local low = name:lower()
-  for _, m in ipairs(state.group or {}) do
-    if m.name and m.name:lower() == low then return true end
+  for n in pairs(state.group_flags or {}) do
+    if n:lower() == low then return true end
   end
   return false
 end
@@ -1432,6 +1438,11 @@ function autofight.engage(target, on_dead, on_fail)
   F.fought = false                                       -- fresh engagement: re-armed when start_fight lands
   F.on_dead, F.on_fail = on_dead, on_fail
   F.engaging, F.engage_busy, F.engage_tries = true, false, 0
+  -- You INITIATED this fight (attack/engage), so latch auto-assist (Combat.lua) OFF for it: the "rescues
+  -- you"/"jumps to your side" lines that immediately follow must not also fire `assist` — you're already in.
+  -- state.fighting hasn't been set yet (enemy_hp_data lags the opener), so this latch is what stops the
+  -- redundant assist ("You are already fighting …"). ncombat clears state.assisted when the fight ends.
+  state.assisted = true
   F.opener_primed = true                                 -- start_fight will skip re-casting the opener
   say(string.format("engaging %s — casting the opener to start the fight", tostring(target)))
   af_send("target " .. tostring(target))

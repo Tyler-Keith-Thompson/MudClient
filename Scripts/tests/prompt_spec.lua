@@ -7,6 +7,7 @@
 
 local parse_prompt = _PROMPT_TEST.parse_prompt
 local apply_prompt = _PROMPT_TEST.apply_prompt
+local fighting_from_prompt = _PROMPT_TEST.fighting_from_prompt
 
 local function with_state(st, fn)
   local saved_state, saved_recover_v, saved_recover_p, saved_update = state, __recovery_on_vitals, __recovery_on_position, on_update
@@ -18,6 +19,39 @@ local function with_state(st, fn)
   state, __recovery_on_vitals, __recovery_on_position, on_update = saved_state, saved_recover_v, saved_recover_p, saved_update
   if not ok then error(err, 2) end
 end
+
+-- kxwq_fighting (the enemy health bar) arrives GA-flushed as its OWN prompt (glued to ;sgroup; over RPC),
+-- so Combat.lua's trigger never sees it — on_prompt must parse it or the HUD doesn't know we're fighting.
+local function with_fight_state(st, fn)
+  local saved_af = __autofight_prompt
+  __autofight_prompt = nil                             -- isolate: don't drive the real AutoFight
+  with_state(st, fn)
+  __autofight_prompt = saved_af
+end
+
+test("fighting_from_prompt: a GA-flushed 'kxwq_fighting <pct> <gender> <name>' sets the combat state", function()
+  with_fight_state({}, function()
+    expect(fighting_from_prompt("kxwq_fighting 52 male A doctor")):eq(true)
+    expect(state.fighting):eq(true)
+    expect(state.fight_pct):eq(52)
+    expect(state.fight_name):eq("A doctor")            -- name with a space, no ;sgroup; junk
+  end)
+end)
+
+test("fighting_from_prompt: the '-1' end line clears the combat state", function()
+  with_fight_state({ fighting = true, fight_name = "A doctor", fight_pct = 52 }, function()
+    expect(fighting_from_prompt("kxwq_fighting -1")):eq(true)
+    expect(state.fighting):eq(false)
+    expect(state.fight_name):eq(nil)
+  end)
+end)
+
+test("fighting_from_prompt: a normal vitals prompt is NOT a fighting line (returns false, untouched)", function()
+  with_fight_state({ fighting = "sentinel" }, function()
+    expect(fighting_from_prompt("kxwq_hud|100|100|50|50|100|100|standing")):eq(false)
+    expect(state.fighting):eq("sentinel")              -- left for apply_prompt to handle
+  end)
+end)
 
 test("parse_prompt reads a fighting prompt: vitals, position, and the target (name with spaces)", function()
   local p = parse_prompt("kxwq_hud|80|100|40|50|90|100|standing|65|m|Drax the kender")
