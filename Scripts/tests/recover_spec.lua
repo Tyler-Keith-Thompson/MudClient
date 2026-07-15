@@ -378,11 +378,11 @@ test("casts refresh when stamina is many ticks away and mana has slack", functio
     function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c refresh") end)
 end)
 
-test("casts bolster on yourself for a big hp wound (soothe when the wound is small)", function()
+test("casts bolster on yourself for a big hp wound, soothe for a small one (by absolute hp missing)", function()
   with_self_recovery({ hp = 30, regen = { hp = 6, mana = 20, move = 10, position = "resting" } },
-    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me") end)   -- 30% < 70% → bolster
-  with_self_recovery({ hp = 75, regen = { hp = 3, mana = 20, move = 10, position = "resting" } },
-    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c soothe Me") end)     -- 75% ≥ 70% → soothe
+    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me") end)   -- missing 70 → bolster
+  with_self_recovery({ hp = 80, regen = { hp = 3, mana = 20, move = 10, position = "resting" } },
+    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c soothe Me") end)     -- missing 20 (<25) → soothe
 end)
 
 test("does NOT cast when natural regen is fast (stat within a few ticks of target)", function()

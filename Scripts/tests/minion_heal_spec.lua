@@ -109,14 +109,24 @@ test("minions_pending_spell_heal: skeletal always; our natural-regen minion only
   end)
 end)
 
-test("full player actively heals a hurt natural-regen minion: bolster when low, soothe near full", function()
-  with_group({ me(), minion("A flesh beast", 100, 485) }, {}, function(sent)   -- ~21% → bolster
+test("heal_spell picks bolster vs soothe by ABSOLUTE hp missing, not percentage", function()
+  local hs, M = AA.heal_spell, AA.BOLSTER_MIN_MISSING
+  expect(hs(485 - M, 485)):eq("bolster")         -- big pool, exactly a bolster's worth missing → bolster
+  expect(hs(485 - (M - 1), 485)):eq("soothe")    -- one under the threshold → soothe (bolster would over-heal)
+  expect(hs(39 - 30, 39)):eq("bolster")          -- SMALL pool (skeleton) but 30 hp missing → still bolster
+  expect(hs(39 - 5, 39)):eq("soothe")            -- small pool, only 5 hp missing → soothe
+end)
+
+test("full player heals a hurt natural-regen minion with BOLSTER (its eligible wound is always > a soothe)", function()
+  with_group({ me(), minion("A flesh beast", 100, 485) }, {}, function(sent)   -- missing 385 → bolster
     AA.try_cast_heal()
     expect(sent[1]):eq("c bolster beast")
   end)
-  with_group({ me(), minion("A flesh beast", 400, 485) }, {}, function(sent)   -- ~82% → soothe (>= BOLSTER_BELOW)
+  -- A big-pool minion at 82% is missing 85 hp — a BOLSTER, not a soothe (the % heuristic wrongly picked
+  -- soothe here and left it under-healed). By absolute hp missing it's clearly a bolster.
+  with_group({ me(), minion("A flesh beast", 400, 485) }, {}, function(sent)   -- missing 85 → bolster
     AA.try_cast_heal()
-    expect(sent[1]):eq("c soothe beast")
+    expect(sent[1]):eq("c bolster beast")
   end)
   -- While YOU still need mana, leave the regen minion alone — don't spend recovery mana on it yet.
   with_group({ me(), minion("A flesh beast", 100, 485) }, { mana = 40 }, function(sent)

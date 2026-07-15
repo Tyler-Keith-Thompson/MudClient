@@ -466,9 +466,15 @@ local function minion_ready_target(m, frac)
   if (m.maxhp or 0) < MINION_FULL_BELOW then return 1.0 end
   return frac or (recovery and recovery.pct) or READY_PCT
 end
--- Below this fraction a wound is big enough for bolster (the strong heal); at or above it we use soothe
--- (the weak heal) so the game doesn't refuse it as "doesn't need that much healing" near full.
-local BOLSTER_BELOW = 0.70
+-- bolster vs soothe by ABSOLUTE hp missing, NOT percentage. bolster is a roughly FLAT heal (~25 hp), so
+-- percentage was wrong: on a small pool "30% missing" is only a few hp and bolster over-heals → the game
+-- refuses it ("… doesn't need that much healing right now"), stalling the sweep. Pick bolster only when the
+-- wound is at least a bolster's worth of hp; soothe (the weaker heal) for anything smaller. `heal_spell`
+-- centralises the choice for both minion and self heals.
+local BOLSTER_MIN_MISSING = 25   -- hp missing at/above which bolster won't over-heal (its ~flat heal amount)
+local function heal_spell(cur, max)
+  return ((max or 0) - (cur or 0)) >= BOLSTER_MIN_MISSING and "bolster" or "soothe"
+end
 
 -- ---- Self spell-recovery: spend surplus mana to top your OWN vitals faster than natural regen -------
 --
@@ -869,7 +875,7 @@ try_cast_heal = function()
     if ord > K then ord = 1 end
     target = ord .. "." .. word
   end
-  local spell = (f < BOLSTER_BELOW) and "bolster" or "soothe"
+  local spell = heal_spell(m.hp, m.maxhp)
   cast(spell) : at(target)
               : records{ word = word, ord = ord, K = K, kind = "minion", name = m.name }
               : go()
@@ -889,7 +895,7 @@ pick_self_cast = function()
   if (st == nil or st == "hp") and not minion_heal.self_hp_blocked and state.name then
     local hpf = pct(state.hp, state.maxhp)
     if hpf < frac and cast_beats_waiting(state.hp, state.maxhp, r and r.hp, HEAL_COST) then
-      return { stat = "hp", label = "hp", spell = (hpf < BOLSTER_BELOW) and "bolster" or "soothe",
+      return { stat = "hp", label = "hp", spell = heal_spell(state.hp, state.maxhp),
                target = state.name, pctv = hpf, ticks = ticks_to_target(state.hp, state.maxhp, r and r.hp, frac) or 0,
                kind = "self_hp" }
     end
@@ -989,6 +995,7 @@ for _k, _v in pairs({ ready = ready, pct = pct, READY_PCT = READY_PCT,
              recovery = recovery, end_recovery = end_recovery,
              maybe_complete_recovery = maybe_complete_recovery,
              minion_needs_spell_heal = minion_needs_spell_heal, minion_target_word = minion_target_word,
+             heal_spell = heal_spell, BOLSTER_MIN_MISSING = BOLSTER_MIN_MISSING,
              minion_target_words = minion_target_words, next_untried_word = next_untried_word,
              keyword_count = keyword_count, keyword_matches = keyword_matches,
              minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,
