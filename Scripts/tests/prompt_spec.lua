@@ -29,6 +29,18 @@ local function with_fight_state(st, fn)
   __autofight_prompt = saved_af
 end
 
+test("reinject_kxwt_tag: a GA-flushed kxwt tag is re-fed as a newline line for its real trigger", function()
+  local fed, saved = {}, feed_server
+  feed_server = function(s) fed[#fed + 1] = s end
+  -- kxwq_spellup arrives GA-flushed (prompt), so auto-maintain's trigger never fires — re-inject it.
+  expect(_PROMPT_TEST.reinject_kxwt_tag("kxwq_spellup fire shield")):eq(true)
+  expect(fed[1]):eq("kxwq_spellup fire shield\n")
+  -- A real game prompt (not a kxwt tag) is left alone.
+  expect(_PROMPT_TEST.reinject_kxwt_tag("HP:100 >")):eq(false)
+  expect(#fed):eq(1)
+  feed_server = saved
+end)
+
 test("fighting_from_prompt: a GA-flushed 'kxwq_fighting <pct> <gender> <name>' sets the combat state", function()
   with_fight_state({}, function()
     expect(fighting_from_prompt("kxwq_fighting 52 male A doctor")):eq(true)

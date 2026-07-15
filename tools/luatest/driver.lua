@@ -91,7 +91,7 @@ end
 -- _HUD_TEST, _AIP_TEST, …) are all present AND the defensive `state = state or {}` decoupling is
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
 for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Audio.lua",
-                     "Scripts/AutoFight.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
+                     "Scripts/AutoFight.lua", "Scripts/BookDump.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
                      "Scripts/Corpse.lua", "Scripts/DCast.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
                      "Scripts/Promise.lua", "Scripts/Prompt.lua", "Scripts/Recovery.lua", "Scripts/RPC.lua",
                      "Scripts/Soulforge.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do

@@ -132,11 +132,28 @@ local function fighting_from_prompt(text)
   return false
 end
 
+-- kxwq_fighting isn't the ONLY GA-flushed tag — the server ends several kxwt/kxwq telemetry tags with IAC
+-- GO-AHEAD, so the line assembler hands them to on_prompt instead of the trigger pipeline (VERIFIED in the
+-- raw log: `kxwq_spellup fire shield\xff\xf9…`). Their REAL triggers then never fire — which is why
+-- auto-maintain stopped (`maintain <spell>` is issued from the kxwt_spellup trigger, AlterAeon.lua), along
+-- with the spells widget, spelldown/spst, the recovery spellup/spelldown hooks, and the death banners. So any
+-- kxwt tag that lands here (other than the kxwq_hud vitals prompt parsed above, and kxwq_fighting driven
+-- directly) is RE-INJECTED as a proper newline line via feed_server, so the normal pipeline dispatches it to
+-- its actual trigger. The re-fed line ends in \n (no GA) so it can't loop back into on_prompt, and the kxwt
+-- catch-all gag still hides it from the display.
+local function reinject_kxwt_tag(text)
+  if feed_server and text:match("^kxw[tq]_") then feed_server(text .. "\n"); return true end
+  return false
+end
+
 function on_prompt(text)
   if fighting_from_prompt(text) then return end
-  apply_prompt(parse_prompt(text))
+  local p = parse_prompt(text)
+  if p then apply_prompt(p); return end
+  reinject_kxwt_tag(text)
 end
 
 _PROMPT_TEST.parse_prompt = parse_prompt
 _PROMPT_TEST.apply_prompt = apply_prompt
 _PROMPT_TEST.fighting_from_prompt = fighting_from_prompt
+_PROMPT_TEST.reinject_kxwt_tag = reinject_kxwt_tag
