@@ -110,12 +110,18 @@ end
 -- return, so the ring records every tag regardless of the gag.
 local kxwt_ring: {string} = {}
 local KXWT_RING_MAX = 300
+-- priority = -100: this hider must fire LAST, AFTER every kxwt PARSER, for two reasons. (1) It rewrites
+-- the line to just its leading ANSI (or gags it) — a display edit that would blank the line out from under
+-- any parser that ran after it. (2) It's a catch-all: without the low priority a parser whose pattern ends
+-- in a `.+`/`.*` capture scores BELOW this one and would lose the tie. Running last, it only ever touches
+-- display, never suppresses a parse. (The engine no longer stops the chain on a gag either — belt and
+-- suspenders — but ordering the hider last is what keeps its ANSI rewrite from clobbering the line.)
 trigger([[^kxw[tq]_]], function(...: any): any
   local a = { ... }
   kxwt_ring[#kxwt_ring + 1] = a[1] as string
   if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
   return __leading_ansi(a[#a] as string)
-end)
+end, { priority = -100 })
 
 -- Walk direction: numeric code -> name (used by the map). The converter for the walkdir field below;
 -- an unknown code returns nil, which `field :via` assigns straight through to clear state.walkdir.
@@ -351,42 +357,18 @@ end)
 -- just <flags> and <name>.
 state.group_flags = state.group_flags or {}
 local gflag_capturing, gflag_buf = false, {} as {string:string}
--- TEMP DEBUG (tank/group_flags investigation): counters that self-report on each roster CHANGE so we can
--- see, live, where the parse breaks — does the member handler fire at all, does capture start, what commits.
-local dbg_starts, dbg_members, dbg_ends, dbg_bails = 0, 0, 0, 0
-local dbg_last = ""
-trigger([[^kxw[tq]_group_start$]], function(): any gflag_capturing = true; gflag_buf = {}; dbg_starts = dbg_starts + 1 end)
--- priority=1: this line ends in a `(.+)$` name-capture, whose unbounded wildcard costs -50 specificity,
--- dropping the pattern to ~95 — BELOW the `^kxw[tq]_` ring/gag catch-all (105). Without an explicit
--- priority the gag fires first, returns a string, and ENDS the handler chain, so this parser never runs and
--- state.group_flags commits EMPTY (the tank-rescue bug). group_start/group_end don't need it (no wildcard →
--- 136/134, already above the gag). Any kxwt parser with a `.+`/`.*` text capture has the same trap.
+-- These parse the kxwt group block into role flags. The MEMBER line ends in a `(.+)$` name-capture (spec
+-- ~95, below the `^kxw[tq]_` hider) — it only ever runs because that hider now fires LAST (priority -100)
+-- and, regardless, a gag no longer stops the chain (see LuaScriptEngine.processLine). No priority needed here.
+trigger([[^kxw[tq]_group_start$]], function(): any gflag_capturing = true; gflag_buf = {} end)
 trigger([[^kxw[tq]_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
   function(_: any, _chp: string, _mhp: string, _cm: string, _mm: string, _cs: string, _ms: string, flags: string, name: string): any
-    dbg_members = dbg_members + 1                      -- counted BEFORE the guard: did the member handler fire?
     if not gflag_capturing then return end
     gflag_buf[name] = flags
-  end, { priority = 1 })
+  end)
 trigger([[^kxw[tq]_group_end$]], function(): any
-  if not gflag_capturing then
-    dbg_bails = dbg_bails + 1
-    if dbg_bails % 20 == 1 and echo then
-      echo(string.format("[grp-dbg] group_end BAILED (capturing=false) x%d  starts=%d members=%d",
-        dbg_bails, dbg_starts, dbg_members), "brightred")
-    end
-    return
-  end
+  if not gflag_capturing then return end
   gflag_capturing = false
-  dbg_ends = dbg_ends + 1
-  do
-    local n, s = 0, ""
-    for k, v in pairs(gflag_buf) do n = n + 1; s = s .. k .. "=" .. v .. " " end
-    if s ~= dbg_last then
-      dbg_last = s
-      if echo then echo(string.format("[grp-dbg] COMMIT  starts=%d members=%d ends=%d bails=%d committed=%d :: %s",
-        dbg_starts, dbg_members, dbg_ends, dbg_bails, n, s == "" and "(EMPTY)" or s), "brightmagenta") end
-    end
-  end
   state.group_flags = gflag_buf                       -- the roster's authoritative role flags (wholesale)
   -- Merge the flags onto the live RPC-owned roster IN PLACE (HP untouched) so tank/nomelee badges show
   -- without waiting for the next ;sgroup;. This is the ONLY thing kxwt does to the group.

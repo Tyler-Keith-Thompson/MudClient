@@ -513,7 +513,11 @@ final class LuaScriptEngine: @unchecked Sendable {
             default:
                 break // nil / no-return / any other value → line unchanged
             }
-            if gagged { break }
+            // A gag is a DISPLAY decision (this line won't render) — it must NOT stop the chain. Every
+            // matching handler still fires, in order, so a broad gag (e.g. the `^kxw[tq]_` machine-tag
+            // hider) can't supplant a lower-specificity PARSER that needs to read the same line. Parsers
+            // that shouldn't touch a machine line filter it themselves (they already do); gagging and
+            // parsing are orthogonal. (`gagged` is sticky — once set, the line stays hidden.)
         }
         if !firedOneshots.isEmpty { lineRules.removeAll { firedOneshots.contains($0.id) } }
         if gagged { return nil }

@@ -510,11 +510,13 @@ handle_kv_event = function(_fi: {string:any}, m: {string:any}): boolean
       if on_update then on_update() end
     elseif key == "login" then
       if m.kvalue and m.kvalue ~= "" then state.name = m.kvalue end
-      -- NOTE: we deliberately do NOT touch kxwt here. Enabling it over the 1.105 RPC was a disaster — the
-      -- kxwt_* tags (group/hp/…) FIGHT the RPC widgets (group roster flickered as the two sources
-      -- overwrote each other). Navigation stays on the ;smap; section-3 local map. If kxwt was left on
-      -- server-side, disable it manually once with `set kxwt off`. The kxwt_live() gate still stands the
-      -- section-3 bridge down IF you ever choose to enable kxwt by hand.
+      -- Enable kxwt as a SUPPLEMENT to the RPC — the fields the protobuf doesn't carry: role flags
+      -- (state.group_flags: M/T/N, the tank-rescue's only source), kxwt_ydeath, and kxwt_rvnum room coords
+      -- for the geometric minimap. The old "kxwt fights the RPC widgets" problem is gone: ;sgroup; is now the
+      -- SINGLE writer of state.group (roster + HP), and kxwt only merges FLAGS onto it — no overwrite, no
+      -- flicker (see DClientProbe.handle_group). `set kxwt on` explicitly (not the bare toggle) so a re-login
+      -- can't flip it off. The ;smap; bridge is preview-only + kxwt_live()-gated, so it won't fight coords.
+      send("set kxwt on")
     end
   end
   return false

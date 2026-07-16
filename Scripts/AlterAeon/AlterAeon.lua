@@ -110,12 +110,18 @@ end
 
 local kxwt_ring = {}
 local KXWT_RING_MAX = 300
+
+
+
+
+
+
 trigger([[^kxw[tq]_]], function(...)
    local a = { ... }
    kxwt_ring[#kxwt_ring + 1] = a[1]
    if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
    return __leading_ansi(a[#a])
-end)
+end, { priority = -100 })
 
 
 
@@ -353,40 +359,16 @@ state.group_flags = state.group_flags or {}
 local gflag_capturing, gflag_buf = false, {}
 
 
-local dbg_starts, dbg_members, dbg_ends, dbg_bails = 0, 0, 0, 0
-local dbg_last = ""
-trigger([[^kxw[tq]_group_start$]], function() gflag_capturing = true; gflag_buf = {}; dbg_starts = dbg_starts + 1 end)
 
-
-
-
-
+trigger([[^kxw[tq]_group_start$]], function() gflag_capturing = true; gflag_buf = {} end)
 trigger([[^kxw[tq]_group (\d+) (\d+) (\d+) (\d+) (\d+) (\d+) (\S+) (.+)$]],
 function(_, _chp, _mhp, _cm, _mm, _cs, _ms, flags, name)
-   dbg_members = dbg_members + 1
    if not gflag_capturing then return end
    gflag_buf[name] = flags
-end, { priority = 1 })
+end)
 trigger([[^kxw[tq]_group_end$]], function()
-   if not gflag_capturing then
-      dbg_bails = dbg_bails + 1
-      if dbg_bails % 20 == 1 and echo then
-         echo(string.format("[grp-dbg] group_end BAILED (capturing=false) x%d  starts=%d members=%d",
-         dbg_bails, dbg_starts, dbg_members), "brightred")
-      end
-      return
-   end
+   if not gflag_capturing then return end
    gflag_capturing = false
-   dbg_ends = dbg_ends + 1
-   do
-      local n, s = 0, ""
-      for k, v in pairs(gflag_buf) do n = n + 1; s = s .. k .. "=" .. v .. " " end
-      if s ~= dbg_last then
-         dbg_last = s
-         if echo then echo(string.format("[grp-dbg] COMMIT  starts=%d members=%d ends=%d bails=%d committed=%d :: %s",
-dbg_starts, dbg_members, dbg_ends, dbg_bails, n, s == "" and "(EMPTY)" or s), "brightmagenta") end
-      end
-   end
    state.group_flags = gflag_buf
 
 

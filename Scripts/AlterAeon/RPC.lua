@@ -515,6 +515,8 @@ handle_kv_event = function(_fi, m)
 
 
 
+
+         send("set kxwt on")
       end
    end
    return false
