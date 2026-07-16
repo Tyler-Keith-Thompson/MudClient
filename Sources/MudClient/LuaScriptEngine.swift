@@ -660,19 +660,16 @@ final class LuaScriptEngine: @unchecked Sendable {
             }
             return [.string(isDir.boolValue ? "dir" : "file")]
         }
-        // __list_dir(path) -> array of the regular (non-directory) file names directly in `path`.
-        // Subdirectories are omitted, so the directory loader is inherently non-recursive.
+        // __list_dir(path) -> array of ALL entry names directly in `path` (files AND subdirectories).
+        // The Lua directory loader classifies each entry via __path_kind and decides whether to descend
+        // (Scripts/ is now nested — Foundation/, AlterAeon/ — so subdirs MUST be visible here or the
+        // recursive walk never sees them and loads nothing).
         lua.register("__list_dir") { args in
             guard case .string(let p)? = args.first,
                   let entries = try? FileManager.default.contentsOfDirectory(atPath: p) else {
                 return [.table([], [:])]
             }
-            let files = entries.filter { name in
-                var isDir: ObjCBool = false
-                _ = FileManager.default.fileExists(atPath: p + "/" + name, isDirectory: &isDir)
-                return !isDir.boolValue
-            }
-            return [.table(files.map(LuaValue.string), [:])]
+            return [.table(entries.map(LuaValue.string), [:])]
         }
         // __run_file(path) — execute one Lua file in the live state. Errors are echoed (a host call
         // can't raise a Lua error across the trampoline); returns true on success, false on failure.
