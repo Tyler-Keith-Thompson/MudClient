@@ -1177,12 +1177,35 @@ end
 
 
 
+local function same_name(a, b)
+   if not a or not b then return false end
+   local x = (a:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+   local y = (b:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+   return x == y
+end
+
+
+
+
 local function note_near_death(name)
-   if F.fighting and F.name and name then
-      local a = (name:gsub("^%s+", ""):gsub("%s+$", "")):lower()
-      local b = (F.name:gsub("^%s+", ""):gsub("%s+$", "")):lower()
-      if a == b then F.finish_ready = true end
+   if F.fighting and F.name and name and same_name(name, F.name) then F.finish_ready = true end
+end
+
+
+
+
+
+
+
+local function is_dead_line_our_target(name)
+   if not name then return false end
+   if F.fighting and F.name and same_name(name, F.name) then return true end
+   if active_opponents then
+      for _, o in ipairs(active_opponents(os.time())) do
+         if same_name(o.name, name) then return true end
+      end
    end
+   return false
 end
 
 
@@ -1373,10 +1396,14 @@ if rx then
 
    local combatBar = T([[^kxw[tq]_fighting (\d+) \S+ (.+)$]])
    local combatEnd = T([[^kxw[tq]_fighting -1$]])
-   local enemyDead = T([[^.+ is DEAD!$]])
+   local enemyDead = T([[^(.+) is DEAD!$]])
    combatBar:subscribe(function(c) on_kxwt_fight(tonumber(c[1]), c[2]) end)
    combatEnd:subscribe(function(_) on_kxwt_end() end)
-   enemyDead:subscribe(function(_) hit_dead() end)
+
+
+
+
+   enemyDead:subscribe(function(c) if is_dead_line_our_target(c[1]) then hit_dead() end end)
 
 
 
@@ -1723,6 +1750,10 @@ _AF_TEST = {
    target_missing = engage_target_missing,
    soulsteal_ok = hit_soulsteal_ok, soul_latched = hit_soul_latched, dead = hit_dead,
    soul_nolatch = hit_soul_nolatch, soul_unstealable = hit_soul_unstealable,
+
+
+   dead_line = function(name) if is_dead_line_our_target(name) then hit_dead() end end,
+   is_our_target_death = is_dead_line_our_target,
    near_death = function(name) note_near_death(name) end,
    winner_key = winner_key,
    winners = function() return _AUTOFIGHT.winners end,

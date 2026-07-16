@@ -1174,15 +1174,38 @@ local function hit_dead()
   end_fight()
 end
 
+-- Trimmed/lowercased name equality — the SAME normalization note_near_death has always used to
+-- target-match (a summon dying can't mis-latch the near-death gate; reused here so an "is DEAD!" line
+-- can't mis-fire hit_dead either — see is_dead_line_our_target below).
+local function same_name(a: string, b: string): boolean
+  if not a or not b then return false end
+  local x = (a:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+  local y = (b:gsub("^%s+", ""):gsub("%s+$", "")):lower()
+  return x == y
+end
+
 -- Authoritative "soulsteal-viable now" signal: the game says OUR TARGET is near death / mortally wounded.
 -- Latch it; the fightLoop switches to soulsteal at the next frame boundary. Target-matched so another
 -- creature's near-death doesn't mis-latch (a wrong latch → a wasted, resisted soulsteal).
 local function note_near_death(name: string)
-  if F.fighting and F.name and name then
-    local a = (name:gsub("^%s+", ""):gsub("%s+$", "")):lower()
-    local b = (F.name:gsub("^%s+", ""):gsub("%s+$", "")):lower()
-    if a == b then F.finish_ready = true end
+  if F.fighting and F.name and name and same_name(name, F.name) then F.finish_ready = true end
+end
+
+-- Is a dead `name` an enemy we're actually fighting — the current fight target (F.name) or one of
+-- Combat.lua's tracked AOE opponents (active_opponents) — as opposed to a summon/minion of ours (which
+-- is never either, since is_ally keeps them out of both)? Positive ID prevents a summon's "is DEAD!"
+-- from mis-firing hit_dead and re-opening the fight (enemy_hp_data would then re-trigger the opener
+-- mid-fight); a SECONDARY AOE enemy's death is likewise not our fight-ender (note_mdeath's crowd
+-- countdown handles those), while the real target's death still rolls hit_dead over to the next target.
+local function is_dead_line_our_target(name: string): boolean
+  if not name then return false end
+  if F.fighting and F.name and same_name(name, F.name) then return true end
+  if active_opponents then
+    for _, o in ipairs(active_opponents(os.time()) as {{name: string}}) do
+      if same_name(o.name, name) then return true end
+    end
   end
+  return false
 end
 
 -- ---- manual-input suspend (step 6) ---------------------------------------------------------------
@@ -1373,10 +1396,14 @@ if rx then
   -- the fight promise + zeroes the crowd estimate.
   local combatBar = T([[^kxw[tq]_fighting (\d+) \S+ (.+)$]])
   local combatEnd = T([[^kxw[tq]_fighting -1$]])
-  local enemyDead = T([[^.+ is DEAD!$]])
+  local enemyDead = T([[^(.+) is DEAD!$]])
   combatBar:subscribe(function(c: {string}) on_kxwt_fight(tonumber(c[1]) as integer, c[2]) end)
   combatEnd:subscribe(function(_: {string})  on_kxwt_end() end)
-  enemyDead:subscribe(function(_: {string})  hit_dead() end)
+  -- Positive ID (is_dead_line_our_target): a summon/minion's own "is DEAD!" never matches the fight
+  -- target or a tracked AOE opponent, so it can't end the flow while enemy_hp_data is still streaming
+  -- the real enemy (the bug this fixes). The real target's death still matches → hit_dead() still rolls
+  -- an AOE fight over to the next tracked opponent exactly as before.
+  enemyDead:subscribe(function(c: {string}) if is_dead_line_our_target(c[1]) then hit_dead() end end)
 
   -- Near-death latch: the game tells us OUR TARGET is nearly dead → switch to soulsteal at the next frame
   -- boundary. Target-matched (note_near_death) so a NEARBY creature's near-death can't mis-latch.
@@ -1723,6 +1750,10 @@ _AF_TEST = {
   target_missing = engage_target_missing,
   soulsteal_ok  = hit_soulsteal_ok, soul_latched = hit_soul_latched,   dead        = hit_dead,
   soul_nolatch  = hit_soul_nolatch, soul_unstealable = hit_soul_unstealable,
+  -- The "is DEAD!" LINE-level gate (positive enemy-ID): what the trigger subscriber actually runs, name
+  -- and all — unlike `dead` above (the unconditional hit_dead adapter used once ID is already assumed).
+  dead_line     = function(name: string) if is_dead_line_our_target(name) then hit_dead() end end,
+  is_our_target_death = is_dead_line_our_target,
   near_death    = function(name: string) note_near_death(name) end,
   winner_key    = winner_key,
   winners       = function(): {string:string} return _AUTOFIGHT.winners end,

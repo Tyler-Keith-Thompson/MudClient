@@ -233,6 +233,8 @@ os.execute("mkdir -p '" .. cfg.dir .. "' 2>/dev/null")
 
 
 
+
+
 _AIP = _AIP or {};
 (_AIP).epoch = ((_AIP).epoch or 0) + 1
 local EPOCH = (_AIP).epoch
@@ -301,6 +303,40 @@ local function schedule_save()
    if cancel and save_timer then cancel(save_timer) end
    save_timer = after(2, save_map)
 end
+
+
+
+
+
+
+local function repair_phantom_edges(rooms)
+   local removed = 0
+   for _, r in pairs(rooms) do
+      if r.moves and r.exits and next(r.exits) then
+         for d in pairs(r.moves) do
+            if not r.exits[d] then r.moves[d] = nil; removed = removed + 1 end
+         end
+      end
+   end
+   return removed
+end
+
+
+
+
+
+
+local function repair_smap_coords(rooms)
+   local cleared = 0
+   for _, r in pairs(rooms) do
+      local c = r.coord
+      if c and (c[3] or 0) == 0 and (c[4] or 0) == 0 and
+         math.abs(c[1] or 0) < 40 and math.abs(c[2] or 0) < 40 then
+         r.coord = nil; cleared = cleared + 1
+      end
+   end
+   return cleared
+end
 local function load_map()
 
 
@@ -318,6 +354,17 @@ local function load_map()
          P.room_wp = tt.room_wp or {}
          if echo then echo(string.format("[map] loaded %d rooms, %d waypoints from explored.lua.",
 count_map(P.rooms), count_map(P.waypoints)), "cyan") end
+         local repaired = repair_phantom_edges(P.rooms)
+         if repaired > 0 then
+            if echo then echo(string.format("[map] repaired %d phantom edge(s) from older builds — re-saving.",
+repaired), "yellow") end
+         end
+         local badcoords = repair_smap_coords(P.rooms)
+         if badcoords > 0 then
+            if echo then echo(string.format("[map] cleared %d smap-corrupted coord(s) — kxwt re-acquires on visit.",
+badcoords), "yellow") end
+         end
+         if repaired > 0 or badcoords > 0 then schedule_save() end
       end
    end
 end
@@ -455,7 +502,17 @@ function pilot_room_change(id, coord)
    coord[3] ~= from[3] or coord[4] ~= from[4])
    if dir and from_room and moved and from_room.exits[dir] then
       P.rooms[from_id].moves[dir] = id
-      if OPP[dir] then P.rooms[id].moves[OPP[dir]] = from_id end
+
+
+
+
+
+      local opp = OPP[dir]
+      if opp then
+         local dest = P.rooms[id]
+         if dest.exits[opp] then dest.moves[opp] = from_id
+         elseif not next(dest.exits) then dest.pending_reverse_dir = opp; dest.pending_reverse_to = from_id end
+      end
       if from[4] == coord[4] then
          local d = { coord[1] - from[1], coord[2] - from[2], coord[3] - from[3] }
          P.dir_deltas[dir] = d
@@ -628,15 +685,12 @@ local function smap_apply(g)
 
 
 
-   local changed = (C ~= SM.cur) or (P.current_room ~= C)
    SM.cur, SM.prev_grid = C, g
    for r, row in ipairs(grid) do
       for c, id in ipairs(row) do
          if id ~= 0 then SM.abs[id] = { SM.cur_xy[1] + (c - center_c), SM.cur_xy[2] + (center_r - r) } end
       end
    end
-
-   if changed then pilot_room_change(C, { SM.cur_xy[1], SM.cur_xy[2], 0, 0 }) end
 end
 
 
@@ -1327,6 +1381,12 @@ function pilot_observe(line)
       P.rooms[P.current_room] = P.rooms[P.current_room] or { exits = {}, moves = {} }
       local r = P.rooms[P.current_room]
       for d in pairs(exits) do if not r.exits[d] then r.exits[d] = true; schedule_save() end end
+
+
+      if r.pending_reverse_dir then
+         if r.exits[r.pending_reverse_dir] then r.moves[r.pending_reverse_dir] = r.pending_reverse_to end
+         r.pending_reverse_dir = nil; r.pending_reverse_to = nil
+      end
    end
    arm()
 end
@@ -3348,7 +3408,8 @@ _AIP_TEST = {
    best_explore_dir = best_explore_dir, block_last_move = block_last_move, noexit_command = noexit_command,
    addexit_command = addexit_command,
    arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
-   save_map = save_map, load_map = load_map,
+   save_map = save_map, load_map = load_map, repair_phantom_edges = repair_phantom_edges,
+   repair_smap_coords = repair_smap_coords,
    extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,
    plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
    HOP_COST = HOP_COST, RECALL_COST = RECALL_COST, BRIDGE_MIN_SAVINGS = BRIDGE_MIN_SAVINGS,

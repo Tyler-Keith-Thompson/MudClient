@@ -24,6 +24,9 @@ final class LuaScriptEngine: @unchecked Sendable {
     final class Rule {
         let id: Int
         let regex: Regex<AnyRegexOutput>
+        /// The original pattern SOURCE string, kept for introspection/listing (`#trigger` with no args) —
+        /// the compiled `regex` can't reproduce it. "" only for rules built before this was threaded through.
+        let patternSource: String
         let handler: LuaFunctionRef?
         let oneshot: Bool
         let ruleClass: String?
@@ -33,11 +36,12 @@ final class LuaScriptEngine: @unchecked Sendable {
         /// (see `Self.specificity(of:)`). Higher = more specific. Breaks ties after priority.
         let specificity: Int
         var enabled: Bool = true
-        init(id: Int, regex: Regex<AnyRegexOutput>, handler: LuaFunctionRef?,
+        init(id: Int, regex: Regex<AnyRegexOutput>, patternSource: String = "", handler: LuaFunctionRef?,
              oneshot: Bool = false, ruleClass: String? = nil,
              priority: Int = 0, specificity: Int = 0) {
             self.id = id
             self.regex = regex
+            self.patternSource = patternSource
             self.handler = handler
             self.oneshot = oneshot
             self.ruleClass = ruleClass
@@ -586,6 +590,13 @@ final class LuaScriptEngine: @unchecked Sendable {
         // trigger(pattern, handler [, opts]) -> id. opts = { oneshot = true, class = "combat" }.
         lua.register("trigger") { [weak self] args in
             guard let self else { return [] }
+            // Bare `trigger` — no handler given (the `#trigger` REPL passes zero args or a lone ""); show
+            // the syntax AND list what's registered. A real registration always has (pattern, handler).
+            if args.count < 2 {
+                self.usage(#"trigger: expected (pattern, handler[, opts]) with a valid regex — e.g. trigger("^You hit", function(line) end)"#)
+                self.listLineRules()
+                return []
+            }
             guard let rule = self.makeRule(args) else {
                 self.usage(#"trigger: expected (pattern, handler[, opts]) with a valid regex — e.g. trigger("^You hit", function(line) end)"#)
                 return []
@@ -610,7 +621,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
                 return []
             }
-            let rule = Rule(id: self.nextId(), regex: rx, handler: nil)
+            let rule = Rule(id: self.nextId(), regex: rx, patternSource: pat, handler: nil)
             self.gags.append(rule)
             return [.int(Int64(rule.id))]
         }
@@ -1672,7 +1683,23 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let c)? = opts["class"] { ruleClass = c }
             if let p = opts["priority"], let n = Self.intArg(p) { priority = n }
         }
-        return Rule(id: nextId(), regex: regex, handler: handler, oneshot: oneshot,
+        return Rule(id: nextId(), regex: regex, patternSource: pattern, handler: handler, oneshot: oneshot,
                     ruleClass: ruleClass, priority: priority, specificity: Self.specificity(of: pattern))
+    }
+
+    /// Echo every registered line-trigger (id, pattern source, class/flags) in FIRING order — the list a
+    /// bare `#trigger` prints under the syntax line. `lineRules` is already kept sorted by firing order.
+    private func listLineRules() {
+        let rules = lineRules
+        onEcho("[trigger] \(rules.count) line-trigger\(rules.count == 1 ? "" : "s") registered, in firing order:")
+        for r in rules {
+            var line = "  #\(r.id)  \(r.patternSource.isEmpty ? "<compiled regex>" : r.patternSource)"
+            var tags: [String] = []
+            if let c = r.ruleClass { tags.append("class: \(c)") }
+            if r.oneshot { tags.append("oneshot") }
+            if !r.enabled { tags.append("disabled") }
+            if !tags.isEmpty { line += "   [\(tags.joined(separator: ", "))]" }
+            onEcho(line)
+        }
     }
 }

@@ -17,8 +17,8 @@
 --     onSpellUp / onSpellDown  — kxwt_spellup / kxwt_spelldown
 --     onMinionDied             — kxwt_ydeath (one of YOUR OWN minions died; enemies are kxwt_mdeath)
 --     onEnemyDied              — kxwt_mdeath
---     onCryOfVictory           — "<x> is DEAD!" while engaged() and x isn't an ally (mirrors Combat.lua's
---                                 maybe_victory gate exactly)
+--     onCryOfVictory           — "You feel victorious!", the game's own positive signal that YOU landed
+--                                 a killing blow (never fires for a summon/minion's death)
 --     onSpellLanded            — merge of the game's damage/opener spell-landed lines
 --   State-derived (transition events, sampled off pre-existing PUSH sources — the kxwt_prompt vitals line
 --   and the kxwt_fighting/kxwt_position lines — never a timer/`every` poll):
@@ -66,14 +66,12 @@ if rx then
   onMinionDied = T([[^kxw[tq]_ydeath (.+)$]]):map(function(c: {string}): string return c[1] end) as EventObservable<string>
   onEnemyDied  = T([[^kxw[tq]_mdeath (.+)$]]):map(function(c: {string}): string return c[1] end) as EventObservable<string>
 
-  -- The killing-blow window: a non-ally death while engaged — the moment `victory` (the warrior warcry) is
-  -- worth crying. `engaged`/`is_ally` are globals Combat.lua defines; read here inside the subscriber
-  -- closure (evaluated well after full load), so load order between AlterAeon scripts doesn't matter — only
-  -- __rx itself needed to exist at THIS file's own load time, which the boot()/dofile above guarantees.
-  onCryOfVictory = T([[^(.+) is DEAD!$]])
-    :map(function(c: {string}): string return c[1] end)
-    :filter(function(name: string): boolean return (engaged and engaged()) and not (is_ally and is_ally(name)) end)
-    as EventObservable<string>
+  -- The killing-blow moment: the game prints "You feel victorious!" only when YOU land a kill worth
+  -- crowing over (mirrors Combat.lua's maybe_victory trigger exactly) — a summon/minion dying never
+  -- produces this line, so no ally/engaged filtering is needed here, unlike the old "is DEAD!" scheme.
+  onCryOfVictory = T([[^You feel victorious!$]])
+    :map(function(_: {string}): boolean return true end)
+    as EventObservable<boolean>
 
   -- Every damage/opener spell-landed line the routine cares about (verbatim wire strings; see AutoFight.tl's
   -- OLD copy of this merge for the same patterns' provenance/verification notes).

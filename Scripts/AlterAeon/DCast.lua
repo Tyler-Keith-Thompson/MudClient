@@ -80,6 +80,7 @@ local function decide(outcome, tries, cap)
    if outcome == "ok" then return "resolve" end
    if outcome == "mana" then return "wait" end
    if outcome == "cant" then return "reject", "can't concentrate enough" end
+   if outcome == "notarget" then return "reject", "not a valid target for that spell" end
    if tries >= cap then return "reject", "gave up — couldn't land it in " .. tostring(tries) .. " tries" end
    return "retry"
 end
@@ -89,10 +90,12 @@ _AA_TEST.dcast_decide = decide
 local fizzleS = rx and rx.subject() or nil
 local manaS = rx and rx.subject() or nil
 local concentS = rx and rx.subject() or nil
+local notargetS = rx and rx.subject() or nil
 if trigger then
    trigger([[^You fail to cast the spell ']], function() if fizzleS then fizzleS:onNext(nil) end end)
    trigger([[^You don't have enough mana\.$]], function() if manaS then manaS:onNext(nil) end end)
    trigger([[^You can't concentrate enough]], function() if concentS then concentS:onNext(nil) end end)
+   trigger([[^Sorry, '.*' isn't a valid target for the spell ']], function() if notargetS then notargetS:onNext(nil) end end)
 end
 
 
@@ -115,6 +118,7 @@ local function attempt(args, landed_pat)
       if fizzleS then subs[#subs + 1] = fizzleS:subscribe(function() fin("fail") end) end
       if manaS then subs[#subs + 1] = manaS:subscribe(function() fin("mana") end) end
       if concentS then subs[#subs + 1] = concentS:subscribe(function() fin("cant") end) end
+      if notargetS then subs[#subs + 1] = notargetS:subscribe(function() fin("notarget") end) end
       timer = after and after(CAST_WAIT, function() fin("miss") end) or nil
       onCancel(function() done = true; cleanup() end)
       send("c " .. args)

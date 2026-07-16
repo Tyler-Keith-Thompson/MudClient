@@ -38,6 +38,11 @@ test("decide: \"can't concentrate enough\" is a HARD stop — reject immediately
   expect(act):eq("reject"); expect(why):eq("can't concentrate enough")
 end)
 
+test("decide: an invalid target is a HARD stop — reject immediately (retrying can never land it)", function()
+  local act, why = decide("notarget", 1, 25)
+  expect(act):eq("reject"); expect(why):eq("not a valid target for that spell")
+end)
+
 test("decide: a fizzle/miss retries until the cap, then rejects", function()
   expect(({ decide("fail", 1, 3) })[1]):eq("retry")
   expect(({ decide("miss", 2, 3) })[1]):eq("retry")

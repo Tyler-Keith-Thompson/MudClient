@@ -27,7 +27,7 @@ local MANA_CAP      = 40     -- max mana-waits before giving up (≈4 min)
 
 -- One attempt's outcome, and what the loop decides next — both CLOSED sets (a typo won't compile).
 local enum Outcome
-   "ok" "fail" "mana" "miss" "cant"
+   "ok" "fail" "mana" "miss" "cant" "notarget"
 end
 local enum Action
    "resolve" "reject" "wait" "retry"
@@ -80,6 +80,7 @@ local function decide(outcome: Outcome, tries: integer, cap: integer): Action, s
    if outcome == "ok"   then return "resolve" end
    if outcome == "mana" then return "wait" end
    if outcome == "cant" then return "reject", "can't concentrate enough" end   -- HARD stop
+   if outcome == "notarget" then return "reject", "not a valid target for that spell" end   -- HARD stop: target can't be cast at, retrying is pointless
    if tries >= cap then return "reject", "gave up — couldn't land it in " .. tostring(tries) .. " tries" end
    return "retry"
 end
@@ -89,10 +90,12 @@ _AA_TEST.dcast_decide = decide
 local fizzleS  = rx and rx.subject() or nil
 local manaS    = rx and rx.subject() or nil
 local concentS = rx and rx.subject() or nil       -- "You can't concentrate enough!" — a HARD stop
+local notargetS = rx and rx.subject() or nil      -- "Sorry, '<x>' isn't a valid target for the spell '<y>'." — a HARD stop
 if trigger then
    trigger([[^You fail to cast the spell ']],  function() if fizzleS then fizzleS:onNext(nil) end end)
    trigger([[^You don't have enough mana\.$]], function() if manaS then manaS:onNext(nil) end end)
    trigger([[^You can't concentrate enough]],  function() if concentS then concentS:onNext(nil) end end)
+   trigger([[^Sorry, '.*' isn't a valid target for the spell ']], function() if notargetS then notargetS:onNext(nil) end end)
 end
 
 -- One cast attempt → Promise<Outcome>. fromTrigger registers the landed pattern on subscribe, removes it
@@ -115,6 +118,7 @@ local function attempt(args: string, landed_pat: string): Promise<Outcome>
       if fizzleS  then subs[#subs + 1] = fizzleS:subscribe(function() fin("fail") end) end
       if manaS    then subs[#subs + 1] = manaS:subscribe(function() fin("mana") end) end
       if concentS then subs[#subs + 1] = concentS:subscribe(function() fin("cant") end) end
+      if notargetS then subs[#subs + 1] = notargetS:subscribe(function() fin("notarget") end) end
       timer = after and after(CAST_WAIT, function() fin("miss") end) or nil    -- no landed line in time → miss
       onCancel(function() done = true; cleanup() end)
       send("c " .. args)

@@ -137,6 +137,8 @@ local record Room
   blocked:  {string:boolean}
   added:    {string:boolean}
   marks:    {string:boolean}
+  pending_reverse_dir: string    -- OPP[dir] awaiting confirmation the room actually advertises it (see pilot_room_change)
+  pending_reverse_to:  integer   -- room that reverse edge would lead back to
 end
 
 local record WorldState
@@ -301,6 +303,40 @@ local function schedule_save()
   if cancel and save_timer then cancel(save_timer) end
   save_timer = after(2, save_map)
 end
+-- Repair legacy phantom edges left in explored.lua by older builds: the reverse edge (moves[OPP[dir]])
+-- used to be recorded UNCONDITIONALLY, so the persisted map can hold move edges a room's own exits don't
+-- back up — asymmetric rooms (in by north, out only by east) — and the router walks them straight into
+-- "cannot go that way". Enforce the invariant every valid edge already satisfies: moves[dir] must be an
+-- advertised exit[dir]. Only touch rooms whose exits are KNOWN (non-empty) — a never-parsed room can't be
+-- judged, so it's left alone. Idempotent: new edges are already gated, so this only removes old garbage.
+local function repair_phantom_edges(rooms: {integer:Room}): integer
+  local removed = 0
+  for _, r in pairs(rooms) do
+    if r.moves and r.exits and next(r.exits) then
+      for d in pairs(r.moves) do
+        if not r.exits[d] then r.moves[d] = nil; removed = removed + 1 end
+      end
+    end
+  end
+  return removed
+end
+-- Repair smap-corrupted coords left by older builds: before smap went preview-only it fed pilot_room_change
+-- fake { gridX, gridY, 0, 0 } positions that overwrote real rooms' kxwt coords. Those aren't real and
+-- corrupt coord-based routing (dir_deltas, nearest_reachable_to_coord, goto bridging) + geometric rendering.
+-- Clear the fake coord (signature: z=0, plane=0, small grid-offset x/y — kxwt world coords are large / carry
+-- real z/plane) so kxwt RE-ACQUIRES the real one on the next visit. Conservative + self-healing: a rare
+-- false positive just leaves that room coordless until you re-enter it (kxwt refills), never wrong.
+local function repair_smap_coords(rooms: {integer:Room}): integer
+  local cleared = 0
+  for _, r in pairs(rooms) do
+    local c = r.coord
+    if c and (c[3] or 0) == 0 and (c[4] or 0) == 0
+       and math.abs(c[1] or 0) < 40 and math.abs(c[2] or 0) < 40 then
+      r.coord = nil; cleared = cleared + 1
+    end
+  end
+  return cleared
+end
 local function load_map()
   -- persist.load's optional NOTIFY callback (second arg) isn't part of mud.d.tl's declared
   -- Persist.load(string):any signature — cast at this one call site (same convention as the other
@@ -318,6 +354,17 @@ local function load_map()
       P.room_wp = tt.room_wp as {integer:integer} or {}
       if echo then echo(string.format("[map] loaded %d rooms, %d waypoints from explored.lua.",
                          count_map(P.rooms), count_map(P.waypoints)), "cyan") end
+      local repaired = repair_phantom_edges(P.rooms)
+      if repaired > 0 then
+        if echo then echo(string.format("[map] repaired %d phantom edge(s) from older builds — re-saving.",
+                           repaired), "yellow") end
+      end
+      local badcoords = repair_smap_coords(P.rooms)
+      if badcoords > 0 then
+        if echo then echo(string.format("[map] cleared %d smap-corrupted coord(s) — kxwt re-acquires on visit.",
+                           badcoords), "yellow") end
+      end
+      if repaired > 0 or badcoords > 0 then schedule_save() end
     end
   end
 end
@@ -455,7 +502,17 @@ function pilot_room_change(id: integer, coord: {number})
                           or coord[3] ~= from[3] or coord[4] ~= from[4])
   if dir and from_room and moved and from_room.exits[dir] then
     P.rooms[from_id].moves[dir] = id
-    if OPP[dir] then P.rooms[id].moves[OPP[dir]] = from_id end
+    -- Reverse edge is NOT free: exits are frequently asymmetric (enter a shop by `north`, leave only
+    -- by `east`), so fabricating `moves[OPP[dir]]` without the destination advertising that exit routes
+    -- the pilot into a direction the room rejects ("cannot go that way"). Mirror the forward guard; if
+    -- the destination's exits aren't parsed yet (a brand-new room), defer the decision to pilot_observe
+    -- once its exits line arrives instead of guessing.
+    local opp = OPP[dir]
+    if opp then
+      local dest = P.rooms[id]
+      if dest.exits[opp] then dest.moves[opp] = from_id
+      elseif not next(dest.exits) then dest.pending_reverse_dir = opp; dest.pending_reverse_to = from_id end
+    end
     if from[4] == coord[4] then
       local d: {number} = { coord[1] - from[1], coord[2] - from[2], coord[3] - from[3] }
       P.dir_deltas[dir] = d
@@ -624,19 +681,16 @@ local function smap_apply(g: SmapGrid)
     end
   end
 
-  -- Fire on a real center change OR when P.current_room is out of sync with the map (e.g. right after a
-  -- #reload: SM.cur persists in _AIP but P.current_room may not, so at rest nothing would re-establish it
-  -- and minimap() falls back to the plain block map until you happen to move). Resyncing here keeps the
-  -- graph minimap live at rest too.
-  local changed = (C ~= SM.cur) or (P.current_room ~= C)
+  -- PREVIEW-ONLY. smap's grid positions aren't real coordinates — kxwt (on as a supplement over the RPC)
+  -- carries those. So smap does NOT feed pilot_room_change / the routing graph; it only maintains the local
+  -- abs[] bookkeeping that minimap() reads to preview SURROUNDING, not-yet-explored rooms. This is what
+  -- stops smap and kxwt fighting over the same room's coords.
   SM.cur, SM.prev_grid = C, g
   for r, row in ipairs(grid) do
     for c, id in ipairs(row) do
       if id ~= 0 then SM.abs[id] = { SM.cur_xy[1] + (c - center_c), SM.cur_xy[2] + (center_r - r) } end
     end
   end
-
-  if changed then pilot_room_change(C, { SM.cur_xy[1], SM.cur_xy[2], 0, 0 }) end
 end
 
 -- Entry point: called (guarded, from DClientProbe.lua) whenever state.dclient_map updates.
@@ -1327,6 +1381,12 @@ function pilot_observe(line: string)
     P.rooms[P.current_room] = P.rooms[P.current_room] or { exits = {}, moves = {} }
     local r = P.rooms[P.current_room]
     for d in pairs(exits) do if not r.exits[d] then r.exits[d] = true; schedule_save() end end
+    -- Resolve a reverse edge deferred by pilot_room_change (destination's exits weren't known yet):
+    -- only wire it up if the room genuinely advertises that direction, never fabricate it.
+    if r.pending_reverse_dir then
+      if r.exits[r.pending_reverse_dir] then r.moves[r.pending_reverse_dir] = r.pending_reverse_to end
+      r.pending_reverse_dir = nil; r.pending_reverse_to = nil
+    end
   end
   arm()
 end
@@ -3348,7 +3408,8 @@ _AIP_TEST = {
   best_explore_dir = best_explore_dir, block_last_move = block_last_move, noexit_command = noexit_command,
   addexit_command = addexit_command,
   arm = arm, cfg = cfg, nearest_unexplored = nearest_unexplored,
-  save_map = save_map, load_map = load_map,
+  save_map = save_map, load_map = load_map, repair_phantom_edges = repair_phantom_edges,
+  repair_smap_coords = repair_smap_coords,
   extract_calls = extract_calls, normalize_call = normalize_call, from_tool_calls = from_tool_calls,
   plan_goto_route = plan_goto_route, network_entry = network_entry, bridge_estimate = bridge_estimate,
   HOP_COST = HOP_COST, RECALL_COST = RECALL_COST, BRIDGE_MIN_SAVINGS = BRIDGE_MIN_SAVINGS,

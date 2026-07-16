@@ -1,7 +1,8 @@
--- Specs for cry of victory (Combat.lua). The `victory` warcry is cried automatically the instant a
--- non-ally mob dies while we're engaged. The "<name> is DEAD!" TRIGGER that feeds it runs in Swift;
--- here we test the pure maybe_victory decision: the on/off flag, the ally + engaged gates, and the
--- multi-kill dedup. engaged() is driven off state.fighting / state.engaged_until, so we set those.
+-- Specs for cry of victory (Combat.lua). The `victory` warcry is cried automatically off the game's OWN
+-- "You feel victorious!" line — a positive signal the server prints only when YOU land a killing blow
+-- worth crowing over (verified in human-traces.jsonl: it never appears for a summon/minion's death, only
+-- your own kills). The "You feel victorious!" TRIGGER that feeds it runs in Swift; here we test the pure
+-- maybe_victory decision: the on/off flag and the multi-kill dedup.
 
 local AA = _AA_TEST
 
@@ -16,50 +17,37 @@ local function with_state(st, fn)
   if not ok then error(err, 2) end
 end
 
-test("cries victory when a non-ally dies and we're engaged", function()
-  with_state({ auto_victory = true, fighting = true }, function(sent)
-    AA.maybe_victory("A goblin", 1000)
+test("cries victory when auto_victory is on", function()
+  with_state({ auto_victory = true }, function(sent)
+    AA.maybe_victory(1000)
     expect(sent[1]):eq("victory")
   end)
 end)
 
 test("does NOT cry when auto_victory is off", function()
-  with_state({ auto_victory = false, fighting = true }, function(sent)
-    AA.maybe_victory("A goblin", 1000)
+  with_state({ auto_victory = false }, function(sent)
+    AA.maybe_victory(1000)
     expect(#sent):eq(0)
   end)
 end)
 
-test("does NOT cry for an ally/minion death (is_ally)", function()
-  with_state({ auto_victory = true, fighting = true, name = "Vaelith",
-               group = { { name = "a skeletal spider" } } }, function(sent)
-    AA.maybe_victory("a skeletal spider", 1000)   -- our own minion
-    expect(#sent):eq(0)
-    AA.maybe_victory("Vaelith", 1000)             -- ourselves
-    expect(#sent):eq(0)
-  end)
-end)
-
-test("does NOT cry when not engaged (no fight to be victorious over)", function()
-  with_state({ auto_victory = true, fighting = false, engaged_until = 0 }, function(sent)
-    AA.maybe_victory("A goblin", 5000)   -- engaged_until 0 < now -> not engaged
-    expect(#sent):eq(0)
-  end)
-end)
-
-test("cries when engaged via the text window (engaged_until), not just kxwt fighting", function()
-  with_state({ auto_victory = true, fighting = false, engaged_until = 2000 }, function(sent)
-    AA.maybe_victory("A goblin", 1500)   -- now 1500 < engaged_until 2000 -> engaged
+test("a summon/minion death alone never reaches maybe_victory (only 'You feel victorious!' does)", function()
+  -- No ally/engaged gating anymore: the game's own signal already guarantees it's YOUR kill, so a
+  -- summon's "is DEAD!" line is never even routed here (see AutoFight/Combat: the trigger is on the
+  -- literal "You feel victorious!" text, not on "is DEAD!"). Nothing to assert on maybe_victory itself
+  -- beyond: it fires whenever it's called and auto_victory is on.
+  with_state({ auto_victory = true }, function(sent)
+    AA.maybe_victory(1000)
     expect(sent[1]):eq("victory")
   end)
 end)
 
 test("dedups a multi-kill round into one cry, then allows another after the window", function()
-  with_state({ auto_victory = true, fighting = true }, function(sent)
-    AA.maybe_victory("A goblin", 1000)
-    AA.maybe_victory("An orc", 1001)     -- same round, within VICTORY_DEDUP -> suppressed
+  with_state({ auto_victory = true }, function(sent)
+    AA.maybe_victory(1000)
+    AA.maybe_victory(1001)     -- same round, within VICTORY_DEDUP -> suppressed
     expect(#sent):eq(1)
-    AA.maybe_victory("A troll", 1003)    -- 3s later -> allowed again
+    AA.maybe_victory(1003)     -- 3s later -> allowed again
     expect(#sent):eq(2)
   end)
 end)

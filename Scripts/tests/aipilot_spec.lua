@@ -183,3 +183,82 @@ test("mark_death keeps a previous mark when the death room isn't on the map (no 
   expect(has_mark(P.rooms.old, "death")):truthy()                          -- earlier mark NOT wiped
   P.rooms, P.current_room = saved_rooms, saved_cur
 end)
+
+-- Repro of the "route into a room, issue a direction it doesn't have" bug: entering a brand-new room
+-- via `north` used to unconditionally record a `south` reverse edge, even when the room only advertises
+-- a DIFFERENT single exit — a phantom edge the router would later walk into a wall with.
+test("pilot_room_change never fabricates a reverse edge the destination doesn't advertise", function()
+  local saved_rooms, saved_cur, saved_dir = P.rooms, P.current_room, P.last_move_dir
+  P.rooms = { A = { exits = { north = true }, moves = {}, coord = { 0, 0, 0, 0 } } }
+  P.current_room = "A"
+  P.last_move_dir = "north"
+
+  pilot_room_change("SHOP", { 0, 1, 0, 0 })          -- moved one unit north into a brand-new room
+  expect(P.current_room):eq("SHOP")
+  expect(P.rooms.SHOP.moves.south):falsy()           -- no phantom reverse yet — SHOP's exits aren't known
+
+  -- The room's description scrolls by next; it turns out SHOP only has an `east` exit (no `south`).
+  pilot_observe("[Exits: east ]")
+  expect(P.rooms.SHOP.exits.east):truthy()
+  expect(P.rooms.SHOP.moves.south):falsy()           -- still no phantom edge — the router won't walk into it
+  expect(P.rooms.SHOP.pending_reverse_dir):falsy()   -- resolved (and discarded), not left dangling
+
+  P.rooms, P.current_room, P.last_move_dir = saved_rooms, saved_cur, saved_dir
+end)
+
+-- Legacy explored.lua files (built before the reverse-edge fix) carry phantom edges the router walks
+-- into a wall. load_map repairs them: any moves[dir] a room's known exits don't back up is dropped.
+test("repair_phantom_edges drops moves not backed by exits, keeps legit ones, spares unknown-exit rooms", function()
+  local repair = _AIP_TEST.repair_phantom_edges
+  local rooms = {
+    -- SHOP: entered by north long ago, so it has a phantom moves.south, but its only real exit is east.
+    SHOP = { exits = { east = true }, moves = { south = "HALL", east = "PLAZA" } },
+    -- HALL: both moves backed by exits — nothing to prune.
+    HALL = { exits = { north = true, west = true }, moves = { north = "SHOP", west = "GATE" } },
+    -- FOG: exits never parsed (empty) — can't judge, so leave its moves alone even if odd.
+    FOG  = { exits = {}, moves = { up = "SKY" } },
+  }
+  local removed = repair(rooms)
+  expect(removed):eq(1)                          -- exactly the one phantom
+  expect(rooms.SHOP.moves.south):falsy()         -- phantom pruned
+  expect(rooms.SHOP.moves.east):eq("PLAZA")      -- real edge kept
+  expect(rooms.HALL.moves.north):eq("SHOP")      -- untouched
+  expect(rooms.HALL.moves.west):eq("GATE")
+  expect(rooms.FOG.moves.up):eq("SKY")           -- unknown-exit room spared
+  expect(repair(rooms)):eq(0)                     -- idempotent — second pass finds nothing
+end)
+
+-- Legacy maps hold coords smap overwrote with fake { gridX, gridY, 0, 0 } grid offsets. repair_smap_coords
+-- clears those (z=0, plane=0, small xy) so kxwt re-acquires the real coord on the next visit; real kxwt
+-- coords (large xy or non-zero z/plane) are left intact.
+test("repair_smap_coords clears smap-signature coords, keeps real kxwt coords", function()
+  local repair = _AIP_TEST.repair_smap_coords
+  local rooms = {
+    FAKE1 = { exits = {}, moves = {}, coord = { -8, 19, 0, 0 } },   -- smap grid offset → clear
+    FAKE2 = { exits = {}, moves = {}, coord = { -1, 0, 0, 0 } },    -- smap grid offset → clear
+    REALBIG = { exits = {}, moves = {}, coord = { 1523, 887, 0, 0 } }, -- large world xy → keep
+    REALZ   = { exits = {}, moves = {}, coord = { 5, 3, 2, 0 } },   -- non-zero z (a floor) → keep
+    REALPL  = { exits = {}, moves = {}, coord = { 5, 3, 0, 4 } },   -- non-zero plane → keep
+  }
+  local cleared = repair(rooms)
+  expect(cleared):eq(2)
+  expect(rooms.FAKE1.coord):falsy()
+  expect(rooms.FAKE2.coord):falsy()
+  expect(rooms.REALBIG.coord):truthy()
+  expect(rooms.REALZ.coord):truthy()
+  expect(rooms.REALPL.coord):truthy()
+  expect(repair(rooms)):eq(0)             -- idempotent
+end)
+
+test("pilot_room_change DOES wire the reverse edge once the destination confirms it has that exit", function()
+  local saved_rooms, saved_cur, saved_dir = P.rooms, P.current_room, P.last_move_dir
+  P.rooms = { A = { exits = { north = true }, moves = {}, coord = { 0, 0, 0, 0 } } }
+  P.current_room = "A"
+  P.last_move_dir = "north"
+
+  pilot_room_change("B", { 0, 1, 0, 0 })
+  pilot_observe("[Exits: south east ]")              -- B genuinely has a way back south
+  expect(P.rooms.B.moves.south):eq("A")              -- real reverse edge, learned once confirmed
+
+  P.rooms, P.current_room, P.last_move_dir = saved_rooms, saved_cur, saved_dir
+end)

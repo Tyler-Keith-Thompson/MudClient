@@ -450,10 +450,8 @@ end
 state.auto_victory = (state.auto_victory == nil) and true or state.auto_victory
 local VICTORY_DEDUP = 2
 local last_victory_at = 0
-local function maybe_victory(name, now)
+local function maybe_victory(now)
    if not state.auto_victory then return end
-   if is_ally(name) then return end
-   if not engaged(now) then return end
    now = now or os.time()
    if now - last_victory_at < VICTORY_DEDUP then return end
    last_victory_at = now
@@ -463,7 +461,7 @@ if _AA_TEST then
    _AA_TEST.maybe_victory = maybe_victory
    _AA_TEST.reset_victory = function() last_victory_at = 0 end
 end
-trigger([[^(.+) is DEAD!$]], function(_, name) maybe_victory(name, nil) end)
+trigger([[^You feel victorious!$]], function() maybe_victory(nil) end)
 
 
 

@@ -1191,3 +1191,35 @@ test("kxwt drives as a fallback when the prompt is stale (normal play, no nomele
   expect_seq(seq(), { "c tarrants" })                  -- kxwt drove the engagement directly
   expect(AF.state().fighting):eq(true)
 end)
+
+-- ---- "is DEAD!" positive enemy-ID (a summon's own death must not end the fight) ----------------------
+-- REGRESSION: over the 1.105 RPC, death arrives as the plain "<name> is DEAD!" text line — a bloodmist
+-- demon or flesh beast summon dying prints the SAME line an enemy's death does. The old handler ended the
+-- fight flow on ANY such line; with enemy_hp_data still streaming the real enemy, autofight then
+-- re-transitioned idle→fighting and re-cast the AOE opener mid-fight. Fixed by positive-ID'ing the dead
+-- name against the fight target / tracked AOE opponents (is_dead_line_our_target) before calling hit_dead.
+test("a summon/minion's 'is DEAD!' does NOT end the fight", function()
+  AF.reset()
+  state.opponents = {}
+  AF.on_fight(90, ENEMY)                               -- combat starts, engaged vs ENEMY
+  land_opener()
+  expect(AF.state().fighting):eq(true)
+  AF.dead_line("a bloodmist demon")                    -- OUR summon died — not the fight target
+  expect(AF.state().fighting):eq(true)                 -- fight flow untouched
+  expect(AF.is_our_target_death("a bloodmist demon")):eq(false)
+end)
+
+test("the fight target's 'is DEAD!' DOES end the fight (and still rolls an AOE fight onto the next target)", function()
+  AF.reset()
+  state.opponents = {}
+  AF.on_fight(90, ENEMY)
+  land_opener()
+  expect(AF.is_our_target_death(ENEMY)):eq(true)
+  AF.dead_line(ENEMY)                                  -- the ACTUAL target died
+  expect(AF.state().fighting):eq(false)
+  -- AOE rollover: enemy_hp_data reports a NEW name without an intervening kxwt_fighting -1 → on_fight
+  -- starts the routine fresh on the next target, exactly as before this fix.
+  AF.on_fight(90, "an orc bachelor")
+  expect(AF.state().fighting):eq(true)
+  expect(AF.state().name):eq("an orc bachelor")
+end)

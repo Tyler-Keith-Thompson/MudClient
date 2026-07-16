@@ -56,7 +56,10 @@ test("consecutive frames: the new center was exactly one cell away in the previo
   expect(dc1):eq(dc2)
 end)
 
-test("smap_apply feeds pilot_room_change: current_room tracks the decoded center, coords step by the unit delta", function()
+test("smap_apply is PREVIEW-ONLY: tracks SM.abs surroundings but NEVER feeds the routing graph", function()
+  -- smap's cell values aren't globally-unique room ids and its grid positions aren't real coordinates
+  -- (only kxwt has those), so smap_apply must NOT touch P.current_room / P.rooms — it only maintains the
+  -- abs[] preview minimap() reads. This guards the fix for smap/kxwt fighting over the same rooms' coords.
   local saved_rooms, saved_cur, saved_dir = P.rooms, P.current_room, P.last_move_dir
   local saved_sm = { abs = SM.abs, cur = SM.cur, cur_xy = SM.cur_xy, prev_grid = SM.prev_grid }
   P.rooms, P.current_room, P.last_move_dir = {}, nil, nil
@@ -65,17 +68,20 @@ test("smap_apply feeds pilot_room_change: current_room tracks the decoded center
   local g1 = smap_coord_grid(FRAME[1])
   local id1 = g1.grid[g1.center_r][g1.center_c]
   smap_apply(g1)
-  expect(P.current_room):eq(id1)
-  expect(P.rooms[id1]):truthy()
-  local xy1 = { P.rooms[id1].coord[1], P.rooms[id1].coord[2] }
+  expect(P.current_room):eq(nil)          -- graph UNTOUCHED — kxwt owns room identity now
+  expect(P.rooms[id1]):falsy()            -- no fake room fabricated
+  expect(SM.cur):eq(id1)                  -- but the preview tracks the decoded center
+  expect(SM.abs[id1]):truthy()
+  local xy1 = { SM.abs[id1][1], SM.abs[id1][2] }
 
   local g2 = smap_coord_grid(FRAME[2])
   local id2 = g2.grid[g2.center_r][g2.center_c]
   smap_apply(g2)
-  expect(P.current_room):eq(id2)
+  expect(P.current_room):eq(nil)          -- STILL never fed the graph
+  expect(SM.cur):eq(id2)
   expect(id2 ~= id1):truthy()
-  local xy2 = { P.rooms[id2].coord[1], P.rooms[id2].coord[2] }
-  -- moved exactly one unit (matches the unit-vector step asserted above)
+  local xy2 = { SM.abs[id2][1], SM.abs[id2][2] }
+  -- the preview position stepped exactly one unit (matches the unit-vector step asserted above)
   local dx, dy = xy2[1] - xy1[1], xy2[2] - xy1[2]
   expect(math.abs(dx) + math.abs(dy)):eq(1)
 

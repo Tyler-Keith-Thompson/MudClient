@@ -69,10 +69,8 @@ if rx then
 
 
 
-
-   onCryOfVictory = T([[^(.+) is DEAD!$]]):
-   map(function(c) return c[1] end):
-   filter(function(name) return (engaged and engaged()) and not (is_ally and is_ally(name)) end)
+   onCryOfVictory = T([[^You feel victorious!$]]):
+   map(function(_) return true end)
 
 
 

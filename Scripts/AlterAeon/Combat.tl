@@ -441,19 +441,17 @@ end
 -- ---- cry of victory (warrior warcry) ------------------------------------------------------------
 -- `victory` is a warrior skill (help 'warrior skill cry of victory'): used right AFTER you land the
 -- killing blow, it refunds some hp/movement (and morale) and helps stave off stuns — cheap recovery
--- between fights. MUSH-Z ships this as `config autovictory`; we mirror it. Fire `victory` the instant a
--- non-ally mob dies while we're engaged (the killing-blow window). Deduped so a multi-mob round that
--- prints several "is DEAD!" lines only cries once; the game itself no-ops the skill if the last blow
--- wasn't ours (or we lack the skill), so an occasional wasted cry is harmless. Over the 1.105 RPC the
--- death arrives as the plain "<name> is DEAD!" text line (kxwt_mdeath is gone unless kxwt is on), so we
--- key off that line — the same signal Corpse.lua's harvester uses.
+-- between fights. MUSH-Z ships this as `config autovictory`; we mirror it. The game itself already
+-- prints "You feel victorious!" the instant YOU land a killing blow worth crowing over (verified in
+-- human-traces.jsonl: "... is DEAD!\nYou receive N experience.\nYou feel victorious!\n..." — it never
+-- appears for a summon/minion's death, only your own kills), so we key the cry off THAT line instead of
+-- guessing from "is DEAD!" + is_ally: it's a positive, unambiguous signal straight from the server, no
+-- name/ally classification needed. Deduped so a multi-kill round only cries once.
 state.auto_victory = (state.auto_victory == nil) and true or state.auto_victory
 local VICTORY_DEDUP = 2   -- seconds; collapse a multi-kill round into one cry
 local last_victory_at: number = 0
-local function maybe_victory(name: string, now: number)
+local function maybe_victory(now: number)
   if not state.auto_victory then return end
-  if is_ally(name) then return end          -- our own minion / a groupmate died — not our kill to crow over
-  if not engaged(now) then return end       -- only right after a fight we were actually in
   now = now or os.time()
   if now - last_victory_at < VICTORY_DEDUP then return end
   last_victory_at = now
@@ -463,7 +461,7 @@ if _AA_TEST then
   _AA_TEST.maybe_victory  = maybe_victory
   _AA_TEST.reset_victory  = function() last_victory_at = 0 end
 end
-trigger([[^(.+) is DEAD!$]], function(_: any, name: string): any maybe_victory(name, nil) end)
+trigger([[^You feel victorious!$]], function(): any maybe_victory(nil) end)
 
 -- Control surface: `autoVictory on|off|status` (callable table, so `#autoVictory off` works). Mirrors
 -- autoFight / autoHarvest.

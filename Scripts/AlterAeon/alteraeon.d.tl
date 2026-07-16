@@ -75,7 +75,7 @@ global onSpellUp:       EventObservable<string>   -- kxwt_spellup <name> — a b
 global onSpellDown:     EventObservable<string>   -- kxwt_spelldown <name> — a buff/spell dropped
 global onMinionDied:    EventObservable<string>   -- kxwt_ydeath <name> — one of YOUR OWN minions died
 global onEnemyDied:     EventObservable<string>   -- kxwt_mdeath <name> — an enemy died
-global onCryOfVictory:  EventObservable<string>   -- "<x> is DEAD!" while engaged, x not an ally (the cry-of-victory window)
+global onCryOfVictory:  EventObservable<boolean>  -- "You feel victorious!" — the game's own positive signal that YOU landed a killing blow (never fires for a summon/minion's death)
 global onSpellLanded:   EventObservable<string>   -- a damage/opener spell's own success line landed; emits the spell name
 
 -- State-derived: transition events, sampled off the existing kxwt_prompt/kxwt_fighting/kxwt_position push
