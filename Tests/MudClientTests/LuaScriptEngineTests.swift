@@ -516,7 +516,7 @@ private func luaStringLiteral(_ s: String) -> String {
 @Test func luaKxwtPatternDispatches() throws {
   try withTestContainer {
     Container.anthropicAPIKeyProvider.register { { nil } }
-    // Mocks the AlterAeon kxwt wiring inline rather than loading the real Scripts/AlterAeon.lua,
+    // Mocks the AlterAeon kxwt wiring inline rather than loading the real Scripts/AlterAeon/AlterAeon.lua,
     // which is game content that may change. This tests the engine's trigger/gag/host-forwarding
     // mechanics, independent of any one script's contents.
     let engine = LuaScriptEngine()

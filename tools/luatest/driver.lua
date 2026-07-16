@@ -90,11 +90,12 @@ end
 -- loader now uses — AIPilot BEFORE AlterAeon — so their globals (state, on_update, run_test_suite,
 -- _HUD_TEST, _AIP_TEST, …) are all present AND the defensive `state = state or {}` decoupling is
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
-for _, f in ipairs({ "Scripts/AIPilot.lua", "Scripts/AlterAeon.lua", "Scripts/Audio.lua",
-                     "Scripts/AutoFight.lua", "Scripts/BookDump.lua", "Scripts/ChatDecode.lua", "Scripts/Combat.lua",
-                     "Scripts/Corpse.lua", "Scripts/DCast.lua", "Scripts/Equipment.lua", "Scripts/HUD.lua",
-                     "Scripts/Promise.lua", "Scripts/Prompt.lua", "Scripts/Recovery.lua", "Scripts/RPC.lua",
-                     "Scripts/Soulforge.lua", "Scripts/Speech.lua", "Scripts/Trivia.lua" }) do
+for _, f in ipairs({ "Scripts/AlterAeon/AIPilot.lua", "Scripts/AlterAeon/AlterAeon.lua", "Scripts/AlterAeon/Audio.lua",
+                     "Scripts/AlterAeon/AutoFight.lua", "Scripts/AlterAeon/BookDump.lua", "Scripts/AlterAeon/ChatDecode.lua",
+                     "Scripts/AlterAeon/Combat.lua", "Scripts/AlterAeon/Corpse.lua", "Scripts/AlterAeon/DCast.lua",
+                     "Scripts/AlterAeon/Equipment.lua", "Scripts/AlterAeon/HUD.lua", "Scripts/Foundation/Promise.lua",
+                     "Scripts/AlterAeon/Prompt.lua", "Scripts/AlterAeon/Recovery.lua", "Scripts/AlterAeon/RPC.lua",
+                     "Scripts/AlterAeon/Soulforge.lua", "Scripts/AlterAeon/Speech.lua", "Scripts/AlterAeon/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)
   if not ok then io.stderr:write("LOAD ERROR in " .. f .. ": " .. tostring(err) .. "\n"); os.exit(1) end
 end

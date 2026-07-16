@@ -1,4 +1,4 @@
--- Specs for the `;smap;` coord bridge (Scripts/AIPilot.lua smap_coord_grid/smap_apply/smap_on_map_update)
+-- Specs for the `;smap;` coord bridge (Scripts/AlterAeon/AIPilot.lua smap_coord_grid/smap_apply/smap_on_map_update)
 -- that restores the room-graph minimap over the 1.105 RPC transport (kxwt_rvnum/kxwt_rshort are dead
 -- there). Fixture frames below are 3 CONSECUTIVE, DISTINCT real `;smap;` payloads captured while
 -- walking one direction repeatedly (~/Documents/MudClient/smap_capture.log, frames 0/1/2 after

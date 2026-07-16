@@ -198,7 +198,7 @@ private actor RecordedWrites {
     let scriptDir = URL(fileURLWithPath: "\(#filePath)")
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try? engine.load(path: scriptDir.appendingPathComponent("Scripts/AlterAeon.lua").path)
+    try? engine.load(path: scriptDir.appendingPathComponent("Scripts/AlterAeon/AlterAeon.lua").path)
     let display = terminal.components(separatedBy: "\n")
         .compactMap { engine.processLine($0) }.joined(separator: "\n")
     let leakedTails = display.components(separatedBy: "\n")
@@ -246,7 +246,7 @@ private actor RecordedWrites {
             .appendingPathComponent(rel).path
     }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag + music trigger
+    try engine.load(path: repoFile("Scripts/AlterAeon/AlterAeon.lua"))   // installs the ^kxwt_ gag + music trigger
 
     var text = ""
     for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
@@ -460,7 +460,7 @@ private actor RecordedWrites {
     // test-constructible); give it a sink so a script's send() has somewhere to go.
     interp.engine.onSend = { _ in }
     try? interp.engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try interp.engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
+    try interp.engine.load(path: repoFile("Scripts/AlterAeon/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
 
     // Replicate processServerOutputForScripts per chunk so we can correlate INPUT with rendered
@@ -609,8 +609,8 @@ private actor RecordedWrites {
     let engine = LuaScriptEngine()
     defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // throws on syntax/runtime error
-    try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+    try engine.load(path: repoFile("Scripts/AlterAeon/AlterAeon.lua"))   // throws on syntax/runtime error
+    try engine.load(path: repoFile("Scripts/AlterAeon/AIPilot.lua"))
   }
 }
 
@@ -640,8 +640,8 @@ private actor RecordedWrites {
     let engine = LuaScriptEngine()
     defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))
-    try engine.load(path: repoFile("Scripts/AIPilot.lua"))
+    try engine.load(path: repoFile("Scripts/AlterAeon/AlterAeon.lua"))
+    try engine.load(path: repoFile("Scripts/AlterAeon/AIPilot.lua"))
 
     var echoed = [String]()
     engine.onEcho = { echoed.append($0) }
@@ -790,7 +790,7 @@ private actor RecordedWrites {
     let engine = LuaScriptEngine()
     defer { engine.clearRules() }
     try? engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try engine.load(path: repoFile("Scripts/AlterAeon.lua"))   // installs the ^kxwt_ gag
+    try engine.load(path: repoFile("Scripts/AlterAeon/AlterAeon.lua"))   // installs the ^kxwt_ gag
     let lines = text.components(separatedBy: "\n")
     let gagged = lines.map { engine.processLine($0) == nil }
     var out = [String]()

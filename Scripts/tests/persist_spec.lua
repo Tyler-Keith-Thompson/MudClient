@@ -2,7 +2,7 @@
 -- class costs, …). These lock the guarantees that exist because a non-atomic write once truncated
 -- explored.lua and cost a 2500+ room map: atomic writes, a shrink-proof `.bak`, and self-healing reads.
 
-local persist = __persist or dofile("Scripts/_persist.lua")
+local persist = __persist or dofile("Scripts/Foundation/_persist.lua")
 
 -- Scratch paths under TMPDIR so specs never touch the real ~/Documents files.
 local seq = 0

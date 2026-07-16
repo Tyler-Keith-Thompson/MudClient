@@ -7,8 +7,8 @@
 -- are all present. File-scanning specs read the sources from disk (CWD is the repo root, as with #load).
 
 local GAME_FILES = {
-  "Scripts/AlterAeon.lua", "Scripts/AIPilot.lua", "Scripts/HUD.lua",
-  "Scripts/Trivia.lua", "Scripts/Equipment.lua",
+  "Scripts/AlterAeon/AlterAeon.lua", "Scripts/AlterAeon/AIPilot.lua", "Scripts/AlterAeon/HUD.lua",
+  "Scripts/AlterAeon/Trivia.lua", "Scripts/AlterAeon/Equipment.lua",
 }
 
 -- Find a real `command(` CALL: comments stripped, and `command` not the tail of another identifier

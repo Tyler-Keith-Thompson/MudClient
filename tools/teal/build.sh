@@ -5,8 +5,8 @@
 cd "${0:A:h}/../.." || exit 2
 TL=./tools/teal/tl
 fail=0
-for tl in Scripts/*.tl; do
-  [ "$tl" = "Scripts/mud.d.tl" ] && continue          # declaration file: type-checked via config, never generated
+for tl in Scripts/*.tl(N) Scripts/*/*.tl(N); do
+  [ "${tl%.d.tl}" != "$tl" ] && continue              # any *.d.tl declaration file: type-checked via config, never generated
   if [ "$1" = check ]; then
     $TL check "$tl" || fail=1
   else

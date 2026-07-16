@@ -1,8 +1,8 @@
--- Specs for the reactive core (Scripts/_rx.lua): Observables/Subjects, the operators the game uses, the
--- refcounted trigger->Observable bridge, and the Observable<->Promise bridge. Pure Lua; the trigger and
--- timer host primitives are overridden locally to drive the streams deterministically.
+-- Specs for the reactive core (Scripts/Foundation/_rx.lua): Observables/Subjects, the operators the game
+-- uses, the refcounted trigger->Observable bridge, and the Observable<->Promise bridge. Pure Lua; the
+-- trigger and timer host primitives are overridden locally to drive the streams deterministically.
 
-if not __rx then dofile("Scripts/_rx.lua") end
+if not __rx then dofile("Scripts/Foundation/_rx.lua") end
 local rx = __rx
 
 -- ---- Subject: hot multicast + unsubscribe --------------------------------------------------------

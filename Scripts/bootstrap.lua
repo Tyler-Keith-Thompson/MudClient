@@ -686,6 +686,20 @@ local function load_order(names)
   return names
 end
 
+-- Subdirectory order for the ONE level the directory loader descends into: Foundation (game-agnostic
+-- infra) BEFORE AlterAeon (game-specific, may lean on Foundation's _rx/Promise/_persist/_dsl), then
+-- any other subdirectory case-insensitive alphabetically. No manifest — this is the one deliberate
+-- pin, mirroring SEARCH_ROOTS' Foundation-then-AlterAeon order.
+local SUBDIR_RANK = { Foundation = 1, AlterAeon = 2 }
+local function load_dir_order(names)
+  table.sort(names, function(a, b)
+    local ra, rb = SUBDIR_RANK[a] or 50, SUBDIR_RANK[b] or 50
+    if ra ~= rb then return ra < rb end
+    return a:lower() < b:lower()
+  end)
+  return names
+end
+
 --------------------------------------------------------------------------------
 -- require() wiring — a custom package.searcher for the script world
 --------------------------------------------------------------------------------
@@ -695,10 +709,10 @@ end
 -- CWD-relative semantics as load() (via __path_kind), so resolution matches load() exactly — including
 -- the test harness, where the driver stubs __path_kind/__run_file against a fake filesystem.
 
--- Directories searched for a bare module name (require("AlterAeon") -> Scripts/AlterAeon.lua). The
+-- Directories searched for a bare module name (require("AlterAeon") -> Scripts/AlterAeon/AlterAeon.lua). The
 -- directory loader temporarily prepends the directory it is loading (see load()), so a sibling
 -- require during a directory load resolves within that same directory.
-local SEARCH_ROOTS = { "Scripts", "." }
+local SEARCH_ROOTS = { "Scripts", "Scripts/Foundation", "Scripts/AlterAeon", "." }
 
 -- Modules THIS searcher has loaded (name -> resolved path). reload() drops only these from
 -- package.loaded, never stdlib entries. A global so it survives bootstrap re-entry in the harness.
@@ -719,7 +733,7 @@ if __teal_wired == nil and os and os.execute and __path_kind and __path_kind("to
   function __teal_sync()
     -- One shell process loops the sources; `tl gen` fires ONLY for a .tl newer than its .lua (or a missing
     -- .lua), so a clean tree pays just this one fork. mud.d.tl is a declaration file — never generated.
-    os.execute("for t in Scripts/*.tl; do [ \"$t\" = Scripts/mud.d.tl ] && continue; l=\"${t%.tl}.lua\"; "
+    os.execute("for t in Scripts/*.tl Scripts/*/*.tl; do [ \"${t%.d.tl}\" != \"$t\" ] && continue; l=\"${t%.tl}.lua\"; "
       .. "[ \"$t\" -nt \"$l\" ] && ./tools/teal/tl gen \"$t\" -o \"$l\" >/dev/null 2>&1; done; true")
   end
   function __teal_compile(tl_path, lua_path)
@@ -776,7 +790,7 @@ if not __script_searcher_installed then
   __script_searcher_installed = true
 end
 
--- The basename module name for a path ("Scripts/HUD.lua" -> "HUD"), so a file loaded by explicit path
+-- The basename module name for a path ("Scripts/AlterAeon/HUD.lua" -> "HUD"), so a file loaded by explicit path
 -- and the same file loaded by the directory loader share ONE package.loaded identity (load it twice in
 -- a session and it re-registers once, not twice).
 local function module_of(path)
@@ -798,10 +812,28 @@ function load(arg)
   if kind == "dir" then
     table.insert(SEARCH_ROOTS, 1, arg)                       -- resolve siblings within this dir
     local ok, err = pcall(function()
-      for _, n in ipairs(load_order(load_filter(__list_dir(arg)))) do
+      local entries = __list_dir(arg)
+      local files, dirs = {}, {}
+      for _, n in ipairs(entries) do
+        if __path_kind(arg .. "/" .. n) == "dir" then
+          -- Descend into SCRIPT subdirs only. Exclude `tests/` (harness specs — they call test(), which
+          -- doesn't exist in the live app; loaded by the driver / #test, never the directory loader) and
+          -- `_`/`.`-prefixed dirs (same convention as load_filter's file-level exclusions).
+          if n ~= "tests" and n:sub(1, 1) ~= "_" and n:sub(1, 1) ~= "." then dirs[#dirs + 1] = n end
+        else
+          files[#files + 1] = n
+        end
+      end
+      for _, n in ipairs(load_order(load_filter(files))) do
         local mod = module_of(n)
         bust(mod)                                            -- fresh directory load re-runs each file
         require(mod)
+      end
+      -- Descend ONE level into subdirectories (Foundation before AlterAeon, then others alpha) — each
+      -- recursive load() runs its own top-level *.lua the same way; those subdirs have no further
+      -- subdirs of their own, so this doesn't recurse deeper.
+      for _, n in ipairs(load_dir_order(dirs)) do
+        load(arg .. "/" .. n)
       end
     end)
     table.remove(SEARCH_ROOTS, 1)
@@ -828,8 +860,8 @@ end
 
 -- Test seam for the pure loader logic (extension/exclusion/ordering + name resolution); see
 -- Scripts/tests/load_spec.lua.
-_LOAD_TEST = { filter = load_filter, order = load_order, resolve = resolve_script,
-               module_of = module_of }
+_LOAD_TEST = { filter = load_filter, order = load_order, dir_order = load_dir_order,
+               resolve = resolve_script, module_of = module_of }
 
 --------------------------------------------------------------------------------
 -- `|` pipe: sequence typed commands on promises

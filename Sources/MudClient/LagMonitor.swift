@@ -17,7 +17,7 @@
 //       (noteSend) and LuaScriptEngine.notifyPrompt (notePrompt).
 //
 //  All times use the monotonic uptime clock (DispatchTime), immune to wall-clock changes. Lua pulls a
-//  snapshot via the `lag_status()` builtin each HUD repaint; the widget lives in Scripts/HUD.lua.
+//  snapshot via the `lag_status()` builtin each HUD repaint; the widget lives in Scripts/AlterAeon/HUD.lua.
 //
 
 import Foundation

@@ -1,35 +1,21 @@
-# Exposes the ported Lua scripts as build inputs (e.g. test `data`).
-exports_files(["AlterAeon.lua", "AIPilot.lua", "AutoFight.lua", "HUD.lua", "Trivia.lua", "Equipment.lua", "bootstrap.lua",
-               "Audio.lua", "Combat.lua", "Corpse.lua", "Recovery.lua", "_dsl.lua", "_rx.lua", "_persist.lua"])
+# Exposes the ported Lua scripts as build inputs (e.g. test `data`). Foundation/ and AlterAeon/ have no
+# BUILD.bazel of their own, so they're still part of THIS package (Scripts) — labels are just
+# Scripts-relative subdirectory paths, e.g. //Scripts:AlterAeon/AlterAeon.lua.
+#
+# GLOBBED, not hand-listed, so adding/moving a script never silently drops it from the build/test set
+# (a hand-list dropped BookDump.lua/DCast.lua during the Foundation/AlterAeon reorg).
+exports_files(glob(["*.lua", "Foundation/*.lua", "AlterAeon/*.lua"]))
 
-# Every runtime script plus the test harness + specs, consumed as `data` by the Lua script test
-# (//tools/luatest:lua_scripts_test) so it loads exactly what the app loads.
+# Every runtime script (top-level bootstrap + Foundation/ + AlterAeon/) plus the test harness + specs,
+# consumed as `data` by the Lua script test (//tools/luatest:lua_scripts_test) so it loads exactly what
+# the app loads. `*.lua` at top level is just bootstrap.lua; tests/ carries testing.lua's specs.
 filegroup(
     name = "lua_srcs",
-    srcs = [
-        "bootstrap.lua",
-        "_dsl.lua",
-        "_rx.lua",
-        "_persist.lua",
-        "AlterAeon.lua",
-        "Audio.lua",
-        "AIPilot.lua",
-        "AutoFight.lua",
-        "Combat.lua",
-        "Corpse.lua",
-        "DClientProbe.lua",
-        "HUD.lua",
-        "Prompt.lua",
-        "Recovery.lua",
-        "RPC.lua",
-        "Soulforge.lua",
-        "Trivia.lua",
-        "Equipment.lua",
-        "Speech.lua",
-        "ChatDecode.lua",
-        "Promise.lua",
-        "testing.lua",
-        "rpc_descriptor.pb",
-    ] + glob(["tests/*.lua"]),
+    srcs = glob([
+        "*.lua",              # bootstrap.lua
+        "Foundation/*.lua",   # _dsl/_rx/_persist/Promise/testing
+        "AlterAeon/*.lua",    # the 18 game scripts
+        "tests/*.lua",        # the spec suite
+    ]) + ["rpc_descriptor.pb"],
     visibility = ["//visibility:public"],
 )

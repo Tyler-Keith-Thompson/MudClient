@@ -1,4 +1,4 @@
--- Specs for the promise layer (Scripts/Promise.lua) and its two builders: recover([pct])
+-- Specs for the promise layer (Scripts/Foundation/Promise.lua) and its two builders: recover([pct])
 -- (AlterAeon.lua) and attack(target) (AutoFight.lua).
 --
 -- The CLI harness's `after` stub records callbacks but NEVER fires them (there's no event loop), so

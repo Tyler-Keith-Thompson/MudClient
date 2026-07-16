@@ -3,7 +3,7 @@
 # Invoked by the MUD client (AIPilotService) when the in-game AI pilot requests a
 # persistent script change. The client sets these env vars and runs us via `sh -c`:
 #   AI_SCRIPT_REQUEST  - plain-English description of the standing rule wanted
-#   AI_SCRIPT_FILE     - path to the Lua script to edit (Scripts/AlterAeon.lua)
+#   AI_SCRIPT_FILE     - path to the Lua script to edit (Scripts/AlterAeon/AlterAeon.lua)
 #
 # We delegate the actual edit to a headless Claude Code session. On exit 0 the
 # client hot-reloads the script. To enable, before `just run`:

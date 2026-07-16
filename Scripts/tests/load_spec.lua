@@ -7,6 +7,8 @@
 -- declared in-file dependencies, and the directory loader is plain case-insensitive alphabetical.
 -- These cases pin the require semantics that replaced the manifest.
 
+local di = __di or dofile("Scripts/Foundation/Container.lua")
+
 local function join(t) return table.concat(t, ",") end
 
 -- ---- load_filter: extension, exclusions, `_`-prefix ----
@@ -48,30 +50,35 @@ end)
 -- ---- resolve_script: CWD-relative resolution across the search roots ----
 
 test("resolve_script finds a bare name under the Scripts root", function()
-  local saved = __path_kind
-  __path_kind = function(p) return p == "Scripts/AlterAeon.lua" and "file" or "missing" end
-  local got = _LOAD_TEST.resolve("AlterAeon")
-  __path_kind = saved
+  local got
+  di.with_overrides({
+    __path_kind = function(p) return p == "Scripts/AlterAeon.lua" and "file" or "missing" end,
+  }, function()
+    got = _LOAD_TEST.resolve("AlterAeon")
+  end)
   expect(got):eq("Scripts/AlterAeon.lua")
 end)
 
 test("resolve_script honours an explicit path first", function()
-  local saved = __path_kind
-  __path_kind = function(p) return p == "x.lua" and "file" or "missing" end
-  local got = _LOAD_TEST.resolve("x.lua")
-  __path_kind = saved
+  local got
+  di.with_overrides({
+    __path_kind = function(p) return p == "x.lua" and "file" or "missing" end,
+  }, function()
+    got = _LOAD_TEST.resolve("x.lua")
+  end)
   expect(got):eq("x.lua")
 end)
 
 -- ---- resolve_script + Teal: a wired compiler lets a .tl source resolve; freshness is batched (below) ----
 
 test("resolve_script does NO per-file compile when the .lua already exists (freshness is batched)", function()
-  local sk, stc = __path_kind, __teal_compile
-  local calls = 0
-  __path_kind = function(p) return (p == "Scripts/Bar.lua" or p == "Scripts/Bar.tl") and "file" or "missing" end
-  __teal_compile = function() calls = calls + 1 end          -- must NOT be called: the .lua is present
-  local got = _LOAD_TEST.resolve("Bar")
-  __path_kind, __teal_compile = sk, stc
+  local got, calls = nil, 0
+  di.with_overrides({
+    __path_kind = function(p) return (p == "Scripts/Bar.lua" or p == "Scripts/Bar.tl") and "file" or "missing" end,
+    __teal_compile = function() calls = calls + 1 end,        -- must NOT be called: the .lua is present
+  }, function()
+    got = _LOAD_TEST.resolve("Bar")
+  end)
   expect(got):eq("Scripts/Bar.lua")
   expect(calls):eq(0)                                         -- per-reload cost stays O(1), not O(files)
 end)
@@ -153,6 +160,38 @@ test("load(dir) runs top-level scripts in case-insensitive alphabetical order vi
   restore()
   -- bootstrap/_x/n.txt excluded; the rest alphabetical (AIPilot before HUD).
   expect(join(runs)):eq("Scripts/AIPilot.lua,Scripts/HUD.lua")
+end)
+
+test("load(dir) descends one level into subdirs, Foundation before AlterAeon, after top-level files", function()
+  -- Promise.lua (not _-prefixed, not excluded) stands in for a real Foundation file the directory
+  -- loader actually runs; _rx.lua/_persist.lua/_dsl.lua are `_`-prefixed on purpose (loaded via
+  -- explicit dofile/require from their consumers, not swept in by the directory loader).
+  local runs, restore = fake_fs(
+    { ["Scripts"] = "dir",
+      ["Scripts/HUD.lua"] = "file",
+      ["Scripts/Foundation"] = "dir", ["Scripts/Foundation/Promise.lua"] = "file",
+      ["Scripts/AlterAeon"] = "dir", ["Scripts/AlterAeon/AIPilot.lua"] = "file" },
+    { ["Scripts"] = { "HUD.lua", "AlterAeon", "Foundation" },   -- listed AlterAeon before Foundation on
+      ["Scripts/Foundation"] = { "Promise.lua" },               -- purpose: order must NOT come from listing
+      ["Scripts/AlterAeon"] = { "AIPilot.lua" } })
+  load("Scripts")
+  restore()
+  expect(join(runs)):eq("Scripts/HUD.lua,Scripts/Foundation/Promise.lua,Scripts/AlterAeon/AIPilot.lua")
+end)
+
+test("load(dir) does NOT descend into tests/ or _-prefixed subdirs (specs never load in the live app)", function()
+  local runs, restore = fake_fs(
+    { ["Scripts"] = "dir",
+      ["Scripts/AlterAeon"] = "dir", ["Scripts/AlterAeon/AIPilot.lua"] = "file",
+      ["Scripts/tests"] = "dir", ["Scripts/tests/load_spec.lua"] = "file",
+      ["Scripts/_scratch"] = "dir", ["Scripts/_scratch/x.lua"] = "file" },
+    { ["Scripts"] = { "AlterAeon", "tests", "_scratch" },
+      ["Scripts/AlterAeon"] = { "AIPilot.lua" },
+      ["Scripts/tests"] = { "load_spec.lua" },
+      ["Scripts/_scratch"] = { "x.lua" } })
+  load("Scripts")
+  restore()
+  expect(join(runs)):eq("Scripts/AlterAeon/AIPilot.lua")   -- tests/ and _scratch/ skipped, not run
 end)
 
 test("load(dir) re-runs each file even if already required (interactive re-load)", function()
