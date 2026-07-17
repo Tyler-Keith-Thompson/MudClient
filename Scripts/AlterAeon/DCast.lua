@@ -41,6 +41,9 @@ local SEED = {
    ["prism"] = [[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]],
    ["frostflower"] = [[^Spiked flowers of ice quickly form on everything in a ring around you!$]],
    ["refresh"] = [[^You feel less tired\.$]],
+
+
+   ["deathly sleep"] = [[^You down a small potion, cast the spell, and quickly lie down before it takes effect\.$]],
 }
 
 local SPELLS_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/dcast_spells.lua"
@@ -253,6 +256,27 @@ dcast = D
 if alias then
    alias([[^dcast (.+)$]], function(_, rest) return do_dcast(rest, nil) end)
    alias([[^dcast$]], function() return do_dcast("", nil) end)
+
+
+
+
+
+
+
+
+
+
+
+   alias([[^dsleep$]], function()
+      local head = do_dcast("deathly sleep", nil)
+      if not head then return nil end
+      local chain = head:
+      andThen(function() return onNextSpellDown("deathly sleep") end):
+      andThen("stand")
+      if __untrack_promise then __untrack_promise(head) end
+      if __track_promise then (__track_promise)(chain, "dsleep") end
+      return chain
+   end)
 end
 
 _AA_TEST.dcast_registry = registry

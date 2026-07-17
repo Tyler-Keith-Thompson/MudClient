@@ -158,6 +158,54 @@ if rx then
    map(function(r) return r.ratio end)
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+   onNextTick = function(pred)
+      return (tickS):
+      first(function(_) return pred() end):
+      toPromise("one-shot gate: tick stream ended before it fired")
+   end
+
+
+   local function stat_at_pct(stat, maxstat, pct)
+      return function()
+         local v, mx = state[stat], state[maxstat]
+         return v ~= nil and mx ~= nil and mx > 0 and (v / mx) * 100 >= pct
+      end
+   end
+   onNextMana = function(pct) return onNextTick(stat_at_pct("mana", "maxmana", pct)) end
+   onNextHP = function(pct) return onNextTick(stat_at_pct("hp", "maxhp", pct)) end
+   onNextMoves = function(pct) return onNextTick(stat_at_pct("moves", "maxmoves", pct)) end
+   _EVENTS_TEST.stat_at_pct = stat_at_pct
+
+
+
+
+
+   local function spell_is(name)
+      local want = (name or ""):lower()
+      return function(s) return s ~= nil and s:lower() == want end
+   end
+   local function named_once(stream, name)
+      return (stream:filter(spell_is(name))):
+      first():
+      toPromise("one-shot gate: spell stream ended before '" .. (name or "?") .. "'")
+   end
+   onNextSpellDown = function(name) return named_once(onSpellDown, name) end
+   onNextSpellUp = function(name) return named_once(onSpellUp, name) end
+   _EVENTS_TEST.spell_is = spell_is
+
    onPostureChange = T([[^kxw[tq]_position (.+)$]]):
    map(function(c) return c[1] end):
    distinctUntilChanged()

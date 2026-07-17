@@ -41,6 +41,9 @@ local SEED: {string:string} = {
    ["prism"]       = [[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]],
    ["frostflower"] = [[^Spiked flowers of ice quickly form on everything in a ring around you!$]],
    ["refresh"]     = [[^You feel less tired\.$]],
+   -- deathly sleep downs a potion and lies you down to sleep — THAT line is the "it took" signal (there's
+   -- no target/damage line); the `dsleep` alias below rides it, then waits for the effect's spelldown.
+   ["deathly sleep"] = [[^You down a small potion, cast the spell, and quickly lie down before it takes effect\.$]],
 }
 
 local SPELLS_FILE = (os.getenv("HOME") or "") .. "/Documents/MudClient/dcast_spells.lua"
@@ -253,6 +256,27 @@ dcast = D                              -- publish to the (any-typed) global for 
 if alias then
    alias([[^dcast (.+)$]], function(_: any, rest: string): any return do_dcast(rest, nil) end)
    alias([[^dcast$]],      function(): any return do_dcast("", nil) end)
+
+   -- `dsleep` — deathly sleep as ONE cancelable promise: dcast it (resolves on the potion/lie-down line
+   -- above), then await the effect wearing off (onNextSpellDown, Events.tl) and stand back up. We stand
+   -- ONLY after the spelldown — standing while it's active would wake us early. `stand` is a plain string
+   -- step, so the promise layer sends it.
+   --
+   -- The dcast HEAD resolves the instant the lie-down line prints, then the long wait rides continuation
+   -- promises — so without this, the promise widget would only flash "dcast deathly sleep" and vanish,
+   -- leaving nothing to `+|` onto. Mirror the pipe layer (Promise.tl track/untrack note, same move as
+   -- AutoFight.tl's fight_promise retitle): DROP the head's row and TRACK the tail under "dsleep", so the
+   -- whole chain shows as one row for its whole life and `+| <cmd>` appends after it stands up.
+   alias([[^dsleep$]], function(): any
+      local head = do_dcast("deathly sleep", nil)
+      if not head then return nil end
+      local chain = head
+         :andThen(function(): any return onNextSpellDown("deathly sleep") end)
+         :andThen("stand")
+      if __untrack_promise then __untrack_promise(head as Promise<any>) end
+      if __track_promise then (__track_promise as function(any, string))(chain, "dsleep") end
+      return chain
+   end)
 end
 
 _AA_TEST.dcast_registry = registry

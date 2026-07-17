@@ -67,6 +67,29 @@ test("mana_ratio/hp_ratio are nil when vitals are unknown or maxmana/maxhp is 0"
   expect(hp_ratio()):eq(0.5)
 end)
 
+test("onNext* gate predicate: fires on PERCENT of max (100 = full), not raw points; nil/zero-max never fire", function()
+  local full = _EVENTS_TEST.stat_at_pct("mana", "maxmana", 100)   -- onNextMana(100) = full
+  state.maxmana = 1400
+  state.mana = nil;  expect(full()):falsy()   -- unknown vitals: never fires
+  state.mana = 707;  expect(full()):falsy()   -- ~50% — the exact bug: raw >= 100 must NOT fire here
+  state.mana = 1399; expect(full()):falsy()   -- 99.9%: still recovering
+  state.mana = 1400; expect(full()):truthy()  -- 100%: fires
+  -- a partial target, and zero/absent max guarded
+  local eighty = _EVENTS_TEST.stat_at_pct("hp", "maxhp", 80)
+  state.hp, state.maxhp = 79, 100;  expect(eighty()):falsy()
+  state.hp, state.maxhp = 80, 100;  expect(eighty()):truthy()
+  state.hp, state.maxhp = 80, 0;    expect(eighty()):falsy()   -- max 0: no divide, no fire
+end)
+
+test("onNextSpell* matcher: case-insensitive exact name match; nil never matches", function()
+  local m = _EVENTS_TEST.spell_is("Deathly Sleep")
+  expect(m("deathly sleep")):truthy()   -- wire name (kxwt casing) vs the caller's Title Case
+  expect(m("DEATHLY SLEEP")):truthy()
+  expect(m("deathly")):falsy()          -- exact, not substring
+  expect(m("sleep")):falsy()
+  expect(m(nil)):falsy()
+end)
+
 -- ---- onTankDown: mirrors autofight_spec.lua's own tank-rescue table shape (roster of {name, flags}).
 local function tgroup(rows) state.group_flags = {}; for _, m in ipairs(rows) do state.group_flags[m.name] = m.flags end end
 

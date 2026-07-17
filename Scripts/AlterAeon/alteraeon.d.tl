@@ -88,6 +88,18 @@ global onHPLow:         EventObservable<number>   -- hp/maxhp crossed below the 
 global onNewOpponent:   EventObservable<string>   -- the kxwt_fighting target name changed to a new one
 global onTankDown:      EventObservable<string>   -- your grouped, tanking (M+T flagged) minion was confirmed dead
 
+-- One-shot recovery gates (Events.tl): each returns a CANCELABLE Promise that resolves ONCE on the next
+-- vitals tick its condition holds, then it's done — chain with :andThen(...) (a string becomes a send()),
+-- :cancel() to abandon (unsubscribes the tick listener), or let cancelPromises() sweep it. The stat
+-- helpers take a PERCENT of max (100 = full), like onManaLow/onHPLow. e.g.
+--   onNextMana(100):andThen("stand;c metal construct")
+global onNextTick:      function(function(): boolean): Promise<{string}>   -- generic: fire once the next tick pred() is true
+global onNextMana:      function(number): Promise<{string}>               -- fire once when mana next reaches >= pct% of max
+global onNextHP:        function(number): Promise<{string}>               -- fire once when hp next reaches >= pct% of max
+global onNextMoves:     function(number): Promise<{string}>               -- fire once when moves next reaches >= pct% of max
+global onNextSpellDown: function(string): Promise<string>                -- fire once when the named buff/effect next DROPS (case-insensitive)
+global onNextSpellUp:   function(string): Promise<string>                -- fire once when the named buff/effect next comes UP (case-insensitive)
+
 -- Test seam.
 global _AA_TEST: {string:any}
 global _EVENTS_TEST: {string:any}

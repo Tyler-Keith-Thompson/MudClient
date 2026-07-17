@@ -10,6 +10,7 @@ test("resolve_spell matches a seeded spell as a whole-word prefix, longest-first
   expect(resolve("fireball orc")):eq("fireball")
   expect(resolve("frostflower")):eq("frostflower")           -- no target
   expect(resolve("ICEBOLT a goblin")):eq("icebolt")          -- case-insensitive
+  expect(resolve("deathly sleep")):eq("deathly sleep")       -- multi-word seed (drives the `dsleep` alias)
 end)
 
 test("resolve_spell returns nil for a spell it doesn't know (→ dcast tells the user)", function()

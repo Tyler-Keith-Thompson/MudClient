@@ -158,6 +158,54 @@ if rx then
     :map(function(r: LowReading): number return r.ratio end)
     as EventObservable<number>
 
+  -- ---- one-shot recovery gates: a CANCELABLE PROMISE that fires once --------------------------------
+  -- The "easy scheme for single events": onNextTick(pred) resolves the next vitals tick pred() is true
+  -- (reading fresh `state`), then it's done — a Promise like every other flow here, so it chains with
+  -- :andThen(...) (a string there becomes a send(), a table a piped send) and :cancel() tears down the
+  -- underlying tick subscription (toPromise wires onCancel -> unsubscribe), so an abandoned gate stops
+  -- listening and joins cancelPromises()'s "abort everything" sweep. Stat sugar gates a >= threshold (a
+  -- recovery target). Sampled on the same kxwt_prompt push source as the low-mana/HP events, so the same
+  -- kxwq_hud KNOWN GAP (header) applies. e.g.
+  --   onNextMana(100):andThen("stand;c metal construct")   -- when mana is next FULL (100%), stand+summon, once
+  local record Promisable<T>
+    first:     function(Promisable<T>, ? function(T): boolean): Promisable<T>
+    toPromise: function(Promisable<T>, ? string): Promise<T>
+  end
+  onNextTick = function(pred: function(): boolean): Promise<{string}>
+    return (tickS as Promisable<{string}>)
+      :first(function(_: {string}): boolean return pred() end)
+      :toPromise("one-shot gate: tick stream ended before it fired")
+  end
+  -- The stat sugar takes a PERCENT of max (onNextMana(100) = full, onNextMana(80) = 80%), NOT raw points —
+  -- matching onManaLow/onHPLow's ratio semantics, the only reading that's target-independent across chars.
+  local function stat_at_pct(stat: string, maxstat: string, pct: number): function(): boolean
+    return function(): boolean
+      local v, mx = state[stat] as number, state[maxstat] as number
+      return v ~= nil and mx ~= nil and mx > 0 and (v / mx) * 100 >= pct
+    end
+  end
+  onNextMana  = function(pct: number): Promise<{string}> return onNextTick(stat_at_pct("mana",  "maxmana",  pct)) end
+  onNextHP    = function(pct: number): Promise<{string}> return onNextTick(stat_at_pct("hp",    "maxhp",    pct)) end
+  onNextMoves = function(pct: number): Promise<{string}> return onNextTick(stat_at_pct("moves", "maxmoves", pct)) end
+  _EVENTS_TEST.stat_at_pct = stat_at_pct
+
+  -- Named one-shot buff gates: onNextSpellDown("deathly sleep") resolves ONCE the next time THAT effect
+  -- drops (onNextSpellUp when it comes up), as a cancelable Promise — same shape as onNextMana. Filters
+  -- the onSpellUp/onSpellDown streams (the kxwt_spellup/spelldown name) case-insensitively; the plural
+  -- streams stay for continuous subscription. e.g. onNextSpellDown("deathly sleep"):andThen("cast 'deathly sleep' orc")
+  local function spell_is(name: string): function(string): boolean
+    local want = (name or ""):lower()
+    return function(s: string): boolean return s ~= nil and s:lower() == want end
+  end
+  local function named_once(stream: EventObservable<string>, name: string): Promise<string>
+    return (stream:filter(spell_is(name)) as Promisable<string>)
+      :first()
+      :toPromise("one-shot gate: spell stream ended before '" .. (name or "?") .. "'")
+  end
+  onNextSpellDown = function(name: string): Promise<string> return named_once(onSpellDown, name) end
+  onNextSpellUp   = function(name: string): Promise<string> return named_once(onSpellUp,   name) end
+  _EVENTS_TEST.spell_is = spell_is
+
   onPostureChange = T([[^kxw[tq]_position (.+)$]])
     :map(function(c: {string}): string return c[1] end)
     :distinctUntilChanged()

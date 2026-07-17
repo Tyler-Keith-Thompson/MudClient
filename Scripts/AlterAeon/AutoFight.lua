@@ -1300,6 +1300,15 @@ end
 
 
 
+
+local function tank_no_material()
+   if not TANK.resummoning then return end
+   say("can't re-summon here — no clay/dirt in the room to shape (move somewhere with clay/dirt)")
+   stop_resummon()
+end
+
+
+
 local function minion_in_group(name)
    if not name then return false end
    local low = name:lower()
@@ -1430,6 +1439,7 @@ if rx then
    T([[^kxw[tq]_group_end$]]):subscribe(function(_) refresh_tank() end)
    T([[^You add .*clay man to your group\.$]]):subscribe(function(_) tank_resummoned() end)
    T([[^You already have .*clay man at your side\.$]]):subscribe(function(_) tank_resummoned() end)
+   T([[^You need nearby clay or dirt for this\.$]]):subscribe(function(_) tank_no_material() end)
 
 
 

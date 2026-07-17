@@ -1298,6 +1298,15 @@ local function tank_resummoned()
   stop_resummon()
 end
 
+-- "You need nearby clay or dirt for this." — a HARD, un-retryable failure: this room can't shape a clay
+-- man, so re-casting on a pace just spams the game until the cap. Treat it as a terminator: bail the loop
+-- immediately (a flesh beast has no such requirement, so this is clay-specific and always fatal here).
+local function tank_no_material()
+  if not TANK.resummoning then return end
+  say("can't re-summon here — no clay/dirt in the room to shape (move somewhere with clay/dirt)")
+  stop_resummon()
+end
+
 -- Is `name` still in kxwt's roster? Checked against state.group_flags (kxwt's own membership) to match
 -- current_tank_name — self-consistent with the kxwt_group_end/kxwt_ydeath pair, unlike RPC's ;sgroup;.
 local function minion_in_group(name: string): boolean
@@ -1430,6 +1439,7 @@ if rx then
   T([[^kxw[tq]_group_end$]]):subscribe(function(_: {string}) refresh_tank() end)
   T([[^You add .*clay man to your group\.$]]):subscribe(function(_: {string}) tank_resummoned() end)
   T([[^You already have .*clay man at your side\.$]]):subscribe(function(_: {string}) tank_resummoned() end)
+  T([[^You need nearby clay or dirt for this\.$]]):subscribe(function(_: {string}) tank_no_material() end)
   -- (No rvnum reset: the server re-sends rvnum on a plain `look`, so resetting here would flicker us out
   -- of AOE on every look. Leaving a room ends combat (kxwt_fighting -1), and on_fight_end already zeroes
   -- the crowd estimate — so the authoritative combat-end signal covers the "walked away" case.)
