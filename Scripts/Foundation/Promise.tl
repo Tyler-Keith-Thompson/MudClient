@@ -158,6 +158,20 @@ local function untrack(p: Prom)
    if p then tracked[p] = nil end
 end
 
+-- Present a whole promise CHAIN as ONE widget row. A chain's HEAD auto-registers under its own label and
+-- resolves early (e.g. dcast resolves the instant its landed line prints), then the rest runs on untracked
+-- continuation promises — so the row flashes and vanishes with nothing left to `+|` onto. name_chain fixes
+-- that: walk the tail's `_parent` lineage untracking every node (drops that head row), then track the TAIL
+-- under `desc`. The tail stays pending until the LAST step settles, so the one row lives for the chain's
+-- whole life and `+|`/`-|`/cancelPromises operate on it. Returns the tail. This is the move __pipe and the
+-- promise-aliases (palias/dsleep) all need — factored out so "show my chain as one named row" is one call.
+local function name_chain(tail: Prom, desc: string): Prom
+   local p = tail
+   while p do untrack(p); p = p._parent end
+   track(tail, desc)
+   return tail
+end
+
 local record ActiveEntry
    desc:  string
    state: string
@@ -396,6 +410,7 @@ _G.active_promises = active_promises as function(): {any}    -- _G. is REQUIRED:
 _G.__track_promise    = track as function(any)                -- local here, so a bare assignment would
 _G.__untrack_promise  = untrack as function(Promise<any>)     -- just rebind the local, never create the
 _G.__current_promise  = current_promise as function(): any    -- global the HUD/pipe look up. (This was
+_G.__name_chain       = name_chain as function(any, string): any  -- present a chain as one named row (palias/dsleep)
 _G.__pop_tail         = pop_tail as function(): any            -- the "widget never shows" bug.) The casts
                                                                 -- bridge to foundation.d.tl's declared
                                                                 -- (looser) global signatures; see file-top

@@ -79,6 +79,7 @@ global __promise: function(
 global __untrack_promise: function(Promise<any>)
 global __track_promise:   function(any)
 global __current_promise: function(): any
+global __name_chain:      function(any, string): any
 global __pop_tail:        function(): any
 global active_promises:   function(): {any}
 global cancelPromises:    function(): integer
@@ -204,6 +205,7 @@ global __parse: Parse
 -- opts (3rd arg) = { class=, oneshot=, priority= } per CLAUDE.md — optional.
 global trigger: function(string, function(...: any): any..., ? {string:any}): integer
 global alias:   function(string, function(...: any): any..., ? {string:any}): integer
+global palias:  function(string, function(): any): integer   -- "promise alias": build() returns a chain, shown as one named widget row
 global send:    function(string)
 global echo:    function(string, ? string)     -- color is optional; omit it for the default
 global after:   function(number, function()): integer

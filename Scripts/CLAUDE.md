@@ -61,6 +61,22 @@ local grammar  = sentinel:take(pipe):take(__parse.many1(field, pipe)):map(prompt
 **parse** (raw line → values, via `Parse`) → **derive events** (values → named Observables, `Events.tl`)
 → **subscribe** (events → behavior, at each script's top). Every layer declarative and composable.
 
+## Promise aliases — a typed word that runs a multi-step chain
+When a typed word should kick off a promise chain (dcast → await an event → act) and show as ONE row in
+the promise widget (so `+| <cmd>` appends onto it and `cancelPromises()`/`-|` act on it), use **`palias`**,
+NOT a bare `alias()`. A plain alias's returned promise is dropped on the floor (Swift's `processAlias`
+ignores the return, so only first-word GLOBAL callables like `recover`/`goto` or an explicit `|` pipe get
+auto-tracked) — the widget never sees the chain. `palias(word, build)` registers `^word$`, runs `build()`
+(returns the chain tail), and names the whole chain as one row titled `word` via `__name_chain`:
+```lua
+palias("dsleep", function()
+  return dcast("deathly sleep"):andThen(function() return onNextSpellDown("deathly sleep") end):andThen("stand")
+end)
+```
+One-shot event gates compose in the same spirit: `onNextMana(pct)`/`onNextHP`/`onNextMoves`/`onNextTick(pred)`
+and `onNextSpellDown(name)`/`onNextSpellUp(name)` (Events.tl) each return a cancelable Promise that resolves
+once. For a word that takes args/captures, use `alias()` + `__name_chain(tail, desc)` directly.
+
 ## Non-negotiables
 - **Never revert to imperative to make something typecheck.** Convert via behavior-specs-then-rewrite.
 - **Preserve behavior exactly** on any refactor — the specs (`Scripts/tests/*_spec.lua`, run via

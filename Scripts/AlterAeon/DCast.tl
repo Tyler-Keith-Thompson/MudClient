@@ -260,22 +260,12 @@ if alias then
    -- `dsleep` — deathly sleep as ONE cancelable promise: dcast it (resolves on the potion/lie-down line
    -- above), then await the effect wearing off (onNextSpellDown, Events.tl) and stand back up. We stand
    -- ONLY after the spelldown — standing while it's active would wake us early. `stand` is a plain string
-   -- step, so the promise layer sends it.
-   --
-   -- The dcast HEAD resolves the instant the lie-down line prints, then the long wait rides continuation
-   -- promises — so without this, the promise widget would only flash "dcast deathly sleep" and vanish,
-   -- leaving nothing to `+|` onto. Mirror the pipe layer (Promise.tl track/untrack note, same move as
-   -- AutoFight.tl's fight_promise retitle): DROP the head's row and TRACK the tail under "dsleep", so the
-   -- whole chain shows as one row for its whole life and `+| <cmd>` appends after it stands up.
-   alias([[^dsleep$]], function(): any
-      local head = do_dcast("deathly sleep", nil)
-      if not head then return nil end
-      local chain = head
+   -- step, so the promise layer sends it. palias (bootstrap) names the whole chain as one "dsleep" widget
+   -- row for its whole life, so `+| <cmd>` appends after it stands — the OBVIOUS shape for a promise alias.
+   palias("dsleep", function(): any
+      return do_dcast("deathly sleep", nil)
          :andThen(function(): any return onNextSpellDown("deathly sleep") end)
          :andThen("stand")
-      if __untrack_promise then __untrack_promise(head as Promise<any>) end
-      if __track_promise then (__track_promise as function(any, string))(chain, "dsleep") end
-      return chain
    end)
 end
 

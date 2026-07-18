@@ -262,20 +262,10 @@ if alias then
 
 
 
-
-
-
-
-
-   alias([[^dsleep$]], function()
-      local head = do_dcast("deathly sleep", nil)
-      if not head then return nil end
-      local chain = head:
+   palias("dsleep", function()
+      return do_dcast("deathly sleep", nil):
       andThen(function() return onNextSpellDown("deathly sleep") end):
       andThen("stand")
-      if __untrack_promise then __untrack_promise(head) end
-      if __track_promise then (__track_promise)(chain, "dsleep") end
-      return chain
    end)
 end
 

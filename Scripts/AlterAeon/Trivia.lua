@@ -330,12 +330,12 @@ local function parse_tool_call(tool_calls_json)
 end
 
 
+
+
 local function tool_command(name, args)
    args = args or {}
    if name == "area_info" and args.area_name and args.area_name ~= "" then
       return "area " .. pick_keyword(args.area_name)
-   elseif name == "library_entry" and args.entry_number then
-      return "library read " .. args.entry_number
    end
    return nil
 end
@@ -350,14 +350,6 @@ local TOOL_SOURCE = { area_info = "area", library_entry = "library" }
 
 
 
-
-
-
-local function library_read_failed(out)
-   local o = out or ""
-   return o:find("not a valid book number", 1, true) ~= nil or
-   o:find("'library list' for a list", 1, true) ~= nil
-end
 
 
 
@@ -429,6 +421,38 @@ end
 
 
 
+local function read_book(num)
+   if not num then return nil end
+   local f = io.open(cfg.dir .. "/books/" .. tostring(num) .. ".txt", "r")
+   if not f then return nil end
+   local d = f:read("a"); f:close()
+   return d
+end
+
+
+
+local catalog_cache = nil
+local function load_catalog()
+   if catalog_cache then return catalog_cache end
+   local f = io.open(cfg.dir .. "/books_catalog.txt", "r")
+   if not f then catalog_cache = {}; return catalog_cache end
+   local d = f:read("a"); f:close()
+   catalog_cache = parse_library_list(d)
+   return catalog_cache
+end
+
+
+
+
+
+
+
+local Lib = { read = read_book, catalog = load_catalog }
+
+
+
+
+
 
 
 
@@ -481,7 +505,6 @@ local function P(executor)
    return p
 end
 local function rejected(reason) return P(function(_, reject) reject(reason) end) end
-local function dead_p() return P(function() end) end
 
 
 local function stale() return EPOCH ~= _TRIVIA.epoch or T.answered end
@@ -543,50 +566,32 @@ local function ask_model()
 
 
 
-
       local function resolve_library()
-         local qnum = question_book_number(q)
          local function give_up(msg)
             echo("\27[33m[trivia] " .. msg .. "\27[0m"); return rejected(GIVEUP)
          end
-
-
-         local function discover()
-            if stale() then return dead_p() end
-            local kw = library_keyword(q)
-            if not kw then return give_up("library: no book title to search — skipping lookup") end
-            local list_cmd = "library list " .. kw
-            echo("\27[36m[trivia] searching the library: " .. list_cmd .. "\27[0m")
-            return run_lookup(list_cmd):andThen(function(list_out)
-               if stale() then return dead_p() end
-               local pick = library_pick_entry(parse_library_list(list_out), q)
-               if not pick then return give_up("library: no matching entry in the catalog — giving up on this lookup") end
-               return pick
-            end):andThen(function(pick)
-               local read_cmd = "library read " .. (pick)
-               echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
-               return run_lookup(read_cmd):andThen(function(read_out)
-                  if stale() then return dead_p() end
-                  if library_read_failed(read_out) then
-                     return give_up("library read " .. (pick) .. " still rejected — giving up on this lookup")
-                  end
-                  return read_out
-               end)
-            end)
+         local function resolved(text)
+            return P(function(resolve) resolve(text) end)
          end
+
+         local function by_title()
+            local pick = library_pick_entry(Lib.catalog(), q)
+            if not pick then return give_up("library: no matching entry in the local catalog") end
+            local text = Lib.read(pick)
+            if not text then return give_up("library: catalog entry " .. (pick) .. " isn't in the local mirror") end
+            echo("\27[36m[trivia] found it locally: entry " .. (pick) .. "\27[0m")
+            return resolved(text)
+         end
+         local qnum = question_book_number(q)
          if qnum then
-            local read_cmd = "library read " .. qnum
-            echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
-            return run_lookup(read_cmd):andThen(function(read_out)
-               if stale() then return dead_p() end
-               if library_read_failed(read_out) then
-                  echo("\27[33m[trivia] library read " .. qnum .. " not a valid book number — searching by title\27[0m")
-                  return discover()
-               end
-               return read_out
-            end)
+            local text = Lib.read(qnum)
+            if text then
+               echo("\27[36m[trivia] reading local entry " .. qnum .. "\27[0m")
+               return resolved(text)
+            end
+            echo("\27[33m[trivia] entry " .. qnum .. " not in the local library — searching by title\27[0m")
          end
-         return discover()
+         return by_title()
       end
 
       if ai_local_tools_request then
@@ -790,12 +795,14 @@ _TRIVIA_TEST = {
    parse_tool_call = parse_tool_call,
    tool_command = tool_command,
    capture_keep = capture_keep,
-   library_read_failed = library_read_failed,
    parse_library_list = parse_library_list,
    library_title = library_title,
    library_keyword = library_keyword,
    question_book_number = question_book_number,
    library_pick_entry = library_pick_entry,
+   read_book = read_book,
+   load_catalog = load_catalog,
+   Lib = Lib,
 
 
 

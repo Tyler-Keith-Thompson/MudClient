@@ -29,6 +29,9 @@ import urllib.request
 
 HERE = os.path.dirname(__file__)
 RAW = os.path.join(HERE, "help_raw")
+# The captured Great Library entries (one `<vnum>.txt` per book, header line "NNN - title  Topic: X").
+# Folded into the SAME index so a trivia/pilot query retrieves book lore alongside the help corpus.
+BOOKS = os.environ.get("BOOKS_DIR", os.path.expanduser("~/Documents/MudClient/books"))
 OUT = os.path.expanduser("~/Documents/MudClient/rag_index.bin")
 BASE = os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
 EMB_MODEL = os.environ.get("EMB_MODEL", "text-embedding-nomic-embed-text-v1.5")
@@ -63,7 +66,24 @@ def main():
         text = "\n".join(lines[2:]) if len(lines) > 2 else body   # drop the source-URL header line
         for c in chunk(text):
             chunks.append(f"[{topic}] {c}")
-    print(f"{len(chunks)} chunks from {RAW}; embedding via {EMB_MODEL} ...")
+    help_n = len(chunks)
+
+    # Great Library books: keep the whole file (title/topic header + body) and tag with the vnum + title so
+    # a chunk is self-identifying. Unlike help files there's no URL header line to drop.
+    book_n = 0
+    for path in sorted(glob.glob(os.path.join(BOOKS, "*.txt")),
+                       key=lambda p: int(os.path.splitext(os.path.basename(p))[0]) if os.path.splitext(os.path.basename(p))[0].isdigit() else 0):
+        with open(path, errors="replace") as f:
+            body = f.read()
+        vnum = os.path.splitext(os.path.basename(path))[0]
+        head = body.splitlines()[0].strip() if body.strip() else ""     # "NNN - title   Topic: X"
+        # The header already leads with the vnum ("201 - a martial arts manual …"); don't repeat it.
+        tag = f"book {head}" if head.startswith(vnum) else f"book {vnum} {head}".strip()
+        for c in chunk(body):
+            chunks.append(f"[{tag}] {c}")
+            book_n += 1
+    print(f"{len(chunks)} chunks ({help_n} help from {RAW}, {book_n} book from {BOOKS}); "
+          f"embedding via {EMB_MODEL} ...")
 
     # Cap each input so an over-long passage (e.g. a big ASCII map) can't 400 the embedder.
     CAP = 1600

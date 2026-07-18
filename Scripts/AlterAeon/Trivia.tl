@@ -329,13 +329,13 @@ local function parse_tool_call(tool_calls_json: string): string, ToolArgs
    return name, {}
 end
 
--- The in-game command that answers a given tool call, or nil for an unusable one.
+-- The in-game command that answers a given tool call, or nil for an unusable one. NOTE: library_entry is
+-- deliberately NOT here — Great Library entries resolve from the LOCAL book mirror (resolve_library), never
+-- an in-game command; this now serves only the live `area` lookup.
 local function tool_command(name: string, args: ToolArgs): string
    args = args or {}
    if name == "area_info" and args.area_name and args.area_name ~= "" then
       return "area " .. pick_keyword(args.area_name)     -- pick_keyword: a distinctive search word
-   elseif name == "library_entry" and args.entry_number then
-      return "library read " .. args.entry_number
    end
    return nil
 end
@@ -350,14 +350,6 @@ local TOOL_SOURCE: {string:string} = { area_info = "area", library_entry = "libr
 -- number: we read a number only if it (a) appears verbatim in the QUESTION ("What is entry 16105…"),
 -- or (b) came back from a real `library list`/`library search`. Everything below is pure + unit-tested;
 -- the async discovery chain that uses them lives in decide().
-
--- The game's rejection of a bad `library read`. Recognizing it is what turns a dead lookup into a retry
--- (via list/search) instead of a blind answer sourced as "library".
-local function library_read_failed(out: string): boolean
-   local o = out or ""
-   return o:find("not a valid book number", 1, true) ~= nil
-      or o:find("'library list' for a list", 1, true) ~= nil
-end
 
 local record LibEntry
    num: integer
@@ -425,6 +417,38 @@ local function library_pick_entry(entries: {LibEntry}, question: string): intege
    return nil
 end
 
+-- ---- local Great Library mirror (replaces the in-game `library read/list/search`) ----------------
+-- The books were scraped offline (cfg.dir/books/<vnum>.txt, plus cfg.dir/books_catalog.txt), and folded
+-- into the RAG too (build_rag_index.py). Reading them locally is deterministic and needs no combat-noise
+-- capture window — so Great Library questions resolve from disk, never an in-game command.
+local function read_book(num: integer): string
+   if not num then return nil end
+   local f = io.open(cfg.dir .. "/books/" .. tostring(num) .. ".txt", "r")
+   if not f then return nil end
+   local d = f:read("a"); f:close()
+   return d
+end
+
+-- The local catalog ("NNN - title" lines, plus '#' comment lines the number grammar skips) parsed into
+-- {num,title} entries — the offline stand-in for `library list`. Read once, then cached.
+local catalog_cache: {LibEntry} = nil
+local function load_catalog(): {LibEntry}
+   if catalog_cache then return catalog_cache end
+   local f = io.open(cfg.dir .. "/books_catalog.txt", "r")
+   if not f then catalog_cache = {}; return catalog_cache end
+   local d = f:read("a"); f:close()
+   catalog_cache = parse_library_list(d)          -- same "NNN - title [ Topic: X]" grammar
+   return catalog_cache
+end
+
+-- resolve_library reads through this indirection (default = the real local reads above) so flow specs can
+-- inject book/catalog fixtures without touching the real filesystem — the only seam the library flow needs.
+local record LibIO
+   read:    function(integer): string
+   catalog: function(): {LibEntry}
+end
+local Lib: LibIO = { read = read_book, catalog = load_catalog }
+
 -- ---- in-game command output capture (noise-tolerant), STREAM + PROMISE driven --------------------
 -- A lookup command's output has no single terminal line — the answer is spread across several lines amid
 -- combat noise — so we COLLECT over a short window. The window is inherent to the behaviour (it's not a
@@ -481,9 +505,8 @@ local function P(executor: function(function(any), function(string), function(fu
    return p
 end
 local function rejected(reason: any): FlowPromise return P(function(_: any, reject: function(string)) reject(reason as string) end) end
-local function dead_p(): FlowPromise         return P(function() end) end   -- never settles: a stale flow halts silently
 -- A model reply / lookup that lands after a reload (epoch bump) or after we've already answered must not
--- fire a stale `event answer`; the chain checks this at each async boundary and halts (dead_p) if so.
+-- fire a stale `event answer`; the chain checks this at each async boundary and bails if so.
 local function stale(): boolean return EPOCH ~= _TRIVIA.epoch or T.answered end
 
 -- Run a lookup command; RESOLVES with its captured output after the collection window. Pure-Lua promise
@@ -538,55 +561,37 @@ local function ask_model()
          end)
       end
 
-      -- Resolve a Great Library lookup WITHOUT ever reading a fabricated number, as a PROMISE CHAIN over the
-      -- reply streams. RESOLVES with the successful `library read` text, or REJECTS with GIVEUP when it can't
-      -- resolve one honestly — the caller then degrades to a NARRATED labeled guess (never a letter sourced
-      -- as though the library confirmed it). The only numbers ever read are (a) one the QUESTION itself states
-      -- (question_book_number, trusted) or (b) one that came back from a real `library list` (library_pick_
-      -- entry — flowed on as the resolve value). A model's fabricated number never reaches `library read`.
+      -- Resolve a Great Library entry from the LOCAL book mirror — no in-game commands, so it's synchronous
+      -- (P resolves at once). Trust only a number the QUESTION states (question_book_number) or one the local
+      -- catalog yields for the question's book TITLE (library_pick_entry) — never the model's guessed number.
+      -- RESOLVES with the book text; REJECTS with GIVEUP when it can't resolve one → caller degrades to a
+      -- labeled guess. Kept a FlowPromise so the call site (andThen/catch + staleness) is unchanged.
       local function resolve_library(): FlowPromise
-         local qnum = question_book_number(q)                 -- a number the QUESTION itself states (trusted)
          local function give_up(msg: string): FlowPromise
             echo("\27[33m[trivia] " .. msg .. "\27[0m"); return rejected(GIVEUP)
          end
-         -- Search the catalog by the question's book title; the matching entry NUMBER flows on as the resolve
-         -- value into the `library read` step (validated — it definitely appeared in the list).
-         local function discover(): FlowPromise
-            if stale() then return dead_p() end
-            local kw = library_keyword(q)
-            if not kw then return give_up("library: no book title to search — skipping lookup") end
-            local list_cmd = "library list " .. kw
-            echo("\27[36m[trivia] searching the library: " .. list_cmd .. "\27[0m")
-            return run_lookup(list_cmd):andThen(function(list_out: any): any
-               if stale() then return dead_p() end
-               local pick = library_pick_entry(parse_library_list(list_out as string), q)
-               if not pick then return give_up("library: no matching entry in the catalog — giving up on this lookup") end
-               return pick                                      -- ← the validated entry number flows on
-            end):andThen(function(pick: any): any
-               local read_cmd = "library read " .. (pick as integer)
-               echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
-               return run_lookup(read_cmd):andThen(function(read_out: any): any
-                  if stale() then return dead_p() end
-                  if library_read_failed(read_out as string) then
-                     return give_up("library read " .. (pick as integer) .. " still rejected — giving up on this lookup")
-                  end
-                  return read_out
-               end)
-            end)
+         local function resolved(text: string): FlowPromise
+            return P(function(resolve: function(any)) resolve(text) end)
          end
+         -- By the question's book title: match it against the local catalog, then read that entry's file.
+         local function by_title(): FlowPromise
+            local pick = library_pick_entry(Lib.catalog(), q)
+            if not pick then return give_up("library: no matching entry in the local catalog") end
+            local text = Lib.read(pick)
+            if not text then return give_up("library: catalog entry " .. (pick as integer) .. " isn't in the local mirror") end
+            echo("\27[36m[trivia] found it locally: entry " .. (pick as integer) .. "\27[0m")
+            return resolved(text)
+         end
+         local qnum = question_book_number(q)                 -- a number the QUESTION itself states (trusted)
          if qnum then
-            local read_cmd = "library read " .. qnum
-            echo("\27[36m[trivia] looking it up: " .. read_cmd .. "\27[0m")
-            return run_lookup(read_cmd):andThen(function(read_out: any): any
-               if stale() then return dead_p() end
-               if library_read_failed(read_out as string) then           -- the game rejected the question-stated number →
-                  echo("\27[33m[trivia] library read " .. qnum .. " not a valid book number — searching by title\27[0m")
-                  return discover()                              -- retry by title (still never a fabricated number)
-               end
-               return read_out
-            end)
+            local text = Lib.read(qnum)
+            if text then
+               echo("\27[36m[trivia] reading local entry " .. qnum .. "\27[0m")
+               return resolved(text)
+            end
+            echo("\27[33m[trivia] entry " .. qnum .. " not in the local library — searching by title\27[0m")
          end
-         return discover()                                    -- no trusted number → never read the model's guess
+         return by_title()                                    -- no trusted number (or not local) → title
       end
 
       if ai_local_tools_request then
@@ -790,12 +795,14 @@ _TRIVIA_TEST = {
    parse_tool_call = parse_tool_call,
    tool_command = tool_command,
    capture_keep = capture_keep,
-   library_read_failed = library_read_failed,
    parse_library_list = parse_library_list,
    library_title = library_title,
    library_keyword = library_keyword,
    question_book_number = question_book_number,
    library_pick_entry = library_pick_entry,
+   read_book = read_book,
+   load_catalog = load_catalog,
+   Lib = Lib,                       -- inject book/catalog fixtures in flow specs (no real filesystem)
    -- Flow seams: drive the async lookup machine the way the live triggers do (question → choices kicks
    -- attempt_answer; collect_line / on_area_line feed a lookup's reply lines). Behaviour-level flow specs
    -- use these + stubbed send/echo/after/ai_local_tools_request to assert the SEND SEQUENCE and narration.

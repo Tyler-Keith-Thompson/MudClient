@@ -442,10 +442,19 @@ doc("alias", { sig = "alias(pattern, handler[, opts]) -> id", group = "triggers"
   text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger() (oneshot/class/priority). The MOST SPECIFIC matching alias wins (priority desc, then specificity desc, then registration order) — a narrow pattern beats a broad one regardless of load order.",
   example = "alias(\"^gg$\", function() send(\"get all from corpse\") end)" })
 doc("gag", { sig = "gag(pattern) -> id", group = "triggers",
-  text = "Drop every server line matching the pattern. Removable/toggleable by id like any rule.",
+  text = "Drop every server line matching the pattern. Removable/toggleable by id like any rule. Bare `#gag` (no pattern) lists every registered gag (like `#trigger` / `#alias`).",
   example = "gag(\"^kxwt_\")" })
 doc("rule_remove", { sig = "rule_remove(id)", group = "triggers",
-  text = "Remove the trigger, alias, or gag with this id." })
+  text = "Remove the trigger, alias, or gag with this id (spans all three types)." })
+doc("untrigger", { sig = "untrigger(<id|regex>)", group = "triggers",
+  text = "Remove line trigger(s) by id (a bare number) OR by regex matched against their pattern source. Only touches TRIGGERS (unlike rule_remove, which spans all types). Echoes what was removed.",
+  example = "#untrigger 7    #untrigger ^You are hungry" })
+doc("unalias", { sig = "unalias(<id|regex>)", group = "triggers",
+  text = "Remove input alias(es) by id (a bare number) OR by regex matched against their pattern source. Only touches ALIASES.",
+  example = "#unalias 4    #unalias dsleep" })
+doc("ungag", { sig = "ungag(<id|regex>)", group = "triggers",
+  text = "Remove gag(s) by id (a bare number) OR by regex matched against their pattern source. Only touches GAGS. (`#gag` lists them.)",
+  example = "#ungag 9    #ungag ^kxwt_" })
 doc("rule_enable", { sig = "rule_enable(id, on)", group = "triggers",
   text = "Enable or disable a single rule; disabled rules don't match." })
 doc("class_enable", { sig = "class_enable(name, on)", group = "triggers",
@@ -1027,6 +1036,31 @@ function __pipe_pop()
   end
   return true
 end
+
+-- palias(word, build) — a "promise alias": the OBVIOUS way to make a typed word run a multi-step promise
+-- and show up as one row in the promise widget. A plain alias() whose handler returns a promise drops it on
+-- the floor — processAlias (Swift) ignores the return, so the widget never sees the chain and `+|` has
+-- nothing to append to (only first-word GLOBAL callables like recover/goto, or an explicit `|` pipe, get
+-- auto-tracked). palias wires it: it registers `^word$`, runs build() (which returns the chain tail —
+-- head:andThen(...)…, or nil to do nothing), and names the WHOLE chain as one widget row titled `word`
+-- (via __name_chain), so the row lives for the chain's entire life and `+| <cmd>` grafts on after it.
+-- Returns the alias id. For a word that takes args/captures, use alias() + __name_chain(tail, desc) directly.
+function palias(word, build)
+  if not alias then return end
+  return alias("^" .. word .. "$", function()
+    local tail = build()
+    if not tail then return end
+    if __name_chain then return __name_chain(tail, word) end
+    return tail
+  end)
+end
+doc("palias", { sig = "palias(word, build) -> id", group = "triggers",
+  text = "Register a \"promise alias\": typing `word` runs build(), which returns a promise CHAIN "
+      .. "(head:andThen(...)…), and the WHOLE chain shows as ONE promise-widget row named `word` for its "
+      .. "entire life — so `+| <cmd>` appends onto it and cancelPromises()/`-|` act on it. Use this instead "
+      .. "of a bare alias() when the handler returns a promise: a plain alias drops the returned promise "
+      .. "(the widget never sees it). For args/captures, use alias() + __name_chain(tail, desc).",
+  example = "palias(\"dsleep\", function()\n  return dcast(\"deathly sleep\"):andThen(function() return onNextSpellDown(\"deathly sleep\") end):andThen(\"stand\")\nend)" })
 
 -- Test seam (Scripts/tests/pipe_spec.lua): the per-segment runner + the chain builder + append/pop. (Split
 -- + escaping is Swift's job now — InputService.pipeSegments — tested on that side.)

@@ -165,6 +165,20 @@ end
 
 
 
+local function name_chain(tail, desc)
+   local p = tail
+   while p do untrack(p); p = p._parent end
+   track(tail, desc)
+   return tail
+end
+
+
+
+
+
+
+
+
 
 local function active_promises()
    local out = {}
@@ -396,6 +410,7 @@ _G.active_promises = active_promises
 _G.__track_promise = track
 _G.__untrack_promise = untrack
 _G.__current_promise = current_promise
+_G.__name_chain = name_chain
 _G.__pop_tail = pop_tail
 
 

@@ -110,12 +110,11 @@ test("parse_tool_call pulls the tool name + argument out of the escaped tool_cal
   expect(a2.entry_number):eq(48043)
 end)
 
-test("tool_command builds the right in-game command (area uses the distinctive keyword)", function()
+test("tool_command builds the area lookup; library is NOT an in-game command (it reads the local mirror)", function()
   expect(tool_command("area_info", { area_name = "Cliffside Island" })):eq("area Cliffside")
-  expect(tool_command("library_entry", { entry_number = 48043 })):eq("library read 48043")
-  expect(tool_command("area_info", { area_name = "" })):eq(nil)      -- no usable arg
-  expect(tool_command("library_entry", {})):eq(nil)
-  expect(tool_command("bogus", { x = 1 })):eq(nil)                   -- unknown tool
+  expect(tool_command("area_info", { area_name = "" })):eq(nil)             -- no usable arg
+  expect(tool_command("library_entry", { entry_number = 48043 })):eq(nil)  -- library resolves from disk now
+  expect(tool_command("bogus", { x = 1 })):eq(nil)                         -- unknown tool
 end)
 
 test("capture_keep drops noise (blanks, kxwt, the [event] channel, our echoed command) but keeps real output", function()
@@ -130,26 +129,16 @@ test("capture_keep drops noise (blanks, kxwt, the [event] channel, our echoed co
   expect(capture_keep("A gnoll's claw hits you.", "area Cliffside")):eq(true)
 end)
 
--- ---- Great Library: never read a fabricated book number ----------------------------------------
-local library_read_failed   = _TRIVIA_TEST.library_read_failed
+-- ---- Great Library: resolve entries from the local mirror (never a fabricated book number) -------
 local parse_library_list    = _TRIVIA_TEST.parse_library_list
 local library_title         = _TRIVIA_TEST.library_title
 local library_keyword       = _TRIVIA_TEST.library_keyword
 local question_book_number  = _TRIVIA_TEST.question_book_number
 local library_pick_entry    = _TRIVIA_TEST.library_pick_entry
 
-test("library_read_failed recognizes the game's invalid-book-number rejection", function()
-  -- The real line that ended the buggy trace — this must trigger the discovery/retry path, not a blind answer.
-  expect(library_read_failed("Sorry, that's not a valid book number. ('library list' for a list)")):eq(true)
-  expect(library_read_failed("some combat\nSorry, that's not a valid book number.\nmore")):eq(true)
-  -- A successful read is NOT a failure.
-  expect(library_read_failed("48043 - a scriber's book of runes     Topic: philosophy")):eq(false)
-  expect(library_read_failed("")):eq(false)
-  expect(library_read_failed(nil)):eq(false)
-end)
-
-test("parse_library_list reads numbered catalog entries and ignores non-catalog lines", function()
+test("parse_library_list reads numbered catalog entries and ignores non-catalog lines (incl. '#' comments)", function()
   local out = table.concat({
+    "# AlterAeon book catalog — 474 entries",           -- the local books_catalog.txt header (must be skipped)
     "Welcome to the Alter Aeon Historical Archive!",
     "2110 - the book of the sea     Topic: geography",
     "37364 - a book called 'The Origin of Tartan and Plaid Cloth'     Topic: history and artifacts",
@@ -279,35 +268,28 @@ local function flow(question, choices, model, drive)
   return sent, echoed
 end
 
-test("library flow: search the catalog → read the matched entry → answer (labeled 'library')", function()
+-- The library flow now reads the LOCAL book mirror (no in-game commands), so these inject the catalog +
+-- book text through the TT.Lib seam and assert: NO `library …` send ever goes out, the right entry is
+-- resolved (title match ignores the model's fabricated number), and it always answers.
+test("library flow: match the local catalog by title → read that entry → answer (no in-game command)", function()
   local q  = 'What is the topic of a book entitled "A Magic Primer: Constructs" in the Great Library?'
   local ch = 'A: philosophy.  B: history.  C: geography.  D: runes.'
-  -- The model calls library_entry with a MADE-UP number (99999); we must ignore it and search by title.
-  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 99999) }, { answer = "A" } },
-    function(api)
-      expect(has_send(api.sent, "library list Constructs")):eq(true)   -- discovery by the title keyword
-      expect(has_send(api.sent, "library read 99999")):eq(false)       -- the fabricated number is NEVER read
-      api.line("48043 - a magic primer: constructs     Topic: philosophy")
-      api.fire()                                                       -- list window → pick 48043 → read it
-      expect(has_send(api.sent, "library read 48043")):eq(true)        -- a VALIDATED number (it was listed)
-      api.line("48043 - a magic primer: constructs     Topic: philosophy")
-      api.fire()                                                       -- read window → feed model → "A"
-    end)
+  -- The model calls library_entry with a MADE-UP number (99999); the title match must win, not that number.
+  TT.Lib.catalog = function() return parse_library_list("48043 - a magic primer: constructs     Topic: philosophy") end
+  TT.Lib.read = function(n) return n == 48043 and "48043 - a magic primer: constructs     Topic: philosophy" or nil end
+  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 99999) }, { answer = "A" } })
+  expect(has_send(sent, "library")):eq(false)                          -- NO in-game library command at all
   expect(has_send(sent, "event answer a")):eq(true)                    -- locked in choice A
-  expect(table.concat(echoed, "\n")):contains("searching the library")
-  expect(table.concat(echoed, "\n")):contains("looking it up: library read 48043")
+  expect(table.concat(echoed, "\n")):contains("found it locally: entry 48043")
 end)
 
-test("library flow: no catalog match → NARRATED guess, never a fabricated read or 'library' answer", function()
+test("library flow: no local catalog match → NARRATED guess, never a fake 'library' answer", function()
   local q  = 'What is the topic of a book entitled "A Nonexistent Tome" in the Great Library?'
   local ch = 'A: one.  B: two.  C: three.  D: four.'
-  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 12345) }, { answer = "B" } },
-    function(api)
-      expect(has_send(api.sent, "library read 12345")):eq(false)       -- model's number never read
-      api.line("48043 - some unrelated book     Topic: philosophy")     -- catalog holds no matching title
-      api.fire()                                                       -- list window → no pick → give up
-    end)
-  expect(has_send(sent, "library read")):eq(false)                     -- no book number was EVER read
+  TT.Lib.catalog = function() return parse_library_list("48043 - some unrelated book     Topic: philosophy") end
+  TT.Lib.read = function() return nil end
+  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 12345) }, { answer = "B" } })
+  expect(has_send(sent, "library")):eq(false)                          -- no book was EVER read via the game
   expect(has_send(sent, "event answer")):eq(true)                      -- still answers (it always answers)…
   local text = table.concat(echoed, "\n")
   expect(text):contains("no matching entry")                           -- narrated the give-up…
@@ -315,35 +297,28 @@ test("library flow: no catalog match → NARRATED guess, never a fabricated read
   expect(text:find("— library", 1, true)):eq(nil)                      -- NOT labeled as a library answer
 end)
 
-test("library flow: a question-stated number is trusted and read directly (no search)", function()
+test("library flow: a question-stated number reads that entry directly from the mirror (no title search)", function()
   local q  = 'What is entry 16105 in the Great Library?'
   local ch = 'A: a letter.  B: a map.  C: a rune.  D: a key.'
-  local sent = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 16105) }, { answer = "A" } },
-    function(api)
-      expect(has_send(api.sent, "library read 16105")):eq(true)        -- the QUESTION's own number, read directly
-      expect(has_send(api.sent, "library list")):eq(false)             -- trusted → no discovery search
-      api.line("16105 - a lightly scorched letter")
-      api.fire()
-    end)
+  TT.Lib.read = function(n) return n == 16105 and "16105 - a lightly scorched letter" or nil end
+  TT.Lib.catalog = function() error("must not search the catalog when the question states a valid number") end
+  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 16105) }, { answer = "A" } })
+  expect(has_send(sent, "library")):eq(false)
   expect(has_send(sent, "event answer a")):eq(true)
+  expect(table.concat(echoed, "\n")):contains("reading local entry 16105")
 end)
 
-test("library flow: a rejected question-number RETRIES by title, then reads the validated entry", function()
+test("library flow: a question number NOT in the local mirror falls back to a title match", function()
   local q  = 'What is entry 55555 in the book entitled "The Book of the Sea"?'
   local ch = 'A: geography.  B: history.  C: cooking.  D: war.'
-  local sent = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 55555) }, { answer = "A" } },
-    function(api)
-      expect(has_send(api.sent, "library read 55555")):eq(true)        -- trusted question number, tried first
-      api.line("Sorry, that's not a valid book number. ('library list' for a list)")
-      api.fire()                                                       -- rejected → search by title
-      expect(has_send(api.sent, "library list Book")):eq(true)         -- retry via list (not a fabricated read)
-      api.line("2110 - the book of the sea     Topic: geography")
-      api.fire()                                                       -- pick 2110 → read it
-      expect(has_send(api.sent, "library read 2110")):eq(true)
-      api.line("2110 - the book of the sea     Topic: geography")
-      api.fire()
-    end)
+  TT.Lib.read = function(n) return n == 2110 and "2110 - the book of the sea     Topic: geography" or nil end   -- we lack 55555
+  TT.Lib.catalog = function() return parse_library_list("2110 - the book of the sea     Topic: geography") end
+  local sent, echoed = flow(q, ch, { { tool = string.format(LIBRARY_TOOL, 55555) }, { answer = "A" } })
+  expect(has_send(sent, "library")):eq(false)
   expect(has_send(sent, "event answer a")):eq(true)
+  local text = table.concat(echoed, "\n")
+  expect(text):contains("entry 55555 not in the local library")       -- narrated the local miss…
+  expect(text):contains("found it locally: entry 2110")               -- …then resolved by title
 end)
 
 test("area flow: `area <kw>` rows are collected and mapped to the choice — no model call", function()

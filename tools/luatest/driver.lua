@@ -17,6 +17,7 @@ end
 for _, n in ipairs({
   "trigger", "alias", "gag", "send",
   "rule_remove", "rule_enable", "class_enable", "class_remove",
+  "untrigger", "unalias", "ungag",
   "music_play", "music_stop", "music_volume", "music_midi", "music_midi_reset", "msp_volume", "speech_volume",
   "sound_once",
   "panel_render", "panel_top", "panel_height", "panel_top_height",

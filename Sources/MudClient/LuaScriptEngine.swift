@@ -611,6 +611,13 @@ final class LuaScriptEngine: @unchecked Sendable {
         // alias(pattern, handler [, opts]) -> id. Same options as trigger().
         lua.register("alias") { [weak self] args in
             guard let self else { return [] }
+            // Bare `alias` — no handler (the `#alias` REPL passes zero args or a lone ""); show the syntax
+            // AND list what's registered, mirroring bare `#trigger`. A real registration has (pattern, handler).
+            if args.count < 2 {
+                self.usage(#"alias: expected (pattern, handler[, opts]) with a valid regex — e.g. alias("^gold$", function() send("score gold") end)"#)
+                self.listAliasRules()
+                return []
+            }
             guard let rule = self.makeRule(args) else {
                 self.usage(#"alias: expected (pattern, handler[, opts]) with a valid regex — e.g. alias("^gold$", function() send("score gold") end)"#)
                 return []
@@ -621,7 +628,14 @@ final class LuaScriptEngine: @unchecked Sendable {
         // gag(pattern) -> id. Drops matching lines; removable/toggleable by id like any rule.
         lua.register("gag") { [weak self] args in
             guard let self else { return [] }
-            guard case .string(let pat)? = args.first, let rx = try? Regex(pat) else {
+            // Bare `gag` — no pattern (the `#gag` REPL passes zero args); show the syntax AND list the
+            // registered gags, mirroring bare `#trigger` / `#alias`.
+            guard case .string(let pat)? = args.first else {
+                self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
+                self.listGagRules()
+                return []
+            }
+            guard let rx = try? Regex(pat) else {
                 self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
                 return []
             }
@@ -629,6 +643,13 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.gags.append(rule)
             return [.int(Int64(rule.id))]
         }
+        // untrigger / unalias / ungag <id | regex> — remove matching rules from ONE list (unlike
+        // rule_remove(id), which spans all three types). A bare NUMBER removes by id; anything else is
+        // compiled as a regex and matched against each rule's patternSource, so `#unalias dsleep` drops
+        // the `^dsleep$` alias. Echoes what went (or that nothing matched).
+        lua.register("untrigger") { [weak self] args in self?.unregister(args, kind: "trigger"); return [] }
+        lua.register("unalias")   { [weak self] args in self?.unregister(args, kind: "alias");   return [] }
+        lua.register("ungag")     { [weak self] args in self?.unregister(args, kind: "gag");      return [] }
         // rule_remove(id) — drop the trigger/alias/gag with this id (from wherever it lives).
         lua.register("rule_remove") { [weak self] args in
             guard let self, let id = args.first.flatMap(Self.intArg) else { return [] }
@@ -1693,10 +1714,49 @@ final class LuaScriptEngine: @unchecked Sendable {
 
     /// Echo every registered line-trigger (id, pattern source, class/flags) in FIRING order — the list a
     /// bare `#trigger` prints under the syntax line. `lineRules` is already kept sorted by firing order.
-    private func listLineRules() {
-        let rules = lineRules
-        onEcho("[trigger] \(rules.count) line-trigger\(rules.count == 1 ? "" : "s") registered, in firing order:")
-        for r in rules {
+    private func listLineRules() { listRules(lineRules, label: "trigger", kind: "line-trigger") }
+    private func listAliasRules() { listRules(aliasRules, label: "alias", kind: "alias") }
+    private func listGagRules() { listRules(gags, label: "gag", kind: "gag") }
+
+    /// `untrigger` / `unalias` / `ungag <id | regex>` — remove rules of ONE kind. Bare number → by id;
+    /// otherwise the arg is a regex matched against each rule's `patternSource`. Reports what was removed.
+    private func unregister(_ args: [LuaValue], kind: String) {
+        let needle = { () -> String in if case .string(let s)? = args.first { return s.trimmingCharacters(in: .whitespaces) }; return "" }()
+        guard !needle.isEmpty else {
+            self.usage("un\(kind): expected an id number or a regex — e.g. un\(kind) 7   or   un\(kind) ^dsleep$")
+            return
+        }
+        let predicate: (Rule) -> Bool
+        let matchDesc: String
+        if let id = Int(needle) {
+            predicate = { $0.id == id }; matchDesc = "#\(id)"
+        } else if let rx = try? Regex(needle) {
+            predicate = { (try? rx.firstMatch(in: $0.patternSource)) != nil }; matchDesc = "/\(needle)/"
+        } else {
+            self.usage("un\(kind): '\(needle)' isn't a number or a valid regex.")
+            return
+        }
+        let removed: [Rule]
+        switch kind {
+        case "trigger": removed = lineRules.filter(predicate); lineRules.removeAll(where: predicate)
+        case "alias":   removed = aliasRules.filter(predicate); aliasRules.removeAll(where: predicate)
+        default:        removed = gags.filter(predicate); gags.removeAll(where: predicate)
+        }
+        if removed.isEmpty {
+            onEcho("[\(kind)] nothing matched \(matchDesc).")
+        } else {
+            let list = removed.map { "#\($0.id) \($0.patternSource.isEmpty ? "<compiled regex>" : $0.patternSource)" }.joined(separator: ", ")
+            onEcho("[\(kind)] removed \(removed.count): \(list)")
+        }
+    }
+
+    /// Shared listing for the bare `#trigger` / `#alias` REPL forms. Sorted by id ascending (stable,
+    /// == registration order) — the rules are STORED in ranksBefore (priority/specificity) order for
+    /// dispatch, but a by-id list is what reads as "sorted" when you're eyeballing what's registered.
+    private func listRules(_ rules: [Rule], label: String, kind: String) {
+        let sorted = rules.sorted { $0.id < $1.id }
+        onEcho("[\(label)] \(sorted.count) \(kind)\(sorted.count == 1 ? "" : "s") registered (by id):")
+        for r in sorted {
             var line = "  #\(r.id)  \(r.patternSource.isEmpty ? "<compiled regex>" : r.patternSource)"
             var tags: [String] = []
             if let c = r.ruleClass { tags.append("class: \(c)") }
