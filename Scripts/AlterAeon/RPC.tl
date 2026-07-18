@@ -406,11 +406,16 @@ handle_sky = function(_fi: {string:any}, m: {string:any}): boolean
   return false
 end
 
--- A chat-channel line (gossip/tell/etc). It arrives with AlterAeon ~-tilde color codes inline; parse
--- them to ANSI and just echo it as game content — suppress the debug echo so it isn't shown twice.
+-- A channel line (gossip/tell/etc AND the game's `[event]` broadcast channel — trivia, announcements). It
+-- arrives with AlterAeon ~-tilde color codes inline; parse them to ANSI and route it through the SERVER-TEXT
+-- pipeline (feed_server → processLine), NOT a bare echo(). echo() displays but SKIPS processLine, so no
+-- trigger/gag ever sees it — which is why the trivia auto-answerer (a `[event] trivia question:` trigger)
+-- went dead under RPC: the events were echoed, never trigger-processed. feed_server both fires triggers AND
+-- renders the surviving line (one print, no double). No trailing "\n": ServerTextFeed flushes a no-newline
+-- message via its own marker without emitting a blank line. Return true to suppress the debug echo.
 handle_channel_send = function(_fi: {string:any}, m: {string:any}): boolean
   if m and m.sent_message and #(m.sent_message as string) > 0 then
-    echo(tilde_to_ansi(m.sent_message as string))
+    feed_server(tilde_to_ansi(m.sent_message as string))
     return true
   end
   return false
@@ -736,6 +741,7 @@ end
 _RPC_TEST.crc32 = crc32
 _RPC_TEST.encode_line = encode_line
 _RPC_TEST.new_line_reader = new_line_reader
+_RPC_TEST.handle_channel_send = handle_channel_send
 _RPC_TEST.encode_frameinfo = encode_frameinfo
 _RPC_TEST.encode_block = encode_block
 _RPC_TEST.new_block_reader = new_block_reader

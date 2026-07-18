@@ -216,3 +216,19 @@ test("default_uuid falls back to the DFLT token when no config file is present",
   expect(type(uuid)):eq("string")
   expect(#uuid > 0):truthy()
 end)
+
+test("channel_send routes through feed_server (so triggers fire), NOT a bare echo — the trivia-under-RPC fix", function()
+  -- Regression: the `[event]` trivia channel arrives as channel_send_data. It used to be echo()'d, which
+  -- displays but SKIPS processLine, so trivia's `[event] trivia question:` trigger never fired. It must go
+  -- through feed_server (the server-text pipeline) so triggers/gags see it.
+  local fed, echoed = {}, {}
+  local s_feed, s_echo = feed_server, echo
+  feed_server = function(t) fed[#fed + 1] = t end
+  echo       = function(t) echoed[#echoed + 1] = t end
+  local ok = _RPC_TEST.handle_channel_send({}, { sent_message = "[event] trivia question: What ability?" })
+  feed_server, echo = s_feed, s_echo
+  expect(ok):eq(true)                                             -- handled → suppresses the debug echo
+  expect(#fed):eq(1)                                              -- went through the trigger pipeline…
+  expect(fed[1]:find("trivia question", 1, true) ~= nil):truthy()
+  expect(#echoed):eq(0)                                           -- …never a bare echo (which skips triggers)
+end)

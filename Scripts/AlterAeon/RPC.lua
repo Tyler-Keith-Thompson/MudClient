@@ -408,9 +408,14 @@ end
 
 
 
+
+
+
+
+
 handle_channel_send = function(_fi, m)
    if m and m.sent_message and #(m.sent_message) > 0 then
-      echo(tilde_to_ansi(m.sent_message))
+      feed_server(tilde_to_ansi(m.sent_message))
       return true
    end
    return false
@@ -736,6 +741,7 @@ end
 _RPC_TEST.crc32 = crc32
 _RPC_TEST.encode_line = encode_line
 _RPC_TEST.new_line_reader = new_line_reader
+_RPC_TEST.handle_channel_send = handle_channel_send
 _RPC_TEST.encode_frameinfo = encode_frameinfo
 _RPC_TEST.encode_block = encode_block
 _RPC_TEST.new_block_reader = new_block_reader
