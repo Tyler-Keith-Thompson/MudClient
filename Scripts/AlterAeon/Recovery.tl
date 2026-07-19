@@ -392,6 +392,7 @@ end_recovery = function(completed: boolean, reason: string)
   -- auto-`stand` / a fight / a move all bind the wound in-game). Just clear our per-recovery lifetap
   -- bookkeeping so the next recovery starts clean.
   state.lifetap_manafull, state.lifetap_retry_at, state.lifetap_send_at = false, nil, 0
+  state.lifetap_diag_at = nil                          -- reset the "not tapping" diagnostic throttle
   if reset_minion_heal then reset_minion_heal() end   -- stop any in-flight minion healing
   local s = recovery.settle
   recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
@@ -464,6 +465,8 @@ local LIFETAP_MIN_LEVEL = 21     -- necromancer level the lifetap skill unlocks 
 local LIFETAP_RETRY     = 5      -- seconds to back off after a transient "too weak" refusal before retrying
 local LIFETAP_COOLDOWN  = 15     -- seconds to settle after a bleed binds before opening another
 local LIFETAP_SEND_WAIT = 3      -- seconds to await the "begin tapping" confirm before re-issuing a tap
+local LIFETAP_MANAFULL_CLEAR = 0.80  -- mana fraction below which a stale "mana almost full" refusal is dropped
+                                     -- (well under the game's refuse point, so no tap→refuse→retap churn near it)
 
 -- The HP we refuse to bleed below. Round to nearest (not ceil): `100 * 0.55` is 55.0000…1 in double, and
 -- ceil would surprise a reader with 56. The buffer above half absorbs the sub-HP rounding.
@@ -495,11 +498,17 @@ end
 
 local function lifetap_mana_case(): boolean
   if not state.recover or state.fighting then return false end
+  local frac = (recovery and recovery.pct) or READY_PCT
+  -- Clear a STALE "mana almost full" suppression once mana has fallen CLEARLY away from full (you spent it):
+  -- the flag was set when the game refused a tap for a capped pool, but that refusal no longer holds. Keyed on
+  -- LIFETAP_MANAFULL_CLEAR (well below the refuse point) rather than the recovery target, so it can't churn
+  -- (tap→refuse→set→clear→tap) right at the boundary. Without this, ONE refusal disabled tapping for the rest
+  -- of the recovery even as mana drained to empty — it was only otherwise cleared at end_recovery.
+  if state.lifetap_manafull and pct(state.mana, state.maxmana) < LIFETAP_MANAFULL_CLEAR then state.lifetap_manafull = false end
   if state.lifetap_manafull then return false end                        -- game refused: mana already ~full
   if recovery and recovery.minions_only then return false end            -- minion-only recovery: never touch YOU
   if recovery and recovery.stat and recovery.stat ~= "mana" then return false end  -- `recover hp` must not bleed HP
   if not has_lifetap() then return false end
-  local frac = (recovery and recovery.pct) or READY_PCT
   if pct(state.mana, state.maxmana) >= frac then return false end         -- mana already at target → done
   if not lifetap_mana_low() then return false end                        -- mana's close; wait it out (regen is faster than HP)
   return N(state.hp or 0) > lifetap_floor_hp() - LIFETAP_MIN               -- in the tapping zone (with slack)
@@ -532,6 +541,40 @@ local function lifetap_amount(): number
   return N(state.hp or 0) - lifetap_floor_hp()
 end
 
+-- Diagnostic: when a tap would genuinely help (recovering, out of combat, mana below the target) but we're
+-- NOT starting one, name the gate that's blocking it — so "why isn't it tapping?" answers itself in-game
+-- instead of needing a log dive. Returns nil when nothing is blocking (we should be tapping) so the caller
+-- stays silent. The checks mirror lifetap_wanted's, most-common reason first.
+local LIFETAP_DIAG_EVERY = 10   -- seconds; throttle the skip explanation so it isn't spammy
+local function lifetap_skip_reason(): string
+  if recovery_depth(S(state.position)) >= 2 then return "asleep — the posture logic should wake you to rest" end
+  if not has_lifetap() then return "no lifetap skill (necromancer level < " .. tostring(LIFETAP_MIN_LEVEL) .. ")" end
+  if state.lifetap_manafull then return "the game said your mana is already almost full" end
+  if not lifetap_mana_low() then return "mana is close to full — waiting it out (regen beats tapping)" end
+  local hpf = pct(state.hp, state.maxhp)
+  if hpf <= LIFETAP_START then
+    return string.format("HP %d%% isn't above the %d%% start line yet — resting to build surplus first",
+      math.floor(hpf * 100 + 0.5), math.floor(LIFETAP_START * 100 + 0.5))
+  end
+  if (N(state.hp or 0) - lifetap_floor_hp()) < LIFETAP_MIN then return "the HP surplus above the floor is too small to bother" end
+  return nil                                                                   -- nothing blocking → should be tapping
+end
+
+-- Echo the skip reason, but only when a tap would ACTUALLY help (recovering, out of combat, not minion-only,
+-- mana below target) so this stays quiet during normal play — and throttled to once per LIFETAP_DIAG_EVERY.
+local function lifetap_diag(reason: string)
+  if not reason then return end
+  if not state.recover or state.fighting then return end
+  if recovery and recovery.minions_only then return end
+  if recovery and recovery.stat and recovery.stat ~= "mana" then return end
+  local frac = (recovery and recovery.pct) or READY_PCT
+  if pct(state.mana, state.maxmana) >= frac then return end                    -- mana already fine → not surprising
+  local now = os.time()
+  if state.lifetap_diag_at and (now - N(state.lifetap_diag_at)) < LIFETAP_DIAG_EVERY then return end
+  state.lifetap_diag_at = now
+  if echo then echo("\27[36m[recover]\27[0m not tapping — " .. reason) end
+end
+
 -- Run every prompt tick during recovery. START a bleed when one's worth doing; never stop one — the game
 -- ends it (it can't overuse). Two timing gates before starting: don't retry during the post-"too weak"
 -- cooldown, and don't re-issue until the last `lifetap` has been confirmed (or SEND_WAIT elapses) so a
@@ -539,7 +582,10 @@ end
 maybe_lifetap = function()
   if state.lifetapping then return end                                          -- already bleeding; let the game end it
   local now = os.time()
-  if state.lifetap_retry_at and now < N(state.lifetap_retry_at) then return end    -- settling after a bind / "too weak"
+  if state.lifetap_retry_at and now < N(state.lifetap_retry_at) then            -- settling after a bind / "too weak"
+    lifetap_diag(string.format("settling %ds after a bind or refusal", math.ceil(N(state.lifetap_retry_at) - now)))
+    return
+  end
   if (now - N(state.lifetap_send_at or 0)) < LIFETAP_SEND_WAIT then return end   -- awaiting the last tap's confirm
   local amt = lifetap_amount()
   if amt and amt > 0 then
@@ -548,6 +594,8 @@ maybe_lifetap = function()
     if echo then echo(string.format(
       "\27[36m[recover]\27[0m tapping %d hp into mana (keeping you above %d%% hp)",
       math.floor(amt), math.floor(LIFETAP_FLOOR * 100 + 0.5))) end
+  else
+    lifetap_diag(lifetap_skip_reason())                                          -- explain (throttled) a wanted-but-skipped tap
   end
 end
 
@@ -631,6 +679,11 @@ local SELF_CAST_MANA_MIN = 0.50   -- only trade mana for hp/stam when mana is at
 -- low, don't drain it further on minions; recover your own mana first and heal them once it climbs back.
 -- Lower than SELF_CAST_MANA_MIN because minion heals are more essential (skeletons have no natural regen).
 local MINION_HEAL_MANA_MIN = 0.30
+-- ...but `recover minions` is minion-ONLY: it deliberately never rests to recover YOUR mana, so the 0.30
+-- floor would leave it stuck doing nothing whenever your mana is low (it can't heal AND won't recover) —
+-- exactly when you asked it to spend mana on the minions. For that mode use a much lower floor: heal while
+-- you can afford a cast, and only stop near empty. (Full recovery keeps 0.30 — it rests your mana back up.)
+local MINION_ONLY_MANA_MIN = 0.10
 
 -- ticks_to_target(cur,max,rate,frac) — ticks of natural regen to reach frac*max. 0 if already there;
 -- nil when we have no positive rate (→ "unknown", never treated as slow-enough-to-cast). Forward-declared
@@ -1045,7 +1098,15 @@ try_cast_heal = function()
   -- Mana too low to spend on minions: don't drain it further (recover YOUR mana first). The skeletal minion
   -- stays hurt for now — recovery keeps resting, and once mana climbs back above the floor we heal it. We
   -- do NOT fall through to a self-cast: those need even MORE mana (SELF_CAST_MANA_MIN), so also no-op here.
-  if pct(state.mana, state.maxmana) < MINION_HEAL_MANA_MIN then return end
+  -- `recover minions` uses a much lower floor (it won't rest your mana back, so a high floor just stalls it)
+  -- and NARRATES the wait, so "why isn't it healing my minion?" is answered instead of silently doing nothing.
+  local mana_floor = (recovery and recovery.minions_only) and MINION_ONLY_MANA_MIN or MINION_HEAL_MANA_MIN
+  if pct(state.mana, state.maxmana) < mana_floor then
+    narrate("cast", "minion-mana-low", string.format(
+      "mana too low (%d%%) to heal your minions right now — letting it climb first",
+      math.floor(pct(state.mana, state.maxmana) * 100 + 0.5)))
+    return
+  end
   local word = next_untried_word(m.name)
   if not word then                          -- every keyword refused: give up on this minion, move on
     minion_heal.word_blocked[m.name] = true
@@ -1247,11 +1308,12 @@ end)
 if rx then
   local T = rx.fromTrigger
   local function on_reply(pat: string, kind: string) T(pat, nil):subscribe(function(_: {string}) minion_cast_settled(kind) end) end
-  on_reply([[^You repair the damage to .+'s body\.$]],                           "ok")   -- minion heal landed
+  on_reply([[^You repair the damage to .+'s body\.$]],                           "ok")   -- minion heal landed (living minion — you repair it)
+  on_reply([[^You ask .+ to repair .+\.$]],                                       "ok")   -- heal on an UNDEAD minion: your deity repairs it ("You ask Draak to repair …")
   on_reply([[^You feel less tired\.$]],                                          "ok")   -- refresh, self
   on_reply([[^You feel a little better\.$]],                                     "ok")   -- soothe, self
   on_reply([[^You will your injuries to heal and your soul to take courage\.$]], "ok")   -- bolster, self
-  on_reply([[^You fail to cast the spell '(soothe wounds|bolster|refresh)'\.$]], "fail") -- fizzle → retry
+  on_reply([[^You fail to cast the spell '(soothe wounds|bolster|heal|refresh)'\.$]], "fail") -- fizzle → retry
   on_reply([[^.+ doesn't need that much healing right now\.$]],                  "full") -- too full / wrong ordinal
   on_reply([[^If you really want to cast that on yourself, you must use your name\.$]],   "notgt")
   -- The game refuses a heal whose TARGET KEYWORD names nothing ("Sorry, 'man' isn't a valid target ..." —

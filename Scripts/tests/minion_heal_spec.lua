@@ -214,6 +214,28 @@ test("does NOT heal minions when YOUR mana is critically low — recover your ow
   end)
 end)
 
+test("recover minions heals a hurt skeletal lich at low mana (minion-only uses a lower floor)", function()
+  -- Regression (the "why won't it heal my fiery lich" report): a fiery/frost skeletal lich is skeletal, so
+  -- it needs spell-healing and is targeted by "lich". It went unhealed only because YOUR mana was at 19% —
+  -- below the 30% floor. That floor protects mana during FULL recovery (which rests it back), but `recover
+  -- minions` never rests your mana, so it must use a lower floor or it stalls doing nothing.
+  expect(AA.minion_needs_spell_heal("A fiery skeletal lich")):truthy()
+  expect(AA.minion_target_word("A fiery skeletal lich")):eq("lich")
+  local g = { me(), minion("A fiery skeletal lich", 159, 225) }   -- missing 66 → a heal
+  with_group(g, { mana = 19 }, function(sent)                      -- FULL recovery, 19% < 30% floor → waits
+    AA.try_cast_heal()
+    expect(#sent):eq(0)
+  end)
+  local rec = AA.recovery
+  local saved = rec.minions_only
+  rec.minions_only = true                                          -- `recover minions`: lower (0.10) floor
+  with_group(g, { mana = 19 }, function(sent)
+    AA.try_cast_heal()
+    expect(sent[1]):eq("c heal lich")                              -- now it heals (19% ≥ 10%)
+  end)
+  rec.minions_only = saved
+end)
+
 test("heals the MOST-hurt skeletal minion first", function()
   with_group({ me(), minion("A skeletal mage", 70, 79), minion("A skeletal spider", 5, 39) }, {}, function(sent)
     AA.try_cast_heal()

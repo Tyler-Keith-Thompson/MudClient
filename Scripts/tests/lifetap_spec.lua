@@ -103,8 +103,16 @@ test("never bleeds HP for a `recover hp`/`recover stamina`, or during a minion-o
   with({ minions_only = true }, function() expect(mana_case()):falsy() end)
 end)
 
-test("suppressed after the game says mana is already almost full", function()
-  with({ manafull = true }, function() expect(mana_case()):falsy() end)
+test("suppressed after 'mana already almost full' while mana is still near full", function()
+  -- mana 85% (below the 90% target, so the target gate doesn't mask it) but above the clear threshold:
+  -- the refusal still stands, so keep suppressing rather than re-tapping into another refusal.
+  with({ manafull = true, mana = 85, maxmana = 100 }, function() expect(mana_case()):falsy() end)
+end)
+
+test("the 'mana almost full' suppression clears once mana has clearly drained away", function()
+  -- The bug: one 'almost full' refusal used to disable tapping for the whole recovery even as mana emptied.
+  -- Once mana drops well below full (spent casting), the stale flag is dropped and tapping resumes.
+  with({ manafull = true, mana = 20, maxmana = 100 }, function() expect(mana_case()):truthy() end)
 end)
 
 -- ---- only tap when mana is LOW (regen-aware: mana refills faster than HP) -----------------------

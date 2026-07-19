@@ -392,6 +392,7 @@ end_recovery = function(completed, reason)
 
 
    state.lifetap_manafull, state.lifetap_retry_at, state.lifetap_send_at = false, nil, 0
+   state.lifetap_diag_at = nil
    if reset_minion_heal then reset_minion_heal() end
    local s = recovery.settle
    recovery.settle, recovery.pct, recovery.minions_only, recovery.stat = nil, READY_PCT, nil, nil
@@ -464,6 +465,8 @@ local LIFETAP_MIN_LEVEL = 21
 local LIFETAP_RETRY = 5
 local LIFETAP_COOLDOWN = 15
 local LIFETAP_SEND_WAIT = 3
+local LIFETAP_MANAFULL_CLEAR = 0.80
+
 
 
 
@@ -495,11 +498,17 @@ end
 
 local function lifetap_mana_case()
    if not state.recover or state.fighting then return false end
+   local frac = (recovery and recovery.pct) or READY_PCT
+
+
+
+
+
+   if state.lifetap_manafull and pct(state.mana, state.maxmana) < LIFETAP_MANAFULL_CLEAR then state.lifetap_manafull = false end
    if state.lifetap_manafull then return false end
    if recovery and recovery.minions_only then return false end
    if recovery and recovery.stat and recovery.stat ~= "mana" then return false end
    if not has_lifetap() then return false end
-   local frac = (recovery and recovery.pct) or READY_PCT
    if pct(state.mana, state.maxmana) >= frac then return false end
    if not lifetap_mana_low() then return false end
    return N(state.hp or 0) > lifetap_floor_hp() - LIFETAP_MIN
@@ -536,10 +545,47 @@ end
 
 
 
+local LIFETAP_DIAG_EVERY = 10
+local function lifetap_skip_reason()
+   if recovery_depth(S(state.position)) >= 2 then return "asleep — the posture logic should wake you to rest" end
+   if not has_lifetap() then return "no lifetap skill (necromancer level < " .. tostring(LIFETAP_MIN_LEVEL) .. ")" end
+   if state.lifetap_manafull then return "the game said your mana is already almost full" end
+   if not lifetap_mana_low() then return "mana is close to full — waiting it out (regen beats tapping)" end
+   local hpf = pct(state.hp, state.maxhp)
+   if hpf <= LIFETAP_START then
+      return string.format("HP %d%% isn't above the %d%% start line yet — resting to build surplus first",
+      math.floor(hpf * 100 + 0.5), math.floor(LIFETAP_START * 100 + 0.5))
+   end
+   if (N(state.hp or 0) - lifetap_floor_hp()) < LIFETAP_MIN then return "the HP surplus above the floor is too small to bother" end
+   return nil
+end
+
+
+
+local function lifetap_diag(reason)
+   if not reason then return end
+   if not state.recover or state.fighting then return end
+   if recovery and recovery.minions_only then return end
+   if recovery and recovery.stat and recovery.stat ~= "mana" then return end
+   local frac = (recovery and recovery.pct) or READY_PCT
+   if pct(state.mana, state.maxmana) >= frac then return end
+   local now = os.time()
+   if state.lifetap_diag_at and (now - N(state.lifetap_diag_at)) < LIFETAP_DIAG_EVERY then return end
+   state.lifetap_diag_at = now
+   if echo then echo("\27[36m[recover]\27[0m not tapping — " .. reason) end
+end
+
+
+
+
+
 maybe_lifetap = function()
    if state.lifetapping then return end
    local now = os.time()
-   if state.lifetap_retry_at and now < N(state.lifetap_retry_at) then return end
+   if state.lifetap_retry_at and now < N(state.lifetap_retry_at) then
+      lifetap_diag(string.format("settling %ds after a bind or refusal", math.ceil(N(state.lifetap_retry_at) - now)))
+      return
+   end
    if (now - N(state.lifetap_send_at or 0)) < LIFETAP_SEND_WAIT then return end
    local amt = lifetap_amount()
    if amt and amt > 0 then
@@ -548,6 +594,8 @@ maybe_lifetap = function()
       if echo then echo(string.format(
 "\27[36m[recover]\27[0m tapping %d hp into mana (keeping you above %d%% hp)",
 math.floor(amt), math.floor(LIFETAP_FLOOR * 100 + 0.5))) end
+   else
+      lifetap_diag(lifetap_skip_reason())
    end
 end
 
@@ -599,6 +647,8 @@ end
 
 
 
+
+
 local BOLSTER_MIN_MISSING = 25
 local HEAL_MIN_MISSING = 55
 local function heal_spell(cur, max)
@@ -619,6 +669,8 @@ end
 
 
 local REFRESH_COST = 15
+
+
 local HEAL_MANA = { soothe = 7, bolster = 14, heal = 28 }
 local function heal_cost(spell) return HEAL_MANA[spell] or 14 end
 local CAST_MIN_TICKS = 3
@@ -627,6 +679,11 @@ local SELF_CAST_MANA_MIN = 0.50
 
 
 local MINION_HEAL_MANA_MIN = 0.30
+
+
+
+
+local MINION_ONLY_MANA_MIN = 0.10
 
 
 
@@ -1041,7 +1098,15 @@ try_cast_heal = function()
 
 
 
-   if pct(state.mana, state.maxmana) < MINION_HEAL_MANA_MIN then return end
+
+
+   local mana_floor = (recovery and recovery.minions_only) and MINION_ONLY_MANA_MIN or MINION_HEAL_MANA_MIN
+   if pct(state.mana, state.maxmana) < mana_floor then
+      narrate("cast", "minion-mana-low", string.format(
+      "mana too low (%d%%) to heal your minions right now — letting it climb first",
+      math.floor(pct(state.mana, state.maxmana) * 100 + 0.5)))
+      return
+   end
    local word = next_untried_word(m.name)
    if not word then
       minion_heal.word_blocked[m.name] = true
@@ -1244,10 +1309,11 @@ if rx then
    local T = rx.fromTrigger
    local function on_reply(pat, kind) T(pat, nil):subscribe(function(_) minion_cast_settled(kind) end) end
    on_reply([[^You repair the damage to .+'s body\.$]], "ok")
+   on_reply([[^You ask .+ to repair .+\.$]], "ok")
    on_reply([[^You feel less tired\.$]], "ok")
    on_reply([[^You feel a little better\.$]], "ok")
    on_reply([[^You will your injuries to heal and your soul to take courage\.$]], "ok")
-   on_reply([[^You fail to cast the spell '(soothe wounds|bolster|refresh)'\.$]], "fail")
+   on_reply([[^You fail to cast the spell '(soothe wounds|bolster|heal|refresh)'\.$]], "fail")
    on_reply([[^.+ doesn't need that much healing right now\.$]], "full")
    on_reply([[^If you really want to cast that on yourself, you must use your name\.$]], "notgt")
 
