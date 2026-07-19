@@ -180,6 +180,10 @@ function __recovery_on_spellup(s) if spellupS then spellupS:onNext(s) end end
 function __recovery_on_spelldown(s) if spelldownS then spelldownS:onNext(s) end end
 
 function __recovery_cancel(reason)
+
+
+
+   if reason == "moved" and recovery and recovery.minions_only then return end
    end_recovery(false, reason)
 end
 

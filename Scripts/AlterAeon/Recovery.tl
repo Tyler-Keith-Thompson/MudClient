@@ -180,6 +180,10 @@ function __recovery_on_spellup(s: any)   if spellupS   then spellupS:onNext(s) e
 function __recovery_on_spelldown(s: any) if spelldownS then spelldownS:onNext(s) end end
 
 function __recovery_cancel(reason: string)       -- a move / a fight interrupts recovery (reject the promise)
+  -- `recover minions` follows YOU: your minions re-follow through a room change and still need healing, and
+  -- it never rests your own vitals — so a plain move must NOT abort it (it self-terminates once every minion
+  -- is topped off). A fight still cancels it (reason "combat started"); only the move is exempted.
+  if reason == "moved" and recovery and recovery.minions_only then return end
   end_recovery(false, reason)
 end
 

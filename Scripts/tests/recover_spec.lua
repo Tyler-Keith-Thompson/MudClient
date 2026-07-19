@@ -244,6 +244,20 @@ test("rvnum with a DIFFERENT room (a real move) ends recovery", function()
   end)
 end)
 
+test("a move does NOT end MINION-ONLY recovery (minions re-follow and still need healing)", function()
+  local rec = _AA_TEST.recovery
+  with_recovering_room(function(rej)
+    rec.minions_only = true
+    note_room(101, 5, 6, 7, 0)                 -- a real move
+    expect(state.recover):truthy()             -- minion-only recovery survives the move…
+    expect(rej()):eq(nil)                      -- …promise not rejected
+    __recovery_cancel("combat started")        -- …but a fight still cancels it
+    expect(state.recover):falsy()
+    expect(rej()):eq("combat started")
+  end)
+  rec.minions_only = nil
+end)
+
 test("rvnum with the same id but different COORDS also counts as a move", function()
   with_recovering_room(function(rej)
     note_room(100, 5, 6, 8, 0)                 -- z changed
