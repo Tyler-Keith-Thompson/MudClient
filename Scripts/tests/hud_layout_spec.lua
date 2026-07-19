@@ -35,10 +35,11 @@ test("group_member_row lays out a 26-wide name cell plus three vital bars, decod
   expect(name_span.text):eq("You")
   expect(name_span.fg):eq("brightwhite")
 
-  -- Your minion, currently absent (flag '-'): cyan name, dimmed, with a " ·away" suffix.
+  -- Your minion, currently absent (flag '-'): indented under its owner, cyan name, dimmed, " ·away" suffix.
   local pet = group_member_row({ flags = "M-", name = "a wolf",
     hp = 10, maxhp = 20, mana = 0, maxmana = 0, stam = 5, maxstam = 5 })
-  local pet_name = pet.cols[1].spans[1]
+  expect(pet.cols[1].spans[1].text):eq("  ↳ ")            -- minions are indented (nested under the player)
+  local pet_name = pet.cols[1].spans[2]
   expect(pet_name.text):eq("a wolf")
   expect(pet_name.fg):eq("cyan")
   expect(pet_name.dim):truthy()

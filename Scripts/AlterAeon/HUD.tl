@@ -497,10 +497,15 @@ local function group_member_row(m: GroupMember): Cell
   elseif tag:find("M", 1, true) then name_fg = "cyan"             -- your minion/pet
   elseif tag:find("?", 1, true) then name_fg = "yellow" end       -- some other mob
   local spans: {Cell} = {}
+  -- Indent minions (M = yours, O = someone else's) so they nest visually UNDER their owner in the roster
+  -- (group_ordered already lists each owner's minions right after them). Players (X/P) sit flush left. The
+  -- indent lives inside the fixed-width name cell, so the HP/MP/MV bar columns stay aligned across rows.
+  local is_minion = tag:find("M", 1, true) ~= nil or tag:find("O", 1, true) ~= nil
+  if is_minion then spans[#spans + 1] = { text = "  ↳ ", fg = "brightblack" } end
   if tag:find("L", 1, true) then spans[#spans + 1] = { text = "★", fg = "brightyellow" } end  -- leader
   if tag:find("T", 1, true) then spans[#spans + 1] = { text = "⛨", fg = "brightcyan" } end    -- tanking
   if tag:find("N", 1, true) then spans[#spans + 1] = { text = "∅", fg = "brightblack" } end    -- no-melee
-  if #spans > 0 then spans[#spans + 1] = { text = " " } end
+  if #spans > 0 and not is_minion then spans[#spans + 1] = { text = " " } end
   spans[#spans + 1] = { text = m.name, fg = name_fg, dim = absent }
   if absent then spans[#spans + 1] = { text = " ·away", fg = "brightblack" } end
   return { cols = {

@@ -497,10 +497,15 @@ local function group_member_row(m)
    elseif tag:find("M", 1, true) then name_fg = "cyan"
    elseif tag:find("?", 1, true) then name_fg = "yellow" end
    local spans = {}
+
+
+
+   local is_minion = tag:find("M", 1, true) ~= nil or tag:find("O", 1, true) ~= nil
+   if is_minion then spans[#spans + 1] = { text = "  ↳ ", fg = "brightblack" } end
    if tag:find("L", 1, true) then spans[#spans + 1] = { text = "★", fg = "brightyellow" } end
    if tag:find("T", 1, true) then spans[#spans + 1] = { text = "⛨", fg = "brightcyan" } end
    if tag:find("N", 1, true) then spans[#spans + 1] = { text = "∅", fg = "brightblack" } end
-   if #spans > 0 then spans[#spans + 1] = { text = " " } end
+   if #spans > 0 and not is_minion then spans[#spans + 1] = { text = " " } end
    spans[#spans + 1] = { text = m.name, fg = name_fg, dim = absent }
    if absent then spans[#spans + 1] = { text = " ·away", fg = "brightblack" } end
    return { cols = {
