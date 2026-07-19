@@ -1017,10 +1017,15 @@ end
 
 
 
+
+
+
+
+
 local function next_untried_word(name)
    local tried = minion_heal.tried[name]
    for _, w in ipairs(minion_target_words(name)) do
-      if not (tried and tried[w]) then return w end
+      if not (tried and tried[w]) and not minion_heal.blocked[w] then return w end
    end
    return nil
 end
@@ -1220,7 +1225,12 @@ advance_after_reply = function(kind)
       minion_heal.sweep[last.word] = ((last.ord or 1) % last.K) + 1
    end
    minion_heal.refuse_streak = minion_heal.refuse_streak + 1
-   if last and minion_heal.refuse_streak > (last.K or 1) + MINION_REFUSE_CAP then
+
+
+
+
+   local cap = (last and (last.K or 1) > 0) and ((last.K or 1) + MINION_REFUSE_CAP) or 0
+   if last and minion_heal.refuse_streak > cap then
 
 
       if last.word then

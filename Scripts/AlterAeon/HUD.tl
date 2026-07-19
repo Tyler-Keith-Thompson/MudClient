@@ -22,6 +22,8 @@ state = state or {}
 -- Test seam (see Scripts/tests/hud_spec.lua). Published by HUD.lua only, not yet in mud.d.tl — declared
 -- here (see the migration report).
 global _HUD_TEST: {string:any}
+-- Public control table (`#help(hud)`): runtime knobs for the HUD panels — the scroll-view cap + scrolling.
+global hud: {string:any}
 
 -- ---- shared row/column/span shape (genuinely heterogeneous — see the header comment above; the
 -- ultimate destination, panel.render/panel.top, is typed `any`, so one loose record covers a span, a
@@ -547,6 +549,45 @@ local function group_ordered(g: {GroupMember}): {GroupMember}
   return out
 end
 
+-- ── Generic scroll container ───────────────────────────────────────────────────────────────────────
+-- Clip a list of widget rows to at most `max` visible lines, tracking the scroll offset in
+-- state.hud_scroll[name] so different widget groups scroll independently. When the content overflows,
+-- ONE line is spent on a compact indicator (↑ hidden-above / ↓ hidden-below); the offset is clamped here
+-- (and written back) so a caller can scroll blindly and the view self-corrects. `max <= 0` (or content
+-- that already fits) → returned untouched, no indicator. Pure enough to unit-test (only touches state).
+local function scrollview(rows: {Cell}, name: string, max: integer): {Cell}
+  local n = #rows
+  if not max or max <= 0 or n <= max then return rows end
+  local scroll = (state.hud_scroll as {string:integer}) or {}
+  local visible = math.max(1, max - 1)                    -- reserve one line for the indicator
+  local maxoff = n - visible
+  local off = math.max(0, math.min(scroll[name] or 0, maxoff))
+  scroll[name] = off; state.hud_scroll = scroll           -- persist the clamped offset
+  local out: {Cell} = {}
+  for i = off + 1, off + visible do out[#out + 1] = rows[i] end
+  local above, below = off, maxoff - off
+  local ind = "  "
+  if above > 0 then ind = ind .. "↑" .. tostring(above) .. "   " end
+  if below > 0 then ind = ind .. "↓" .. tostring(below) end
+  out[#out + 1] = { text = ind, fg = "cyan", dim = true }
+  return out
+end
+
+-- Group-roster height cap (lines) before it scrolls; overridable at runtime via hud.group_max(n), stored on
+-- state (survives #reload). 0 = unlimited (never scroll). Default keeps a tall party from eating the panel.
+local HUD_GROUP_MAX_DEFAULT = 12
+local function group_max(): integer
+  local n = state.hud_group_max as integer
+  if n == nil then return HUD_GROUP_MAX_DEFAULT end
+  return n
+end
+
+-- Set every render so on_mouse can route a wheel-over-the-group to a group scroll: the group block sits at
+-- the TOP of the top panel (screen rows 1..group_view_rows), and we only claim the wheel when it's actually
+-- scroll-clipped (otherwise the wheel falls through to the normal output scrollback).
+local group_view_rows = 0
+local group_scrollable = false
+
 -- Split the raw `;smap;` grid text (rows separated by \r\n or \n) into an array of row strings,
 -- dropping any trailing blank rows the split/trailing-newline can produce.
 local function dclient_map_rows(raw: string): {string}
@@ -791,9 +832,17 @@ end
 update_top = function()
   local left: {Cell} = {}
   local g = (state.group as {GroupMember}) or {}
+  local group_block_rows = 0                              -- header + the (possibly scroll-clipped) member rows
+  group_view_rows, group_scrollable = 0, false
   if #g >= 2 then   -- show the roster only when you actually have pets/groupmates
     left[#left + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
-    for _, m in ipairs(group_ordered(g)) do left[#left + 1] = group_member_row(m) end   -- each owner + their minions
+    local members: {Cell} = {}
+    for _, m in ipairs(group_ordered(g)) do members[#members + 1] = group_member_row(m) end   -- each owner + their minions
+    local shown = scrollview(members, "group", group_max())   -- cap the height; scroll the rest
+    for _, r in ipairs(shown) do left[#left + 1] = r end
+    group_block_rows = 1 + #shown
+    group_view_rows = group_block_rows                        -- screen rows 1..this are the group (top of the panel)
+    group_scrollable = group_max() > 0 and #members > group_max()
   end
   if in_fight() then   -- the stats line is busy with the target, so the exits rose lives up here
     left[#left + 1] = { cols = { { text = "" }, compass(1) } }
@@ -830,7 +879,7 @@ update_top = function()
   -- land on the reference rows below, where the wider width is fine. (No widgets → no padding, so a
   -- widget-less panel stays plain and the group rows fall back to the mw `blank` below.)
   if #prows > 0 or #lrows > 0 then
-    local group_rows = (#g >= 2) and (1 + #g) or 0   -- header + one row per member
+    local group_rows = group_block_rows                  -- header + the actually-rendered (scroll-clipped) member rows
     while #right < group_rows do right[#right + 1] = { text = "", width = mw } end
     if #right > 0 then right[#right + 1] = { text = "", width = ww } end   -- gap under the map
     -- Zip lag (left) + promises (right) row-for-row into one band of width ww, blank-filling the shorter
@@ -870,4 +919,49 @@ _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next
               truncate_middle = truncate_middle, lag_rows = lag_rows,
               minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph = map_glyph,
               dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section,
-              group_ordered = group_ordered }
+              group_ordered = group_ordered, scrollview = scrollview, group_max = group_max }
+
+-- ── hud control table: the scroll-view knobs (a member of PUBLIC_TABLES → its members are doc-enforced) ──
+hud = hud or {}
+-- hud.group_max([n]) — cap the group roster at n lines before it scrolls (0 = unlimited). No arg → current.
+hud.group_max = function(n: integer): integer
+  if n ~= nil then
+    state.hud_group_max = math.max(0, math.floor(n))
+    if on_update then on_update() end                    -- repaint with the new cap
+  end
+  return group_max()
+end
+-- hud.group_scroll(delta) — move the group roster's scroll window by `delta` rows (bound to PageUp/PageDown).
+-- The render clamps + writes back the offset, so overscrolling is harmless.
+hud.group_scroll = function(delta: integer)
+  local s = (state.hud_scroll as {string:integer}) or {}
+  s.group = math.max(0, (s.group or 0) + (delta or 0))
+  state.hud_scroll = s
+  if on_update then on_update() end
+end
+
+if doc then
+  doc(hud.group_max, { name = "hud.group_max", sig = "hud.group_max([n]) -> int", group = "panel",
+    text = "Max lines the group roster shows before it scrolls (0 = unlimited). No arg returns the current cap.",
+    example = "hud.group_max(8)" })
+  doc(hud.group_scroll, { name = "hud.group_scroll", sig = "hud.group_scroll(delta)", group = "panel",
+    text = "Scroll the group roster by `delta` rows when it's taller than its cap. Bound to PageUp/PageDown.",
+    example = "hud.group_scroll(1)" })
+end
+
+-- Mouse-wheel scrolling of the group roster: when the wheel turns over the group block (top of the top
+-- panel) AND it's scroll-clipped, scroll it and CONSUME the event; otherwise return false so the wheel does
+-- its normal job (the output scrollback). This is why the wheel is offered to on_mouse in TerminalService.
+function on_mouse(event: string, _x: integer, y: integer, _button: integer): boolean
+  if (event == "wheelup" or event == "wheeldown") and group_scrollable and y >= 1 and y <= group_view_rows then
+    hud.group_scroll(event == "wheelup" and -1 or 1)
+    return true
+  end
+  return false
+end
+
+-- Keyboard fallback for the same scroll (rebind/unbind freely). The wheel above is the primary control.
+if bind then
+  bind("pageup",   function() hud.group_scroll(-1) end)
+  bind("pagedown", function() hud.group_scroll(1) end)
+end

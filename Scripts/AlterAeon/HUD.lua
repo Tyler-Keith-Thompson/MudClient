@@ -44,6 +44,8 @@ state = state or {}
 
 
 
+
+
 local update_top
 local update_bottom
 
@@ -549,6 +551,45 @@ end
 
 
 
+
+
+
+
+local function scrollview(rows, name, max)
+   local n = #rows
+   if not max or max <= 0 or n <= max then return rows end
+   local scroll = (state.hud_scroll) or {}
+   local visible = math.max(1, max - 1)
+   local maxoff = n - visible
+   local off = math.max(0, math.min(scroll[name] or 0, maxoff))
+   scroll[name] = off; state.hud_scroll = scroll
+   local out = {}
+   for i = off + 1, off + visible do out[#out + 1] = rows[i] end
+   local above, below = off, maxoff - off
+   local ind = "  "
+   if above > 0 then ind = ind .. "↑" .. tostring(above) .. "   " end
+   if below > 0 then ind = ind .. "↓" .. tostring(below) end
+   out[#out + 1] = { text = ind, fg = "cyan", dim = true }
+   return out
+end
+
+
+
+local HUD_GROUP_MAX_DEFAULT = 12
+local function group_max()
+   local n = state.hud_group_max
+   if n == nil then return HUD_GROUP_MAX_DEFAULT end
+   return n
+end
+
+
+
+
+local group_view_rows = 0
+local group_scrollable = false
+
+
+
 local function dclient_map_rows(raw)
    local rows = {}
    for line in (raw .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = (line:gsub("\r$", "")) end
@@ -791,9 +832,17 @@ end
 update_top = function()
    local left = {}
    local g = (state.group) or {}
+   local group_block_rows = 0
+   group_view_rows, group_scrollable = 0, false
    if #g >= 2 then
       left[#left + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
-      for _, m in ipairs(group_ordered(g)) do left[#left + 1] = group_member_row(m) end
+      local members = {}
+      for _, m in ipairs(group_ordered(g)) do members[#members + 1] = group_member_row(m) end
+      local shown = scrollview(members, "group", group_max())
+      for _, r in ipairs(shown) do left[#left + 1] = r end
+      group_block_rows = 1 + #shown
+      group_view_rows = group_block_rows
+      group_scrollable = group_max() > 0 and #members > group_max()
    end
    if in_fight() then
       left[#left + 1] = { cols = { { text = "" }, compass(1) } }
@@ -830,7 +879,7 @@ update_top = function()
 
 
    if #prows > 0 or #lrows > 0 then
-      local group_rows = (#g >= 2) and (1 + #g) or 0
+      local group_rows = group_block_rows
       while #right < group_rows do right[#right + 1] = { text = "", width = mw } end
       if #right > 0 then right[#right + 1] = { text = "", width = ww } end
 
@@ -870,4 +919,49 @@ target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
 truncate_middle = truncate_middle, lag_rows = lag_rows,
 minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph = map_glyph,
 dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section,
-group_ordered = group_ordered, }
+group_ordered = group_ordered, scrollview = scrollview, group_max = group_max, }
+
+
+hud = hud or {}
+
+hud.group_max = function(n)
+   if n ~= nil then
+      state.hud_group_max = math.max(0, math.floor(n))
+      if on_update then on_update() end
+   end
+   return group_max()
+end
+
+
+hud.group_scroll = function(delta)
+   local s = (state.hud_scroll) or {}
+   s.group = math.max(0, (s.group or 0) + (delta or 0))
+   state.hud_scroll = s
+   if on_update then on_update() end
+end
+
+if doc then
+   doc(hud.group_max, { name = "hud.group_max", sig = "hud.group_max([n]) -> int", group = "panel",
+text = "Max lines the group roster shows before it scrolls (0 = unlimited). No arg returns the current cap.",
+example = "hud.group_max(8)", })
+   doc(hud.group_scroll, { name = "hud.group_scroll", sig = "hud.group_scroll(delta)", group = "panel",
+text = "Scroll the group roster by `delta` rows when it's taller than its cap. Bound to PageUp/PageDown.",
+example = "hud.group_scroll(1)", })
+end
+
+
+
+
+function on_mouse(event, _x, y, _button)
+   if (event == "wheelup" or event == "wheeldown") and group_scrollable and y >= 1 and y <= group_view_rows then
+      hud.group_scroll(event == "wheelup" and -1 or 1)
+      return true
+   end
+   return false
+end
+
+
+if bind then
+   bind("pageup", function() hud.group_scroll(-1) end)
+   bind("pagedown", function() hud.group_scroll(1) end)
+end

@@ -1278,11 +1278,12 @@ final class TerminalService {
     /// A partial mouse report held between reads (`ESC[<…` with no terminator yet).
     private var mousePartial = ""
 
-    /// Act on one SGR mouse report. The wheel keeps its existing behaviour (drives in-app scrollback,
-    /// never routed through Lua); modifier bits (shift/meta/ctrl) are masked off so a modified wheel
-    /// still scrolls. Clicks/drags are offered to the script's optional `on_mouse(event, x, y, button)`
-    /// — if it returns true the event is consumed, otherwise we fall through to today's behaviour
-    /// (which is to swallow it).
+    /// Act on one SGR mouse report. A wheel notch is FIRST offered to the script's `on_mouse` (as
+    /// "wheelup"/"wheeldown" with the pointer's row/col) so a panel under the pointer can scroll ITSELF
+    /// (e.g. the HUD group roster); only if the script doesn't consume it does the wheel fall through to
+    /// its default of driving the in-app output scrollback. Modifier bits (shift/meta/ctrl) are masked off
+    /// so a modified wheel still works. Clicks/drags are offered to `on_mouse(event, x, y, button)` too —
+    /// consumed on a truthy return, otherwise swallowed.
     private func handleMouse(_ body: String, press: Bool) {
         let fields = body.split(separator: ";").map { Int($0) ?? 0 }
         guard fields.count >= 3 else { return }
@@ -1290,9 +1291,11 @@ final class TerminalService {
         let x = fields[1], y = fields[2]
         switch stripped {
         case 64:
-            if press { adjustScroll(by: wheelStep) }          // wheel up → older history
+            guard press else { return }
+            if !engine.notifyMouse(event: "wheelup", x: x, y: y, button: 0) { adjustScroll(by: wheelStep) }
         case 65:
-            if press { adjustScroll(by: -wheelStep) }         // wheel down → toward the live tail
+            guard press else { return }
+            if !engine.notifyMouse(event: "wheeldown", x: x, y: y, button: 0) { adjustScroll(by: -wheelStep) }
         default:
             // A button click/drag/release. Low two bits: 0=left, 1=middle, 2=right (3 = no-button/move).
             let button = stripped & 0b11

@@ -383,3 +383,74 @@ test("group_ordered nests each owner's minions under them (you first, then other
     "Vaelith | A fiery skeletal lich | A mummy | Latoya | A clay man")
   state = saved
 end)
+
+test("scrollview caps rows and shows a hidden-count indicator, clamping the offset", function()
+  local sv = _HUD_TEST.scrollview
+  local rows = {}
+  for i = 1, 10 do rows[i] = { text = "r" .. i } end
+  local saved = state
+  state = { hud_scroll = {} }
+
+  -- Fits within the cap → returned untouched, no indicator.
+  expect(#sv(rows, "g", 20)):eq(10)
+  -- max <= 0 → unlimited (no clipping).
+  expect(#sv(rows, "g", 0)):eq(10)
+
+  -- Cap of 4 → 3 visible rows + 1 indicator; at offset 0 nothing is above, 7 are below.
+  local out = sv(rows, "g", 4)
+  expect(#out):eq(4)
+  expect(out[1].text):eq("r1")
+  expect(out[3].text):eq("r3")
+  expect(out[4].text:find("↓7", 1, true) ~= nil):truthy()   -- 7 rows hidden below
+  expect(out[4].text:find("↑", 1, true)):eq(nil)            -- nothing hidden above yet
+
+  -- Scroll down 2 → window r3..r5, with 2 above and 5 below.
+  state.hud_scroll.g = 2
+  out = sv(rows, "g", 4)
+  expect(out[1].text):eq("r3")
+  expect(out[4].text:find("↑2", 1, true) ~= nil):truthy()
+  expect(out[4].text:find("↓5", 1, true) ~= nil):truthy()
+
+  -- Overscroll is clamped to the last full window (offset 7 → r8..r10) and written back.
+  state.hud_scroll.g = 99
+  out = sv(rows, "g", 4)
+  expect(out[1].text):eq("r8")
+  expect(out[3].text):eq("r10")
+  expect(state.hud_scroll.g):eq(7)                          -- clamped value persisted
+  state = saved
+end)
+
+test("hud.group_max sets/reads the cap and clamps to >= 0", function()
+  local saved = state
+  state = { hp = nil }                                      -- on_update no-ops without hp; fine for the setter
+  expect(hud.group_max()):eq(_HUD_TEST.group_max())        -- reader agrees with the internal default
+  hud.group_max(8)
+  expect(state.hud_group_max):eq(8)
+  expect(hud.group_max()):eq(8)
+  hud.group_max(-5)
+  expect(state.hud_group_max):eq(0)                         -- clamped to unlimited, never negative
+  state = saved
+end)
+
+test("on_mouse: a wheel over a scrollable group scrolls it and consumes; elsewhere it falls through", function()
+  local saved = state
+  local function mk(name, flags) return { name = name, flags = flags,
+    hp = 1, maxhp = 1, mana = 0, maxmana = 0, stam = 0, maxstam = 0 } end
+  state = { hp = 10, maxhp = 10, mana = 5, maxmana = 5, stam = 5, maxstam = 5,
+            hud_group_max = 3, hud_scroll = {}, name = "Me",
+            group = { mk("Me", "X"), mk("A skeletal mage", "M"), mk("A mummy", "M"),
+                      mk("A wolf", "M"), mk("A bear", "M") } }   -- 5 members, cap 3 → scrollable
+  capture_update()                                    -- runs update_top → sets the group's screen extent
+  local saved_upd = on_update
+  on_update = function() end                          -- neutralize the repaint hud.group_scroll triggers
+
+  expect(on_mouse("wheeldown", 2, 2, 0)):truthy()     -- wheel over the group block → consumed
+  expect(state.hud_scroll.group):eq(1)                -- and scrolled down one row
+  expect(on_mouse("wheelup", 2, 2, 0)):truthy()
+  expect(state.hud_scroll.group):eq(0)                -- back to the top (never negative)
+  expect(on_mouse("wheeldown", 2, 50, 0)):eq(false)   -- below the group → NOT consumed (output scrollback)
+  expect(on_mouse("press", 2, 2, 1)):eq(false)        -- a click is not this handler's business
+
+  on_update = saved_upd
+  state = saved
+end)

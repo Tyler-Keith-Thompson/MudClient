@@ -490,3 +490,39 @@ test("minion-only recovery completes when no skeletal minion still needs a cast"
   expect(now):truthy()
   expect(resolved):truthy()
 end)
+
+test("next_untried_word skips a BLOCKED shared word so the sweep reaches the distinctive one", function()
+  -- The "spammed heals on the full knight instead of the hurt lich" bug: "skeletal" matches every skeletal
+  -- minion, so a bare cast lands on the first (full) one and is refused; once blocked, the sweep must move ON
+  -- to the lich's distinctive word ("fiery"), not hand back "skeletal" forever.
+  local nuw, mh = AA.next_untried_word, AA.minion_heal
+  mh.tried, mh.blocked = {}, {}
+  local name = "A fiery skeletal lich"            -- candidate order: lich, skeletal, fiery
+  expect(nuw(name)):eq("lich")
+  mh.tried[name] = { lich = true }                 -- game rejected "1.lich" → that word is tried
+  expect(nuw(name)):eq("skeletal")
+  mh.blocked["skeletal"] = true                    -- refused too often (kept hitting the full knight) → blocked
+  expect(nuw(name)):eq("fiery")                     -- NOW advances to the word that actually targets the lich
+  mh.blocked["fiery"] = true                        -- (belt & suspenders) everything blocked → nil, minion skipped
+  mh.tried[name] = { lich = true, skeletal = true, fiery = true }
+  expect(nuw(name)):eq(nil)
+  mh.tried, mh.blocked = {}, {}
+end)
+
+test("sweep drops a mis-targeting shared word after ONE refuse and reaches the lich's distinctive word", function()
+  -- Live-bug repro: 'lich' momentarily invalid (blindness), then bare 'skeletal' keeps landing on the FULL
+  -- spear knight ("doesn't need that much healing"). The driver must block 'skeletal' on the FIRST refuse
+  -- (it matches none of our counted minions) and jump to 'fiery', not re-cast 'skeletal' in a loop.
+  with_group({ me(), minion("A spear wielding skeletal knight", 270, 270),   -- FULL — never needs healing
+                     minion("A fiery skeletal lich", 100, 225) }, {}, function(sent)
+    AA.try_cast_heal()                                       -- most-hurt = the lich → first word 'lich'
+    expect(sent[#sent]:match("(%S+)$")):eq("lich")
+    AA.minion_target_invalid("lich")                         -- game rejects the lich target → next word
+    expect(sent[#sent]:match("(%S+)$")):eq("skeletal")       -- shared descriptor, cast bare (K==0)
+    AA.minion_cast_settled("full")                           -- it hit the full knight → "doesn't need healing"
+    expect(sent[#sent]:match("(%S+)$")):eq("fiery")          -- jumped to the distinctive word (no loop)
+    local skeletal_casts = 0
+    for _, c in ipairs(sent) do if c:match("skeletal$") then skeletal_casts = skeletal_casts + 1 end end
+    expect(skeletal_casts):eq(1)                             -- 'skeletal' was cast exactly ONCE, then dropped
+  end)
+end)

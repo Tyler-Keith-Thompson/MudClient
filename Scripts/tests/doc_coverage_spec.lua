@@ -46,7 +46,7 @@ end)
 
 -- Public script/host API tables: every function member must be documented (by function value, since
 -- members are doc()'d as "tbl.member"). `__`-prefixed keys are internal.
-local PUBLIC_TABLES = { "panel", "music", "eq", "pilot", "kxwt", "trivia", "voice", "autofight", "dclient_rpc" }
+local PUBLIC_TABLES = { "panel", "music", "eq", "pilot", "kxwt", "trivia", "voice", "autofight", "dclient_rpc", "hud" }
 
 test("every public-table API member is documented", function()
   local missing = {}

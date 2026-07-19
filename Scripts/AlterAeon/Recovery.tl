@@ -1016,11 +1016,16 @@ reset_minion_heal = function()
 end
 
 -- The next candidate keyword for `name` we haven't already had the game refuse this recovery (nil once
--- every keyword has been tried — the minion then gets word_blocked and skipped).
+-- every keyword has been tried — the minion then gets word_blocked and skipped). Also skips words in the
+-- global `blocked` set: a SHARED descriptor like "skeletal" (matches every skeletal minion, so a bare cast
+-- always lands on the first — often full — one and is refused) gets blocked after its refuse cap; without
+-- skipping it here the sweep would hand back "skeletal" forever and never reach the minion's DISTINCTIVE
+-- word ("fiery"/"frost"/…) that actually targets it. This is the fix for the "spammed heals on the full
+-- knight instead of the hurt lich" loop.
 local function next_untried_word(name: string): string
   local tried = minion_heal.tried[name]
   for _, w in ipairs(minion_target_words(name)) do
-    if not (tried and tried[w]) then return w end
+    if not (tried and tried[w]) and not minion_heal.blocked[w] then return w end
   end
   return nil
 end
@@ -1220,7 +1225,12 @@ advance_after_reply = function(kind: string)
     minion_heal.sweep[last.word] = ((last.ord or 1) % last.K) + 1
   end
   minion_heal.refuse_streak = minion_heal.refuse_streak + 1
-  if last and minion_heal.refuse_streak > (last.K or 1) + MINION_REFUSE_CAP then
+  -- Give-up cap. A word that matches MULTIPLE minions (K>1) needs its whole ordinal ring swept (plus slack)
+  -- before we quit. But a word matching NONE of our counted minions (K==0 — a shared descriptor like
+  -- "skeletal" that resolved to some other, full minion) is wrong on the FIRST refuse: block it at once so
+  -- the sweep jumps straight to the minion's distinctive word instead of re-casting the ambiguous one.
+  local cap = (last and (last.K or 1) > 0) and ((last.K or 1) + MINION_REFUSE_CAP) or 0
+  if last and minion_heal.refuse_streak > cap then
     -- Swept every ordinal and still can't land a heal (roster says hurt but every cast refuses) —
     -- give up on this keyword for the rest of this recovery so we don't loop forever.
     if last.word then
