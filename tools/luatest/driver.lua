@@ -94,6 +94,7 @@ end
 for _, f in ipairs({ "Scripts/AlterAeon/AIPilot.lua", "Scripts/AlterAeon/AlterAeon.lua", "Scripts/AlterAeon/Audio.lua",
                      "Scripts/AlterAeon/AutoFight.lua", "Scripts/AlterAeon/BookDump.lua", "Scripts/AlterAeon/ChatDecode.lua",
                      "Scripts/AlterAeon/Combat.lua", "Scripts/AlterAeon/Corpse.lua", "Scripts/AlterAeon/DCast.lua",
+                     "Scripts/AlterAeon/DClientProbe.lua",
                      "Scripts/AlterAeon/Equipment.lua", "Scripts/AlterAeon/HUD.lua", "Scripts/Foundation/Promise.lua",
                      "Scripts/AlterAeon/Prompt.lua", "Scripts/AlterAeon/Recovery.lua", "Scripts/AlterAeon/RPC.lua",
                      "Scripts/AlterAeon/Soulforge.lua", "Scripts/AlterAeon/Speech.lua", "Scripts/AlterAeon/Trivia.lua" }) do

@@ -214,6 +214,22 @@ test("does NOT heal minions when YOUR mana is critically low — recover your ow
   end)
 end)
 
+test("recover heals only YOUR minions (M) — never another player's skeletal minion (O)", function()
+  -- The roster now carries the whole group, so eligibility must gate on ownership: an O-flagged skeletal
+  -- minion belongs to a groupmate and must be left alone, even though it's skeletal (would otherwise heal).
+  local theirs = { name = "A skeletal spider", hp = 20, maxhp = 79,
+                   mana = 0, maxmana = 0, stam = 0, maxstam = 0, flags = "O" }   -- a groupmate's, worse-hurt
+  local mine   = minion("A skeletal mage", 40, 79)                              -- yours (flags = "M")
+  with_group({ me(), theirs }, {}, function(sent)
+    AA.try_cast_heal()
+    expect(#sent):eq(0)                                    -- their minion is never targeted
+  end)
+  with_group({ me(), theirs, mine }, {}, function(sent)
+    AA.try_cast_heal()
+    expect(sent[1]):eq("c bolster mage")                   -- only YOUR minion is healed (not the worse-hurt O)
+  end)
+end)
+
 test("recover minions heals a hurt skeletal lich at low mana (minion-only uses a lower floor)", function()
   -- Regression (the "why won't it heal my fiery lich" report): a fiery/frost skeletal lich is skeletal, so
   -- it needs spell-healing and is targeted by "lich". It went unhealed only because YOUR mana was at 19% —

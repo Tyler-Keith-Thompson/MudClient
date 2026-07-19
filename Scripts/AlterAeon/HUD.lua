@@ -513,6 +513,37 @@ end
 
 
 
+
+
+
+
+
+
+local function group_ordered(g)
+   local self_row
+   local mine = {}
+   local others = {}
+   local cur = nil
+   for _, m in ipairs(g) do
+      local f = m.flags or ""
+      if f:find("X", 1, true) or (state.name and m.name == state.name) then self_row = m
+      elseif f:find("P", 1, true) then cur = { member = m, pets = {} }; others[#others + 1] = cur
+      elseif f:find("O", 1, true) then
+         if cur then cur.pets[#cur.pets + 1] = m else mine[#mine + 1] = m end
+      else mine[#mine + 1] = m end
+   end
+   local out = {}
+   if self_row then out[#out + 1] = self_row end
+   for _, m in ipairs(mine) do out[#out + 1] = m end
+   for _, o in ipairs(others) do
+      out[#out + 1] = o.member
+      for _, p in ipairs(o.pets) do out[#out + 1] = p end
+   end
+   return out
+end
+
+
+
 local function dclient_map_rows(raw)
    local rows = {}
    for line in (raw .. "\n"):gmatch("([^\n]*)\n") do rows[#rows + 1] = (line:gsub("\r$", "")) end
@@ -757,7 +788,7 @@ update_top = function()
    local g = (state.group) or {}
    if #g >= 2 then
       left[#left + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
-      for _, m in ipairs(g) do left[#left + 1] = group_member_row(m) end
+      for _, m in ipairs(group_ordered(g)) do left[#left + 1] = group_member_row(m) end
    end
    if in_fight() then
       left[#left + 1] = { cols = { { text = "" }, compass(1) } }
@@ -833,4 +864,5 @@ append_col = append_col, opponent_bars = opponent_bars,
 target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
 truncate_middle = truncate_middle, lag_rows = lag_rows,
 minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph = map_glyph,
-dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section, }
+dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section,
+group_ordered = group_ordered, }

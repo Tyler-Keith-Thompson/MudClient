@@ -364,3 +364,22 @@ test("minimap_cells_from_dclient returns nil when there is no terrain section", 
   expect(minimap_cells_from_dclient("")):eq(nil)
   expect(minimap_cells_from_dclient("@@@\r\nABC")):eq(nil)   -- too few rows to be a grid
 end)
+
+test("group_ordered nests each owner's minions under them (you first, then other players)", function()
+  local saved = state
+  state = { name = "Vaelith" }
+  -- Wire order arrives owner-agnostic: a player can precede minions that aren't theirs.
+  local out = _HUD_TEST.group_ordered({
+    { name = "Vaelith", flags = "X" },
+    { name = "Latoya", flags = "P" },
+    { name = "A clay man", flags = "O" },                -- Latoya's pet
+    { name = "A fiery skeletal lich", flags = "M" },     -- yours
+    { name = "A mummy", flags = "M" },                   -- yours
+  })
+  local names = {}
+  for _, m in ipairs(out) do names[#names + 1] = m.name end
+  -- you + your minions, THEN Latoya + her minion
+  expect(table.concat(names, " | ")):eq(
+    "Vaelith | A fiery skeletal lich | A mummy | Latoya | A clay man")
+  state = saved
+end)

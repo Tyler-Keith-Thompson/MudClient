@@ -228,11 +228,23 @@ handle_group = function(data: string, _: string): any
              flags = flags_for[myname] or "X", is_self = true }
   end
   for line in (data .. "\n"):gmatch("(.-)\n") do
-    local hp, mhp, m, mm, s, ms, name =
-      line:match("^(%d+) (%d+) (%d+) (%d+) (%d+) (%d+) %-(.-)%-%s*$")
+    local hp, mhp, m, mm, s, ms, rest =
+      line:match("^(%d+) (%d+) (%d+) (%d+) (%d+) (%d+) (.-)%s*$")
     if hp then
-      g[#g + 1] = { hp = tonumber(hp), maxhp = tonumber(mhp), mana = tonumber(m), maxmana = tonumber(mm),
-                    stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = flags_for[name] or "M" }
+      -- The name's DELIMITER encodes ownership (matching HUD.group_member_row's flag scheme): `-name-` is
+      -- YOUR minion (M), `.name.` is someone ELSE's minion (O), and a BARE name is a grouped PLAYER (P).
+      -- The old parser matched only `-name-`, so grouped players (Latoya) and their pets were silently
+      -- dropped from the roster/HUD. kxwt-supplied flags (flags_for), when present, still win.
+      local name = rest
+      local kind = "P"                                       -- bare → a grouped player
+      local dn = rest:match("^%-(.-)%-$")
+      local on = rest:match("^%.(.-)%.$")
+      if dn then name, kind = dn, "M"                         -- -name- → your minion
+      elseif on then name, kind = on, "O" end                -- .name. → someone else's minion
+      if name ~= "" and name ~= myname then                  -- self is already the prepended row 1
+        g[#g + 1] = { hp = tonumber(hp), maxhp = tonumber(mhp), mana = tonumber(m), maxmana = tonumber(mm),
+                      stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = flags_for[name] or kind }
+      end
     end
   end
   state.group = g

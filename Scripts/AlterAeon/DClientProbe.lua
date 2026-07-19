@@ -228,11 +228,23 @@ stam = state.stam, maxstam = state.maxstam, name = myname,
 flags = flags_for[myname] or "X", is_self = true, }
    end
    for line in (data .. "\n"):gmatch("(.-)\n") do
-      local hp, mhp, m, mm, s, ms, name =
-      line:match("^(%d+) (%d+) (%d+) (%d+) (%d+) (%d+) %-(.-)%-%s*$")
+      local hp, mhp, m, mm, s, ms, rest =
+      line:match("^(%d+) (%d+) (%d+) (%d+) (%d+) (%d+) (.-)%s*$")
       if hp then
-         g[#g + 1] = { hp = tonumber(hp), maxhp = tonumber(mhp), mana = tonumber(m), maxmana = tonumber(mm),
-stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = flags_for[name] or "M", }
+
+
+
+
+         local name = rest
+         local kind = "P"
+         local dn = rest:match("^%-(.-)%-$")
+         local on = rest:match("^%.(.-)%.$")
+         if dn then name, kind = dn, "M"
+         elseif on then name, kind = on, "O" end
+         if name ~= "" and name ~= myname then
+            g[#g + 1] = { hp = tonumber(hp), maxhp = tonumber(mhp), mana = tonumber(m), maxmana = tonumber(mm),
+stam = tonumber(s), maxstam = tonumber(ms), name = name, flags = flags_for[name] or kind, }
+         end
       end
    end
    state.group = g

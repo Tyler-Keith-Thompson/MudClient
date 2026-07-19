@@ -848,6 +848,12 @@ end
 
 
 local function is_self_row(m) return state.name and m.name == state.name end
+
+
+
+local function is_my_minion(m)
+   return not is_self_row(m) and (m.flags or ""):find("M", 1, true) ~= nil
+end
 local function minion_target_word(name)
 
 
@@ -883,11 +889,10 @@ end
 
 
 local function minion_heal_eligible(m, f)
-   if is_self_row(m) then return false end
+   if not is_my_minion(m) then return false end
    f = f or pct(m.hp, m.maxhp)
    if f >= minion_ready_target(m, nil) then return false end
    if minion_needs_spell_heal(m.name) then return true end
-   if (m.flags or ""):find("M", 1, true) == nil then return false end
    return player_recovered()
 end
 
@@ -904,7 +909,7 @@ end
 
 all_minions_ready = function(frac)
    for _, m in ipairs(group_roster()) do
-      if not is_self_row(m) and pct(m.hp, m.maxhp) < minion_ready_target(m, frac) then return false end
+      if is_my_minion(m) and pct(m.hp, m.maxhp) < minion_ready_target(m, frac) then return false end
    end
    return true
 end

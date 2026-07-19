@@ -848,6 +848,12 @@ end
 -- entry that isn't you. (Other real players could be grouped too, but they regen and we never heal
 -- them, so lumping them with the natural-regen crowd is harmless.)
 local function is_self_row(m: GroupMember): boolean return state.name and m.name == state.name end
+-- YOUR minion (group flag M), never yourself and never another player or their pets (P / O). The roster now
+-- carries the whole group (see DClientProbe's ;sgroup; parser), so every "should I heal/wait on this?" check
+-- gates on this — `recover minions` and completion apply to OUR minions only.
+local function is_my_minion(m: GroupMember): boolean
+  return not is_self_row(m) and (m.flags or ""):find("M", 1, true) ~= nil
+end
 local function minion_target_word(name: string): string
   -- Cast target keyword = last word of the name ("A skeletal spider" -> "spider", "A skeletal mage"
   -- -> "mage"), which is the distinctive noun the player actually types (see human traces).
@@ -883,11 +889,10 @@ end
 -- healing OTHER players in the group — only our own minions. (`f`, if given, is the minion's HP frac,
 -- to avoid recomputing pct.)
 local function minion_heal_eligible(m: GroupMember, f: number): boolean
-  if is_self_row(m) then return false end
+  if not is_my_minion(m) then return false end                       -- ONLY our minions — never self / other players' pets
   f = f or pct(m.hp, m.maxhp)
   if f >= minion_ready_target(m, nil) then return false end
   if minion_needs_spell_heal(m.name) then return true end            -- skeletal: always (no natural regen)
-  if (m.flags or ""):find("M", 1, true) == nil then return false end -- only OUR minions (M) get surplus heals
   return player_recovered()                                          -- natural-regen: only when you're topped off
 end
 
@@ -904,7 +909,7 @@ end
 -- we heal them (skeletal) or just wait on their natural regen (flesh beast, clay man, ...).
 all_minions_ready = function(frac: number): boolean
   for _, m in ipairs(group_roster()) do
-    if not is_self_row(m) and pct(m.hp, m.maxhp) < minion_ready_target(m, frac) then return false end
+    if is_my_minion(m) and pct(m.hp, m.maxhp) < minion_ready_target(m, frac) then return false end
   end
   return true
 end

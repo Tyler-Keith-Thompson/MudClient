@@ -511,6 +511,37 @@ local function group_member_row(m: GroupMember): Cell
   } }
 end
 
+-- Reorder the flat roster so each owner is followed by THEIR minions: you + your minions (M) first, then
+-- each other player (P) followed by their minions (O). The RPC roster arrives owner-agnostic (a player can
+-- appear before minions that aren't theirs), so we bucket by ownership: M is always yours; an O attaches to
+-- the most-recent P (minions follow their owner in the wire order). Display-only — state.group is untouched.
+local record OwnerBucket
+  member: GroupMember
+  pets: {GroupMember}
+end
+local function group_ordered(g: {GroupMember}): {GroupMember}
+  local self_row: GroupMember
+  local mine: {GroupMember} = {}
+  local others: {OwnerBucket} = {}
+  local cur: OwnerBucket = nil
+  for _, m in ipairs(g) do
+    local f = m.flags or ""
+    if f:find("X", 1, true) or (state.name and m.name == state.name) then self_row = m
+    elseif f:find("P", 1, true) then cur = { member = m, pets = {} }; others[#others + 1] = cur
+    elseif f:find("O", 1, true) then
+      if cur then cur.pets[#cur.pets + 1] = m else mine[#mine + 1] = m end   -- stray O before any player → treat as ours
+    else mine[#mine + 1] = m end                                             -- M (or unflagged) → yours
+  end
+  local out: {GroupMember} = {}
+  if self_row then out[#out + 1] = self_row end
+  for _, m in ipairs(mine) do out[#out + 1] = m end
+  for _, o in ipairs(others) do
+    out[#out + 1] = o.member
+    for _, p in ipairs(o.pets) do out[#out + 1] = p end
+  end
+  return out
+end
+
 -- Split the raw `;smap;` grid text (rows separated by \r\n or \n) into an array of row strings,
 -- dropping any trailing blank rows the split/trailing-newline can produce.
 local function dclient_map_rows(raw: string): {string}
@@ -757,7 +788,7 @@ update_top = function()
   local g = (state.group as {GroupMember}) or {}
   if #g >= 2 then   -- show the roster only when you actually have pets/groupmates
     left[#left + 1] = { text = string.format("── group (%d) ──", #g), fg = "cyan", dim = true }
-    for _, m in ipairs(g) do left[#left + 1] = group_member_row(m) end
+    for _, m in ipairs(group_ordered(g)) do left[#left + 1] = group_member_row(m) end   -- each owner + their minions
   end
   if in_fight() then   -- the stats line is busy with the target, so the exits rose lives up here
     left[#left + 1] = { cols = { { text = "" }, compass(1) } }
@@ -833,4 +864,5 @@ _HUD_TEST = { pct = pct, gauge = gauge, vital_rgb = vital_rgb, next_level = next
               target_cell = target_cell, cond_word = cond_word, in_fight = in_fight,
               truncate_middle = truncate_middle, lag_rows = lag_rows,
               minimap_cells_from_dclient = minimap_cells_from_dclient, map_glyph = map_glyph,
-              dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section }
+              dclient_map_rows = dclient_map_rows, dclient_terrain_section = dclient_terrain_section,
+              group_ordered = group_ordered }
