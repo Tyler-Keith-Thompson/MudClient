@@ -657,3 +657,13 @@ W 2 models match the provided model key on the same device. Loading the first on
 [K[?25hError: Model loading was stopped due to insufficient system resources. Continuing to load the model would likely overload your system and cause it to freeze. If you think this is incorrect, you can adjust the model loading guardrails in settings.
   + /Users/tylerthompson/.lmstudio/bin/lms load qwen3.6-27b-alteraeon-mlx -y --gpu max -c 4096
 [K[?25hError: Model loading was stopped due to insufficient system resources. Continuing to load the model would likely overload your system and cause it to freeze. If you think this is incorrect, you can adjust the model loading guardrails in settings.
+================ 35B MoE attention-only train start: Sun Jul 19 03:00:05 MDT 2026 ================
+fused model already exists (/Users/tylerthompson/.lmstudio/models/mudclient/Qwen3.6-35B-A3B-AlterAeon-MLX-4bit) — nothing to do.
+---- reloading previously-loaded models: Sun Jul 19 03:00:05 MDT 2026 ----
+  + /Users/tylerthompson/.lmstudio/bin/lms load qwen3.6-35b-a3b-mlx -y --gpu max -c 8192
+W 2 models match the provided model key on the same device. Loading the first one.
+[K[?25hError: Model loading was stopped due to insufficient system resources. Continuing to load the model would likely overload your system and cause it to freeze. If you think this is incorrect, you can adjust the model loading guardrails in settings.
+  + /Users/tylerthompson/.lmstudio/bin/lms load qwen3.6-27b-mlx@4bit -y --gpu max -c 8192
+[K[?25hError: Model loading was stopped due to insufficient system resources. Continuing to load the model would likely overload your system and cause it to freeze. If you think this is incorrect, you can adjust the model loading guardrails in settings.
+  + /Users/tylerthompson/.lmstudio/bin/lms load qwen3.6-27b-alteraeon-mlx -y --gpu max -c 4096
+[K[?25hError: Model loading was stopped due to insufficient system resources. Continuing to load the model would likely overload your system and cause it to freeze. If you think this is incorrect, you can adjust the model loading guardrails in settings.

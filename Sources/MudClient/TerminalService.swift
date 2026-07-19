@@ -18,7 +18,11 @@ final class TerminalService {
     static func setRawTerminal() {
         var tattr = termios()
         tcgetattr(STDIN_FILENO, &tattr)
-        tattr.c_lflag &= ~tcflag_t(ECHO | ICANON)
+        // Clear IEXTEN too (not just ECHO/ICANON): it gates the line discipline's "status" character
+        // (ctrl-T / VSTATUS), which otherwise raises SIGINFO instead of delivering the byte to us — and
+        // also VLNEXT (ctrl-V) / VDISCARD (ctrl-O). With it off those ctrl keys reach `decodeKey` as
+        // ordinary bytes, so they're bindable like any other key (ctrl-T toggles the timestamp gutter).
+        tattr.c_lflag &= ~tcflag_t(ECHO | ICANON | IEXTEN)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
     }
     
@@ -106,6 +110,16 @@ final class TerminalService {
     /// ended on a newline. Kept separate so the live tail (and the output cursor's column) reproduce
     /// exactly when we snap back to live.
     private var pendingLine = ""
+    /// Arrival time (formatted `HH:mm:ss`) of each completed line in `scrollbackLines`, index-aligned.
+    /// `nil` for a blank line (no timestamp gutter, just a blank separator). Only consulted when the
+    /// timestamp gutter is toggled on; still recorded when off so toggling on shows historic times.
+    private var scrollbackStamps: [String?] = []
+    /// Arrival time of the current `pendingLine`, set when its first character lands. nil while empty.
+    private var pendingStamp: String?
+    /// When true, every scrollback line is rendered with a dim `HH:mm:ss` arrival-time gutter on its
+    /// first physical row (blank, aligned gutter on wrap-continuations). Toggled by `timestamps()` /
+    /// the default ctrl-T bind. Off = the original rendering, byte-for-byte.
+    private var timestampsEnabled = false
     /// The SGR (colour/attribute) state the GAME stream currently has active — a colour it set and never
     /// reset. A script echo carries its own colour plus a trailing `ESC[0m`; injected into the live stream
     /// that reset clobbers this state, so the game's following output (and the rest of a multi-line
@@ -124,6 +138,8 @@ final class TerminalService {
     /// `recordOutput` / a width change — turning each wheel notch into an O(1) lookup.
     private var wrapCache: [String]?
     private var wrapCacheWidth = -1
+    /// The timestamp-gutter state the `wrapCache` was built under; toggling the gutter must invalidate it.
+    private var wrapCacheTimestamps = false
     /// How many PHYSICAL (wrapped) rows the view is currently parked above the live tail. 0 = live,
     /// and while 0 every existing behaviour is untouched.
     private var scrollOffset = 0
@@ -190,6 +206,12 @@ final class TerminalService {
             case "right":
                 cursor.moveRight(line: lineBuffer)
                 refreshDisplay(cursorColumn: cursor.column)
+            case "ctrl-t":
+                // Generic terminal feature (not game-specific): toggle the dim per-line arrival-time
+                // gutter in the scrollback. This is only the DEFAULT — `handleKey` above offered the key
+                // to Lua `bind` first, so a script can rebind ctrl-T to anything else. The gutter
+                // appearing/disappearing is its own feedback, so there's no status echo.
+                toggleTimestamps()
             default:
                 break                                    // recognised but unbound special key → drop
             }
@@ -562,10 +584,21 @@ final class TerminalService {
         }
 
         recordOutput(payload)                               // keep the scrollback shadow current
-        var out = "\u{1B}8"                                 // restore output cursor (bottom of region)
-        out += payload                                       // write output; scrolls within the region
-        out += "\u{1B}7"                                     // save the new output cursor
-        writeToStandardOut(data: Data(out.utf8))
+        if timestampsEnabled {
+            // The gutter is stamped per-line at wrap time, so a live line can't be blitted straight into
+            // the region (it would arrive gutterless). Repaint the band from the tail — same absolute,
+            // bottom-aligned paint the scrolled/resume paths use — then re-park + DECSC-save the output
+            // cursor after the newest row so a later toggle-off resumes the fast scroll path cleanly.
+            let rows = physicalRows(width: l.width)
+            paintRegion(l, rows: rows)                       // scrollOffset == 0 here → the live tail
+            let col = visibleLength(rows.last ?? "") + 1
+            writeToStandardOut(data: Data("\u{1B}[\(l.outputBottom);\(col)H\u{1B}7".utf8))
+        } else {
+            var out = "\u{1B}8"                             // restore output cursor (bottom of region)
+            out += payload                                   // write output; scrolls within the region
+            out += "\u{1B}7"                                 // save the new output cursor
+            writeToStandardOut(data: Data(out.utf8))
+        }
         drawFurniture(l)                                    // repaint furniture; parks cursor on input
         writeToStandardOut(data: Data("\u{1B}[?25h".utf8))  // show the cursor, now back at the input line
     }
@@ -879,20 +912,27 @@ final class TerminalService {
         guard !text.isEmpty else { return }
         scrollbackLock.lock(); defer { scrollbackLock.unlock() }
         var segment = pendingLine
+        var stamp = pendingStamp
         for ch in text {
             switch ch {
             case "\n":
                 scrollbackLines.append(segment)
+                scrollbackStamps.append(segment.isEmpty ? nil : stamp)   // blank line → no gutter
                 segment = ""
+                stamp = nil
             case "\r":
                 break                                       // ignore stray CR; don't disturb the line
             default:
+                if stamp == nil { stamp = Self.nowStamp() } // stamp a line at the moment its first byte lands
                 segment.append(ch)
             }
         }
         pendingLine = segment
+        pendingStamp = stamp
         if scrollbackLines.count > scrollbackLimit {
-            scrollbackLines.removeFirst(scrollbackLines.count - scrollbackLimit)
+            let drop = scrollbackLines.count - scrollbackLimit
+            scrollbackLines.removeFirst(drop)
+            scrollbackStamps.removeFirst(drop)              // keep the two arrays index-aligned
         }
         wrapCache = nil                                     // content changed → the wrap memo is stale
     }
@@ -1056,6 +1096,50 @@ final class TerminalService {
         return rows
     }
 
+    /// Visible width of the timestamp gutter: "HH:mm:ss" (8) + one separating space.
+    static let timestampGutterWidth = 9
+
+    /// Formatter for the arrival-time gutter. `HH:mm:ss`, POSIX locale so it's stable regardless of the
+    /// user's 12/24h region setting. `DateFormatter.string(from:)` is thread-safe for formatting.
+    private static let stampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "HH:mm:ss"
+        return f
+    }()
+    private static func nowStamp() -> String { stampFormatter.string(from: Date()) }
+
+    /// Like `selfContainedPhysicalRows`, but prefixes each logical line's FIRST physical row with a dim
+    /// `stamps[i]` timestamp gutter (and continuation rows with a blank, aligned gutter of the same
+    /// width). Message text wraps in the remaining `width - gutter` columns. `stamps[i] == nil` → a blank
+    /// gutter (a separator line carries no time). The gutter's own dim/reset is applied AROUND the SGR
+    /// carry — the carry is still computed from message text only, so a stamp's reset never clears the
+    /// game's colour bleeding into the next line. Pure, so the gutter/alignment/colour-carry is unit-tested.
+    static func timestampedPhysicalRows(_ lines: [String], stamps: [String?], width: Int) -> [String] {
+        let gutter = timestampGutterWidth
+        let textWidth = max(1, width - gutter)
+        let blankGutter = String(repeating: " ", count: gutter)
+        var rows: [String] = []
+        var carry = ""                                        // SGR active entering the current logical line
+        for (idx, line) in lines.enumerated() {
+            let base = wrapVisible(line, width: textWidth)
+            var consumed = ""                                 // message text seen so far within this line
+            for (r, row) in base.enumerated() {
+                let sgr = activeSGRState(carry + consumed)     // game SGR active at this row's start
+                let g: String
+                if r == 0, idx < stamps.count, let s = stamps[idx] {
+                    g = "\u{1B}[90m" + s + "\u{1B}[0m "        // dim stamp, reset, one plain space (== gutter width)
+                } else {
+                    g = blankGutter
+                }
+                rows.append(g + (sgr.isEmpty ? row : sgr + row))
+                consumed += row
+            }
+            carry = activeSGRState(carry + consumed)          // state leaving this line → next line's carry
+        }
+        return rows
+    }
+
     /// The number of VISIBLE characters in a string, skipping ANSI escape sequences.
     private func visibleLength(_ s: String) -> Int {
         let chars = Array(s)
@@ -1094,10 +1178,19 @@ final class TerminalService {
         // a burst of wheel notches with no new output all hit the cache. (COW makes the shared return safe
         // to hand out even if another thread later replaces wrapCache.)
         scrollbackLock.lock(); defer { scrollbackLock.unlock() }
-        if let cached = wrapCache, wrapCacheWidth == width { return cached }
-        let rows = Self.selfContainedPhysicalRows(scrollbackLines + [pendingLine], width: width)
+        if let cached = wrapCache, wrapCacheWidth == width, wrapCacheTimestamps == timestampsEnabled {
+            return cached
+        }
+        let lines = scrollbackLines + [pendingLine]
+        let rows: [String]
+        if timestampsEnabled {
+            rows = Self.timestampedPhysicalRows(lines, stamps: scrollbackStamps + [pendingStamp], width: width)
+        } else {
+            rows = Self.selfContainedPhysicalRows(lines, width: width)
+        }
         wrapCache = rows
         wrapCacheWidth = width
+        wrapCacheTimestamps = timestampsEnabled
         return rows
     }
 
@@ -1232,6 +1325,26 @@ final class TerminalService {
         resumeLive(l, rows: physicalRows(width: l.width))
     }
 
+    // MARK: - Per-line timestamp gutter (ctrl-T)
+
+    /// Whether the dim arrival-time gutter is currently shown. Exposed to Lua as `timestamps()`'s return.
+    func timestampsShown() -> Bool { timestampsEnabled }
+
+    /// Flip the gutter and return the new state (exposed via the `timestamps` builtin / ctrl-T bind).
+    @discardableResult func toggleTimestamps() -> Bool { setTimestamps(!timestampsEnabled); return timestampsEnabled }
+
+    /// Turn the arrival-time gutter on or off and repaint the output band in place so the change is
+    /// immediate — whether the view is live or scrolled back. A no-op when already in the requested state.
+    func setTimestamps(_ on: Bool) {
+        scrollbackLock.lock()
+        let changed = on != timestampsEnabled
+        if changed { timestampsEnabled = on; wrapCache = nil }   // rendering changed → drop the memo
+        scrollbackLock.unlock()
+        guard changed, let l = layout() else { return }
+        let rows = physicalRows(width: l.width)
+        if scrollOffset > 0 { paintScrolled(l, rows: rows) } else { resumeLive(l, rows: rows) }
+    }
+
     /// Repaint the frozen furniture, then overwrite the output band with history at the current
     /// offset and stamp the scrolled marker. Leaves the physical cursor on the input line. The saved
     /// OUTPUT cursor (DECSC slot) is never touched, so live output resumes cleanly on `resumeLive`.
@@ -1317,7 +1430,7 @@ final class TerminalService {
             teardownScreen()   // reset the scroll region so the terminal isn't left stuck
             var tattr = termios()
             tcgetattr(STDIN_FILENO, &tattr)
-            tattr.c_lflag |= tcflag_t(ECHO | ICANON)
+            tattr.c_lflag |= tcflag_t(ECHO | ICANON | IEXTEN)   // restore what setRawTerminal cleared
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
             Swift.print("\nStopping")
             exit(0)

@@ -378,9 +378,11 @@ test("casts refresh when stamina is many ticks away and mana has slack", functio
     function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c refresh") end)
 end)
 
-test("casts bolster on yourself for a big hp wound, soothe for a small one (by absolute hp missing)", function()
+test("casts heal/bolster/soothe on yourself by absolute hp missing", function()
   with_self_recovery({ hp = 30, regen = { hp = 6, mana = 20, move = 10, position = "resting" } },
-    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me") end)   -- missing 70 → bolster
+    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c heal Me") end)       -- missing 70 (>=55) → heal
+  with_self_recovery({ hp = 65, regen = { hp = 6, mana = 20, move = 10, position = "resting" } },
+    function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me") end)    -- missing 35 (25..54) → bolster
   with_self_recovery({ hp = 80, regen = { hp = 3, mana = 20, move = 10, position = "resting" } },
     function(sent) _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c soothe Me") end)     -- missing 20 (<25) → soothe
 end)
@@ -429,8 +431,8 @@ test("a self-cast refuse (over-strong heal / wrong target) blocks that stat; ok 
   -- the stat castable again (the wound is still there, so the next evaluation re-casts).
   local HPREGEN = { hp = 6, mana = 20, move = 10, position = "resting" }
   -- refuse (over-strong "doesn't need that much healing") → hp self-cast blocked
-  with_self_recovery({ hp = 30, regen = HPREGEN }, function(sent)
-    _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me")
+  with_self_recovery({ hp = 30, regen = HPREGEN }, function(sent)   -- missing 70 → heal
+    _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c heal Me")
     _AA_TEST.minion_cast_settled("full")                     -- refused → block hp
     local n = #sent
     _AA_TEST.try_cast_heal(); expect(#sent):eq(n)            -- blocked → no re-cast
@@ -444,10 +446,10 @@ test("a self-cast refuse (over-strong heal / wrong target) blocks that stat; ok 
       _AA_TEST.try_cast_heal(); expect(#sent):eq(n)
     end)
   -- ok (landed) → NOT blocked: the still-present wound is cast again on the next evaluation
-  with_self_recovery({ hp = 30, regen = HPREGEN }, function(sent)
-    _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c bolster Me")
+  with_self_recovery({ hp = 30, regen = HPREGEN }, function(sent)   -- missing 70 → heal
+    _AA_TEST.try_cast_heal(); expect(sent[1]):eq("c heal Me")
     _AA_TEST.minion_cast_settled("ok")                       -- landed
-    _AA_TEST.try_cast_heal(); expect(sent[2]):eq("c bolster Me")   -- castable again
+    _AA_TEST.try_cast_heal(); expect(sent[2]):eq("c heal Me")      -- castable again
   end)
 end)
 
@@ -480,12 +482,12 @@ test("narrates each recovery decision, deduped (same decision announces once)", 
   _AA_TEST.reset_narration()
   with_self_recovery({ hp = 30, regen = { hp = 6, mana = 20, move = 10, position = "resting" } },
     function()
-      _AA_TEST.try_cast_heal()                       -- casts bolster → narrates cast:hp
+      _AA_TEST.try_cast_heal()                       -- missing 70 → casts heal → narrates cast:hp
       _AA_TEST.minion_cast_settled("ok")             -- cast lands; SAME decision re-evaluated → no new narration
     end)
   _G.echo = saved_echo
   local casts = 0
-  for _, m in ipairs(msgs) do if type(m) == "string" and m:find("casting bolster") then casts = casts + 1 end end
+  for _, m in ipairs(msgs) do if type(m) == "string" and m:find("casting heal") then casts = casts + 1 end end
   expect(casts):eq(1)                                -- deduped: announced exactly once
 end)
 

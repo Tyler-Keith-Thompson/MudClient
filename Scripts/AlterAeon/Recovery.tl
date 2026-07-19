@@ -594,14 +594,20 @@ local function minion_ready_target(m: GroupMember, frac: number): number
   if (m.maxhp or 0) < MINION_FULL_BELOW then return 1.0 end
   return frac or (recovery and recovery.pct) or READY_PCT
 end
--- bolster vs soothe by ABSOLUTE hp missing, NOT percentage. bolster is a roughly FLAT heal (~25 hp), so
--- percentage was wrong: on a small pool "30% missing" is only a few hp and bolster over-heals → the game
--- refuses it ("… doesn't need that much healing right now"), stalling the sweep. Pick bolster only when the
--- wound is at least a bolster's worth of hp; soothe (the weaker heal) for anything smaller. `heal_spell`
--- centralises the choice for both minion and self heals.
-local BOLSTER_MIN_MISSING = 25   -- hp missing at/above which bolster won't over-heal (its ~flat heal amount)
+-- soothe → bolster → heal, chosen by ABSOLUTE hp missing, NOT percentage. Each spell restores a roughly
+-- FLAT amount, so percentage was wrong: on a small pool "30% missing" is only a few hp and even bolster
+-- over-heals → the game refuses it ("… doesn't need that much healing right now"), stalling the sweep. Pick
+-- the STRONGEST spell whose heal still fits the wound: heal (~55 hp, measured from a live cast) for a big
+-- wound, bolster (~25) for a medium one, soothe (the weakest) for anything smaller. Using heal on a big
+-- wound tops a minion off in far fewer casts than sweeping bolster over it. `heal_spell` centralises the
+-- choice for both minion and self heals; the per-spell mana cost lives in HEAL_MANA below.
+local BOLSTER_MIN_MISSING = 25   -- hp missing at/above which bolster won't over-heal (~its flat heal amount)
+local HEAL_MIN_MISSING    = 55   -- hp missing at/above which 'heal' won't over-heal (~its measured heal amount)
 local function heal_spell(cur: number, max: number): string
-  return ((max or 0) - (cur or 0)) >= BOLSTER_MIN_MISSING and "bolster" or "soothe"
+  local missing = (max or 0) - (cur or 0)
+  if missing >= HEAL_MIN_MISSING then return "heal" end
+  if missing >= BOLSTER_MIN_MISSING then return "bolster" end
+  return "soothe"
 end
 
 -- ---- Self spell-recovery: spend surplus mana to top your OWN vitals faster than natural regen -------
@@ -615,7 +621,10 @@ end
 -- still while "sharp" (earned by sleeping a couple ticks) — so the plan is: sleep to get sharp first,
 -- then rest and cast only the deficits the (now boosted) regen still can't close quickly.
 local REFRESH_COST       = 15     -- mana; help: "Spell: refresh  Mana: 15"
-local HEAL_COST          = 14     -- mana; bolster's cost (the pricier of the two — conservative guard)
+-- Healing-spell mana costs (help: cleric healing spellgroup — soothe 7, bolster 14, heal 28). Charged to
+-- the self-cast beats-waiting guard so it uses the RIGHT cost for whichever spell heal_spell picked.
+local HEAL_MANA: {string:number} = { soothe = 7, bolster = 14, heal = 28 }
+local function heal_cost(spell: string): number return HEAL_MANA[spell] or 14 end
 local CAST_MIN_TICKS     = 3      -- don't bother casting if the stat is within this many ticks of target
 local SELF_CAST_MANA_MIN = 0.50   -- only trade mana for hp/stam when mana is at least this full
 -- Skeletal minions can only heal via a cast, but a cast still costs mana — so when YOUR mana is critically
@@ -1069,8 +1078,9 @@ pick_self_cast = function(): SelfCastPick
   local r    = state.regen as RegenInfo
   if (st == nil or st == "hp") and not minion_heal.self_hp_blocked and state.name then
     local hpf = pct(state.hp, state.maxhp)
-    if hpf < frac and cast_beats_waiting(N(state.hp), N(state.maxhp), r and r.hp, HEAL_COST) then
-      return { stat = "hp", label = "hp", spell = heal_spell(N(state.hp), N(state.maxhp)),
+    local spell = heal_spell(N(state.hp), N(state.maxhp))
+    if hpf < frac and cast_beats_waiting(N(state.hp), N(state.maxhp), r and r.hp, heal_cost(spell)) then
+      return { stat = "hp", label = "hp", spell = spell,
                target = S(state.name), pctv = hpf, ticks = ticks_to_target(N(state.hp), N(state.maxhp), r and r.hp, frac) or 0,
                kind = "self_hp" }
     end
@@ -1170,7 +1180,7 @@ local test_exports: {string:any} = { ready = ready, pct = pct, READY_PCT = READY
              recovery = recovery, end_recovery = end_recovery,
              maybe_complete_recovery = maybe_complete_recovery,
              minion_needs_spell_heal = minion_needs_spell_heal, minion_target_word = minion_target_word,
-             heal_spell = heal_spell, BOLSTER_MIN_MISSING = BOLSTER_MIN_MISSING,
+             heal_spell = heal_spell, BOLSTER_MIN_MISSING = BOLSTER_MIN_MISSING, HEAL_MIN_MISSING = HEAL_MIN_MISSING,
              minion_target_words = minion_target_words, next_untried_word = next_untried_word,
              keyword_count = keyword_count, keyword_matches = keyword_matches,
              minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,

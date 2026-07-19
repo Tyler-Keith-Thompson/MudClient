@@ -600,8 +600,12 @@ end
 
 
 local BOLSTER_MIN_MISSING = 25
+local HEAL_MIN_MISSING = 55
 local function heal_spell(cur, max)
-   return ((max or 0) - (cur or 0)) >= BOLSTER_MIN_MISSING and "bolster" or "soothe"
+   local missing = (max or 0) - (cur or 0)
+   if missing >= HEAL_MIN_MISSING then return "heal" end
+   if missing >= BOLSTER_MIN_MISSING then return "bolster" end
+   return "soothe"
 end
 
 
@@ -615,7 +619,8 @@ end
 
 
 local REFRESH_COST = 15
-local HEAL_COST = 14
+local HEAL_MANA = { soothe = 7, bolster = 14, heal = 28 }
+local function heal_cost(spell) return HEAL_MANA[spell] or 14 end
 local CAST_MIN_TICKS = 3
 local SELF_CAST_MANA_MIN = 0.50
 
@@ -1069,8 +1074,9 @@ pick_self_cast = function()
    local r = state.regen
    if (st == nil or st == "hp") and not minion_heal.self_hp_blocked and state.name then
       local hpf = pct(state.hp, state.maxhp)
-      if hpf < frac and cast_beats_waiting(N(state.hp), N(state.maxhp), r and r.hp, HEAL_COST) then
-         return { stat = "hp", label = "hp", spell = heal_spell(N(state.hp), N(state.maxhp)),
+      local spell = heal_spell(N(state.hp), N(state.maxhp))
+      if hpf < frac and cast_beats_waiting(N(state.hp), N(state.maxhp), r and r.hp, heal_cost(spell)) then
+         return { stat = "hp", label = "hp", spell = spell,
 target = S(state.name), pctv = hpf, ticks = ticks_to_target(N(state.hp), N(state.maxhp), r and r.hp, frac) or 0,
 kind = "self_hp", }
       end
@@ -1170,7 +1176,7 @@ choose_recovery_position = choose_recovery_position, recovery_depth = recovery_d
 recovery = recovery, end_recovery = end_recovery,
 maybe_complete_recovery = maybe_complete_recovery,
 minion_needs_spell_heal = minion_needs_spell_heal, minion_target_word = minion_target_word,
-heal_spell = heal_spell, BOLSTER_MIN_MISSING = BOLSTER_MIN_MISSING,
+heal_spell = heal_spell, BOLSTER_MIN_MISSING = BOLSTER_MIN_MISSING, HEAL_MIN_MISSING = HEAL_MIN_MISSING,
 minion_target_words = minion_target_words, next_untried_word = next_untried_word,
 keyword_count = keyword_count, keyword_matches = keyword_matches,
 minions_pending_spell_heal = minions_pending_spell_heal, all_minions_ready = all_minions_ready,

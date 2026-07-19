@@ -415,7 +415,9 @@ end
 
 handle_channel_send = function(_fi, m)
    if m and m.sent_message and #(m.sent_message) > 0 then
-      feed_server(tilde_to_ansi(m.sent_message))
+      -- Leading "\n": RPC channel events arrive asynchronously and otherwise tack onto the tail of
+      -- whatever partial line (a prompt, mid-render output) was on screen. Force it to a fresh line.
+      feed_server("\n" .. tilde_to_ansi(m.sent_message))
       return true
    end
    return false

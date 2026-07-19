@@ -1097,6 +1097,19 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // bell() — ring the terminal bell.
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
+        // timestamps([on]) -> bool. Toggle (no arg) or set (bool / "on"/"off") the dim per-line arrival-
+        // time gutter shown at the start of every scrollback line. Bound to ctrl-T by default. Returns the
+        // new state so a bind can echo it.
+        lua.register("timestamps") { args in
+            let ts = Container.terminalService()
+            let now: Bool
+            switch args.first {
+            case .bool(let b)?:   ts.setTimestamps(b); now = b
+            case .string(let s)?: let b = (s == "on" || s == "true" || s == "1"); ts.setTimestamps(b); now = b
+            default:              now = ts.toggleTimestamps()
+            }
+            return [.bool(now)]
+        }
         // spellcheck(word) -> suggestion|nil. Native macOS spell-check (NSSpellChecker, local dictionary
         // — no network) of a SINGLE word: returns the top correction if the word is misspelled, else nil
         // (also nil for <2 chars). Fast enough to run per chat word. It only knows English — game jargon

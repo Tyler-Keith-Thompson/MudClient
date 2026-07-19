@@ -230,5 +230,6 @@ test("channel_send routes through feed_server (so triggers fire), NOT a bare ech
   expect(ok):eq(true)                                             -- handled → suppresses the debug echo
   expect(#fed):eq(1)                                              -- went through the trigger pipeline…
   expect(fed[1]:find("trivia question", 1, true) ~= nil):truthy()
+  expect(fed[1]:sub(1, 1)):eq("\n")                               -- …on a fresh line (leading \n so it can't tack onto a partial prompt)
   expect(#echoed):eq(0)                                           -- …never a bare echo (which skips triggers)
 end)

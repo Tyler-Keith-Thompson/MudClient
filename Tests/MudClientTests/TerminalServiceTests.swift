@@ -71,6 +71,49 @@ import Testing
   }
 }
 
+// MARK: - Per-line timestamp gutter (ctrl-T)
+//
+// `timestampedPhysicalRows` prefixes each logical line's FIRST physical row with a dim HH:mm:ss gutter
+// and continuation/blank rows with an aligned blank gutter, WITHOUT letting the gutter's own reset break
+// the game-colour carry the scrollback view depends on. Pure core, exercised directly.
+
+@Test func timestampGutterStampsFirstRowDimAndAlignsContinuations() {
+  try withTestContainer {
+    let g = TerminalService.timestampGutterWidth
+    #expect(g == 9)                                   // "HH:mm:ss" + one space
+    // A line longer than the text width wraps; only the first row shows the stamp, continuations get a
+    // blank gutter of the same visible width so the message column stays aligned.
+    let rows = TerminalService.timestampedPhysicalRows(
+        [String(repeating: "x", count: 6)], stamps: ["12:00:00"], width: g + 4)   // text width = 4
+    #expect(rows.count == 2)                          // 6 chars / 4
+    #expect(rows[0] == "\u{1B}[90m12:00:00\u{1B}[0m xxxx")   // dim stamp, reset, space, text
+    #expect(rows[1] == String(repeating: " ", count: g) + "xx")   // aligned blank gutter
+  }
+}
+
+@Test func timestampGutterBlankStampGetsNoTime() {
+  try withTestContainer {
+    let g = TerminalService.timestampGutterWidth
+    // A nil stamp (a blank separator line) renders a blank gutter, never a time.
+    let rows = TerminalService.timestampedPhysicalRows(["", "hi"], stamps: [nil, "09:41:07"], width: 80)
+    #expect(rows[0] == String(repeating: " ", count: g))
+    #expect(rows[1] == "\u{1B}[90m09:41:07\u{1B}[0m hi")
+  }
+}
+
+@Test func timestampGutterPreservesGameColourCarryAcrossLines() {
+  try withTestContainer {
+    // The gutter ends in its own reset; the game's colour (set on line one, reset only after line two)
+    // must still carry onto line two's message despite that reset — the carry is computed from message
+    // text only, then re-asserted after the gutter.
+    let rows = TerminalService.timestampedPhysicalRows(
+        ["\u{1B}[36mline one", "line two\u{1B}[0m"], stamps: ["00:00:01", "00:00:02"], width: 80)
+    #expect(rows[0].contains("\u{1B}[36mline one"))
+    // Second row: blank-of-stamp then cyan re-asserted on the message (not left default by the gutter reset).
+    #expect(rows[1] == "\u{1B}[90m00:00:02\u{1B}[0m \u{1B}[36mline two\u{1B}[0m")
+  }
+}
+
 // MARK: - Input decoding (the "error: unexpected input --> input:1:3" display-corruption bug)
 //
 // The old swift-parsing line grammar printed its PARSE FAILURE to the game display whenever the input

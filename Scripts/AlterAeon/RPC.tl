@@ -411,11 +411,14 @@ end
 -- pipeline (feed_server → processLine), NOT a bare echo(). echo() displays but SKIPS processLine, so no
 -- trigger/gag ever sees it — which is why the trivia auto-answerer (a `[event] trivia question:` trigger)
 -- went dead under RPC: the events were echoed, never trigger-processed. feed_server both fires triggers AND
--- renders the surviving line (one print, no double). No trailing "\n": ServerTextFeed flushes a no-newline
--- message via its own marker without emitting a blank line. Return true to suppress the debug echo.
+-- renders the surviving line (one print, no double). LEADING "\n" (not trailing): the event is forced to
+-- start on a fresh line so it can't tack onto a partial prompt/render tail; ServerTextFeed still flushes the
+-- no-newline tail via its own marker without emitting a blank line. Return true to suppress the debug echo.
 handle_channel_send = function(_fi: {string:any}, m: {string:any}): boolean
   if m and m.sent_message and #(m.sent_message as string) > 0 then
-    feed_server(tilde_to_ansi(m.sent_message as string))
+    -- Leading "\n": RPC channel events arrive asynchronously and otherwise tack onto the tail of
+    -- whatever partial line (a prompt, mid-render output) was on screen. Force it to a fresh line.
+    feed_server("\n" .. tilde_to_ansi(m.sent_message as string))
     return true
   end
   return false

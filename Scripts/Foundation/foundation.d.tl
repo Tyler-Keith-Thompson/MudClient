@@ -263,6 +263,9 @@ global replay:     function(string, ? {string:any}): boolean   -- opts = { speed
 global bind:   function(string, function(...: any): any...): integer
 global unbind: function(integer)
 
+-- ---- Terminal display toggles ----
+global timestamps: function(? boolean): boolean   -- no arg = toggle the scrollback arrival-time gutter
+
 -- ---- Panel (declarative top-of-screen HUD) — both the raw registered functions and the `panel` table
 -- assembled from them (see bootstrap.lua/LuaScriptEngine.installPanel). `spec` is the declarative row/
 -- column model; genuinely heterogeneous, so `any` on purpose.

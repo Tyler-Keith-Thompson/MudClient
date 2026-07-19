@@ -162,7 +162,7 @@ final class InputService: @unchecked Sendable {
         print("Stopping")
         var tattr = termios()
         tcgetattr(STDIN_FILENO, &tattr)
-        tattr.c_lflag |= tcflag_t(ECHO | ICANON)
+        tattr.c_lflag |= tcflag_t(ECHO | ICANON | IEXTEN)   // restore what setRawTerminal cleared
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
         exit(0)
     }

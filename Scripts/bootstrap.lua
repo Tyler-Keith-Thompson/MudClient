@@ -531,6 +531,9 @@ doc("bind", { sig = "bind(keyname, handler) -> id", group = "terminal",
   text = "Register a key macro; handler(keyname) runs when the key is pressed and the key is consumed. Later binds for a key win.",
   example = "bind(\"f5\", function() send(\"cast 'heal'\") end)" })
 doc("unbind", { sig = "unbind(id)", group = "terminal", text = "Remove a binding returned by bind()." })
+doc("timestamps", { sig = "timestamps([on]) -> bool", group = "terminal",
+  text = "Toggle (no arg) or set (bool/\"on\"/\"off\") a dim HH:mm:ss arrival-time gutter on every scrollback line. ctrl-T toggles it by default (rebind with bind()). Returns the new state.",
+  example = "timestamps()   -- toggle the arrival-time gutter" })
 doc("input_get", { sig = "input_get() -> string", group = "terminal", text = "Get the current input-line text." })
 doc("input_set", { sig = "input_set(text)", group = "terminal", text = "Replace the input line and redraw it.",
   example = "input_set(\"say hello\")" })
