@@ -131,8 +131,9 @@ extension AsyncSequence where Self: Sendable, Element == String {
             // returns the line to display (possibly rewritten by a trigger), or nil if it was gagged.
             //
             // Keep every surviving line verbatim — including blanks, which are the MUD's own spacing.
-            // (We used to drop blanks adjacent to a gagged kxwt_ batch as "framing", but that ate real
-            // spacing between content during combat's group-status bursts, and isn't needed.)
+            // (Prompt-framing blanks around gagged telemetry are removed UPSTREAM, in the AlterAeon
+            // on_stream filter — see DClientProbe.tl — which is the one place that sees the whole raw
+            // stream, GA-flushed prompts included, before the line assembler splits it.)
             //
             // Mark this batch LIVE (LiveGate) so triggers can tell real-time output from replayed
             // history via is_live() — the replay() path deliberately doesn't set this, so speech and

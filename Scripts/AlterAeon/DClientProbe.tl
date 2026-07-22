@@ -103,44 +103,110 @@ local function dclient_parse(): string
   return table.concat(out)
 end
 
--- The server frames its (gagged) kxwt/kxwq machine lines with a LEADING blank line — e.g. after `You scan
--- the area...` it sends `\n\nkxwq_hud|…`. The ^kxw[tq]_ hider gags the kxwq_ line, but the blank before it
--- has no line to fill once the prompt is hidden, so an empty line leaked to the display EVERY tick. Drop the
--- blank line(s) DIRECTLY before any kxw[tq]_ line (that's the prompt's leading newline); blanks before REAL
--- text are left alone (genuine paragraph breaks). This is the natural home for it — an AlterAeon prompt/kxwt
--- concern — and this on_stream filter is the one place in the Lua layer that sees a whole chunk (so it has
--- the look-ahead a per-line trigger lacks). Pure, so it's unit-tested (regexes-in-triggers aren't).
--- Two shapes of the leading blank, because the RPC delivers the telemetry as SEPARATE messages (one
--- text_block per feed) and each one this filter sees is a whole message:
---   (1) INSIDE a message:  `…kxwq_prompt\n\nkxwq_hud`  → collapse the blank line(s) before the kxwq_ line.
---   (2) at the message START: a telemetry message begins with `\n` (the server frames it that way). At the
---       seam it forms a blank ONLY when the previous message also ended at line-start (`\n`+`\n`). But not
---       every message ends in `\n` — a channel/chat line (`[questinfo] …`) or a GA-flushed prompt ends
---       mid-line, and then this message's leading `\n` is the SEPARATOR, not a blank. Stripping it there
---       glued the (gagged) tag onto the previous real line (`…in this area.kxwq_prompt 354…`). So we can't
---       decide from this message alone: track whether the last emitted chunk ended in `\n` (prev_ended_nl)
---       and only drop the leading `\n` when it did — otherwise keep it as the line break the seam needs.
-local prev_ended_nl = true   -- session start = line-start; reset each reload (module re-runs)
-local function strip_kxwt_prompt_blanks(text: string): string
-  local t = (text:gsub("\n\n+(kxw[tq]_)", "\n%1"))   -- (1) collapse blank line(s) before a kxwq_ line to one \n
-  if prev_ended_nl then
-    t = (t:gsub("^\n(kxw[tq]_)", "%1"))               -- (2) prev already ended the line → the lone leading \n
-  end                                                 --     is the boundary blank; drop it (no merge risk)
-  if #t > 0 then prev_ended_nl = t:sub(-1) == "\n" end -- remember the seam state for the next message
-  return t
-end
-if _AA_TEST then
-  _AA_TEST.strip_kxwt_prompt_blanks = strip_kxwt_prompt_blanks
-  -- The strip carries seam state across messages; let specs pin it deterministically.
-  _AA_TEST.set_prev_ended_nl = function(v: boolean) prev_ended_nl = v end
+-- ── Prompt-framing blank lines ────────────────────────────────────────────────────────────────────
+-- The server wraps its (gagged) kxwt/kxwq telemetry in blank lines — `…\n\nkxwq_hud|…`, plus a blank at
+-- every idle prompt tick — so once the ^kxw[tq]_ hider gags the telemetry those framing blanks leak to
+-- the display (~2 per tick). This on_stream filter is the ONE place that sees the whole raw stream before
+-- the line assembler splits it: the \n-terminated telemetry lines, the GA-flushed prompts (the host
+-- surfaces IAC GO-AHEAD as the marker U+E000 = "\238\128\128", UPSTREAM of us), and the blanks. Earlier
+-- attempts failed because they ran a per-MESSAGE regex — but the RPC splits the stream at arbitrary byte
+-- boundaries, so no single message is a reliable unit. So we run a proper STATEFUL streaming filter that
+-- reassembles the stream into units across chunks and drops only the framing blanks:
+--
+--   • A \n-terminated telemetry line (kxw[tq]_…) or an INVISIBLE GA prompt (a kxw[tq]_… or empty GA
+--     segment) is emitted verbatim (so its parser / on_prompt still fires) and marks the run "gagged".
+--   • A blank line (`\n` with nothing before it) is HELD, not emitted, until the run resolves.
+--   • Real text resolves the run: if the run held telemetry, the whole framing run collapses to ONE
+--     blank when real text brackets it on both sides (a paragraph break survives) and to nothing
+--     otherwise; a run with NO telemetry in it (genuine MUD spacing) is emitted verbatim.
+--   • A VISIBLE GA segment (real text the RPC synthesised a GO-AHEAD for, because its text_block didn't
+--     end in \n) is emitted with a terminating \n and the server's now-redundant terminator newline is
+--     swallowed — otherwise the following telemetry would glue onto it (`You scan…kxwq_hud…`).
+--
+-- Emitting gagged telemetry BEFORE a held blank is invisible (it's gagged), so the display order is
+-- unaffected; only blank lines are ever deferred, and they carry no parser state. Do NOT revert this to a
+-- per-message regex.
+local GA_MARK <const> = "\238\128\128"   -- U+E000, the host's IAC GO-AHEAD marker (see LineAssembler.swift)
+
+-- Streaming state (module-level so it resets on reload; a leftover held blank at reconnect is harmless).
+local fb_buf     = ""       -- bytes not yet split into a complete unit
+local fb_held    = 0        -- blank lines seen in the current run, not yet resolved
+local fb_run_gag = false    -- did the current run include a gagged (hidden) line/prompt?
+local fb_prior   = false    -- has any real text been emitted before the current run?
+local fb_swallow = false    -- swallow the next lone terminator \n after a visible GA segment?
+
+local function fb_resolve(): string
+  local s: string
+  if fb_run_gag then
+    s = (fb_held > 0 and fb_prior) and "\n" or ""   -- framing: one break iff bracketed by real text
+  else
+    s = ("\n"):rep(fb_held)                          -- genuine blank run: preserve verbatim
+  end
+  fb_held = 0; fb_run_gag = false
+  return s
 end
 
--- The on_stream filter: buffer + parse when enabled, else pass the chunk straight through — then strip the
--- kxwt prompt-framing blanks on the way out (both paths, so it works whether or not the dclient RPC is on).
+-- Peels prompt-framing blank lines out of the reassembled stream. Pure w.r.t. its module state; unit-
+-- tested via _AA_TEST.frame_filter (with reset_frame_filter to pin the streaming state deterministically).
+local function frame_filter(text: string): string
+  fb_buf = fb_buf .. text
+  local out: {string} = {}
+  while true do
+    local nl = fb_buf:find("\n", 1, true)
+    local ga = fb_buf:find(GA_MARK, 1, true)
+    if not nl and not ga then break end
+    local idx: integer; local is_ga: boolean
+    if nl and (not ga or nl < ga) then idx = nl; is_ga = false else idx = ga; is_ga = true end
+    local unit = fb_buf:sub(1, idx - 1)
+    if is_ga then
+      fb_buf = fb_buf:sub(idx + #GA_MARK)
+      if unit == "" then
+        -- A spurious empty prompt boundary (the server GA's after a bare newline). Keep the marker so any
+        -- on_prompt still fires, but emit NO line, and swallow the wire's now-redundant terminator \n.
+        out[#out + 1] = GA_MARK
+        fb_run_gag = true; fb_swallow = true
+      elseif unit:match("^kxw[tq]_") then
+        -- An INVISIBLE telemetry prompt (kxwq_hud, kxwq_fighting, …). Emit it TERMINATED with a \n so it
+        -- is a clean gagged line (not left open to absorb a later blank), mark the run gagged, and swallow
+        -- the wire terminator \n so it doesn't become a stray blank.
+        out[#out + 1] = unit .. GA_MARK .. "\n"
+        fb_run_gag = true; fb_swallow = true
+      else
+        -- A VISIBLE GA segment (real text the RPC synthesised a GO-AHEAD for). Terminate its line and
+        -- swallow the wire terminator, so following telemetry can't glue onto it.
+        out[#out + 1] = fb_resolve() .. unit .. GA_MARK .. "\n"
+        fb_prior = true; fb_swallow = true
+      end
+    else
+      fb_buf = fb_buf:sub(idx + 1)
+      if unit == "" then
+        if fb_swallow then fb_swallow = false           -- redundant terminator after a visible GA
+        else fb_held = fb_held + 1 end                  -- a real blank: hold it
+      elseif unit:match("^kxw[tq]_") then
+        out[#out + 1] = unit .. "\n"                     -- gagged telemetry line: pass through
+        fb_run_gag = true; fb_swallow = false
+      else
+        out[#out + 1] = fb_resolve() .. unit .. "\n"     -- real text: resolve the run, then emit
+        fb_prior = true; fb_swallow = false
+      end
+    end
+  end
+  return table.concat(out)
+end
+
+if _AA_TEST then
+  _AA_TEST.frame_filter = frame_filter
+  _AA_TEST.reset_frame_filter = function()
+    fb_buf = ""; fb_held = 0; fb_run_gag = false; fb_prior = false; fb_swallow = false
+  end
+end
+
+-- The on_stream filter: peel the in-band `;s…;e…;` frames (when the dclient RPC is on), then run the
+-- prompt-framing filter above on the way out (both paths, so it works whether or not the RPC is on).
 local function dclient_feed(chunk: string): string
-  if not dclient.on then return strip_kxwt_prompt_blanks(chunk) end
+  if not dclient.on then return frame_filter(chunk) end
   dclient.buf = dclient.buf .. chunk
-  return strip_kxwt_prompt_blanks(dclient_parse())
+  return frame_filter(dclient_parse())
 end
 if on_stream then on_stream(dclient_feed) end
 

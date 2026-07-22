@@ -15,15 +15,54 @@ import AppKit
 final class TerminalService {
     @LazyInjected(Container.cursor) private var cursor
     
+    /// The terminal's mode as it was BEFORE we went raw, captured once at launch so the watchdog's
+    /// `emergencyRestore()` can put the tty back exactly — from any thread, with no shared state — if
+    /// the main loop wedges. Guarded by its own lock since the watchdog reads it off-thread.
+    private static let originalTermiosLock = NSLock()
+    private static var originalTermios: termios?
+
     static func setRawTerminal() {
         var tattr = termios()
         tcgetattr(STDIN_FILENO, &tattr)
+        originalTermiosLock.lock(); originalTermios = tattr; originalTermiosLock.unlock()
         // Clear IEXTEN too (not just ECHO/ICANON): it gates the line discipline's "status" character
         // (ctrl-T / VSTATUS), which otherwise raises SIGINFO instead of delivering the byte to us — and
         // also VLNEXT (ctrl-V) / VDISCARD (ctrl-O). With it off those ctrl keys reach `decodeKey` as
         // ordinary bytes, so they're bindable like any other key (ctrl-T toggles the timestamp gutter).
         tattr.c_lflag &= ~tcflag_t(ECHO | ICANON | IEXTEN)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &tattr)
+    }
+
+    /// Put the terminal back into a usable state from a context that CANNOT trust the main loop or the
+    /// normal render path — the watchdog calls this when main has wedged. It deliberately uses only
+    /// operations that can't themselves block on the stuck loop:
+    ///   • `tcsetattr` restores cooked mode (an ioctl — never blocks on output),
+    ///   • `tcflow(TCOON)` resumes output in case a stray Ctrl-S (XOFF) flow-stopped the tty — a prime
+    ///     suspect for "writes hang forever",
+    ///   • the escape-sequence reset (scroll region, mouse, cursor) is written with the fd flipped
+    ///     NON-BLOCKING so a still-clogged tty drops it rather than hanging the watchdog too.
+    /// Safe to call from any thread; touches no instance state.
+    static func emergencyRestore() {
+        // Cooked mode back. Prefer the exact saved attrs; fall back to re-enabling the flags we cleared.
+        originalTermiosLock.lock(); let saved = originalTermios; originalTermiosLock.unlock()
+        if var t = saved {
+            tcsetattr(STDIN_FILENO, TCSANOW, &t)
+        } else {
+            var t = termios(); tcgetattr(STDIN_FILENO, &t)
+            t.c_lflag |= tcflag_t(ECHO | ICANON | IEXTEN | ISIG)
+            tcsetattr(STDIN_FILENO, TCSANOW, &t)
+        }
+        tcflow(STDOUT_FILENO, TCOON)   // undo a possible XOFF that flow-stopped output
+
+        let reset = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\r\n"
+        let bytes = Array(reset.utf8)
+        // Best-effort, non-blocking: if the tty output is genuinely stuck this write is dropped (EAGAIN)
+        // rather than blocking the watchdog on the way to exit. Cooked mode above is what actually makes
+        // the shell usable again; these escapes just tidy the screen when they can get through.
+        let flags = fcntl(STDOUT_FILENO, F_GETFL)
+        if flags != -1 { _ = fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK) }
+        bytes.withUnsafeBytes { _ = write(STDOUT_FILENO, $0.baseAddress, $0.count) }
+        if flags != -1 { _ = fcntl(STDOUT_FILENO, F_SETFL, flags) }
     }
     
     // MARK: - Input decoding model

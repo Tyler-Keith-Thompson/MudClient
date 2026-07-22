@@ -120,27 +120,93 @@ end
 
 
 
-local prev_ended_nl = true
-local function strip_kxwt_prompt_blanks(text)
-   local t = (text:gsub("\n\n+(kxw[tq]_)", "\n%1"))
-   if prev_ended_nl then
-      t = (t:gsub("^\n(kxw[tq]_)", "%1"))
-   end
-   if #t > 0 then prev_ended_nl = t:sub(-1) == "\n" end
-   return t
-end
-if _AA_TEST then
-   _AA_TEST.strip_kxwt_prompt_blanks = strip_kxwt_prompt_blanks
 
-   _AA_TEST.set_prev_ended_nl = function(v) prev_ended_nl = v end
+
+
+
+
+
+local GA_MARK <const> = "\238\128\128"
+
+
+local fb_buf = ""
+local fb_held = 0
+local fb_run_gag = false
+local fb_prior = false
+local fb_swallow = false
+
+local function fb_resolve()
+   local s
+   if fb_run_gag then
+      s = (fb_held > 0 and fb_prior) and "\n" or ""
+   else
+      s = ("\n"):rep(fb_held)
+   end
+   fb_held = 0; fb_run_gag = false
+   return s
+end
+
+
+
+local function frame_filter(text)
+   fb_buf = fb_buf .. text
+   local out = {}
+   while true do
+      local nl = fb_buf:find("\n", 1, true)
+      local ga = fb_buf:find(GA_MARK, 1, true)
+      if not nl and not ga then break end
+      local idx; local is_ga
+      if nl and (not ga or nl < ga) then idx = nl; is_ga = false else idx = ga; is_ga = true end
+      local unit = fb_buf:sub(1, idx - 1)
+      if is_ga then
+         fb_buf = fb_buf:sub(idx + #GA_MARK)
+         if unit == "" then
+
+
+            out[#out + 1] = GA_MARK
+            fb_run_gag = true; fb_swallow = true
+         elseif unit:match("^kxw[tq]_") then
+
+
+
+            out[#out + 1] = unit .. GA_MARK .. "\n"
+            fb_run_gag = true; fb_swallow = true
+         else
+
+
+            out[#out + 1] = fb_resolve() .. unit .. GA_MARK .. "\n"
+            fb_prior = true; fb_swallow = true
+         end
+      else
+         fb_buf = fb_buf:sub(idx + 1)
+         if unit == "" then
+            if fb_swallow then fb_swallow = false
+            else fb_held = fb_held + 1 end
+         elseif unit:match("^kxw[tq]_") then
+            out[#out + 1] = unit .. "\n"
+            fb_run_gag = true; fb_swallow = false
+         else
+            out[#out + 1] = fb_resolve() .. unit .. "\n"
+            fb_prior = true; fb_swallow = false
+         end
+      end
+   end
+   return table.concat(out)
+end
+
+if _AA_TEST then
+   _AA_TEST.frame_filter = frame_filter
+   _AA_TEST.reset_frame_filter = function()
+      fb_buf = ""; fb_held = 0; fb_run_gag = false; fb_prior = false; fb_swallow = false
+   end
 end
 
 
 
 local function dclient_feed(chunk)
-   if not dclient.on then return strip_kxwt_prompt_blanks(chunk) end
+   if not dclient.on then return frame_filter(chunk) end
    dclient.buf = dclient.buf .. chunk
-   return strip_kxwt_prompt_blanks(dclient_parse())
+   return frame_filter(dclient_parse())
 end
 if on_stream then on_stream(dclient_feed) end
 
