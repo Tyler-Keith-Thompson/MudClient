@@ -103,11 +103,44 @@ local function dclient_parse(): string
   return table.concat(out)
 end
 
--- The on_stream filter: buffer + parse when enabled, else pass the chunk straight through.
+-- The server frames its (gagged) kxwt/kxwq machine lines with a LEADING blank line — e.g. after `You scan
+-- the area...` it sends `\n\nkxwq_hud|…`. The ^kxw[tq]_ hider gags the kxwq_ line, but the blank before it
+-- has no line to fill once the prompt is hidden, so an empty line leaked to the display EVERY tick. Drop the
+-- blank line(s) DIRECTLY before any kxw[tq]_ line (that's the prompt's leading newline); blanks before REAL
+-- text are left alone (genuine paragraph breaks). This is the natural home for it — an AlterAeon prompt/kxwt
+-- concern — and this on_stream filter is the one place in the Lua layer that sees a whole chunk (so it has
+-- the look-ahead a per-line trigger lacks). Pure, so it's unit-tested (regexes-in-triggers aren't).
+-- Two shapes of the leading blank, because the RPC delivers the telemetry as SEPARATE messages (one
+-- text_block per feed) and each one this filter sees is a whole message:
+--   (1) INSIDE a message:  `…kxwq_prompt\n\nkxwq_hud`  → collapse the blank line(s) before the kxwq_ line.
+--   (2) at the message START: a telemetry message begins with `\n` (the server frames it that way). At the
+--       seam it forms a blank ONLY when the previous message also ended at line-start (`\n`+`\n`). But not
+--       every message ends in `\n` — a channel/chat line (`[questinfo] …`) or a GA-flushed prompt ends
+--       mid-line, and then this message's leading `\n` is the SEPARATOR, not a blank. Stripping it there
+--       glued the (gagged) tag onto the previous real line (`…in this area.kxwq_prompt 354…`). So we can't
+--       decide from this message alone: track whether the last emitted chunk ended in `\n` (prev_ended_nl)
+--       and only drop the leading `\n` when it did — otherwise keep it as the line break the seam needs.
+local prev_ended_nl = true   -- session start = line-start; reset each reload (module re-runs)
+local function strip_kxwt_prompt_blanks(text: string): string
+  local t = (text:gsub("\n\n+(kxw[tq]_)", "\n%1"))   -- (1) collapse blank line(s) before a kxwq_ line to one \n
+  if prev_ended_nl then
+    t = (t:gsub("^\n(kxw[tq]_)", "%1"))               -- (2) prev already ended the line → the lone leading \n
+  end                                                 --     is the boundary blank; drop it (no merge risk)
+  if #t > 0 then prev_ended_nl = t:sub(-1) == "\n" end -- remember the seam state for the next message
+  return t
+end
+if _AA_TEST then
+  _AA_TEST.strip_kxwt_prompt_blanks = strip_kxwt_prompt_blanks
+  -- The strip carries seam state across messages; let specs pin it deterministically.
+  _AA_TEST.set_prev_ended_nl = function(v: boolean) prev_ended_nl = v end
+end
+
+-- The on_stream filter: buffer + parse when enabled, else pass the chunk straight through — then strip the
+-- kxwt prompt-framing blanks on the way out (both paths, so it works whether or not the dclient RPC is on).
 local function dclient_feed(chunk: string): string
-  if not dclient.on then return chunk end
+  if not dclient.on then return strip_kxwt_prompt_blanks(chunk) end
   dclient.buf = dclient.buf .. chunk
-  return dclient_parse()
+  return strip_kxwt_prompt_blanks(dclient_parse())
 end
 if on_stream then on_stream(dclient_feed) end
 

@@ -104,10 +104,43 @@ local function dclient_parse()
 end
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+local prev_ended_nl = true
+local function strip_kxwt_prompt_blanks(text)
+   local t = (text:gsub("\n\n+(kxw[tq]_)", "\n%1"))
+   if prev_ended_nl then
+      t = (t:gsub("^\n(kxw[tq]_)", "%1"))
+   end
+   if #t > 0 then prev_ended_nl = t:sub(-1) == "\n" end
+   return t
+end
+if _AA_TEST then
+   _AA_TEST.strip_kxwt_prompt_blanks = strip_kxwt_prompt_blanks
+
+   _AA_TEST.set_prev_ended_nl = function(v) prev_ended_nl = v end
+end
+
+
+
 local function dclient_feed(chunk)
-   if not dclient.on then return chunk end
+   if not dclient.on then return strip_kxwt_prompt_blanks(chunk) end
    dclient.buf = dclient.buf .. chunk
-   return dclient_parse()
+   return strip_kxwt_prompt_blanks(dclient_parse())
 end
 if on_stream then on_stream(dclient_feed) end
 
