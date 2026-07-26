@@ -15,9 +15,9 @@ local function stub(name, fn)
   __host_builtins[name] = true              -- not smear across builtins through one shared noop)
 end
 for _, n in ipairs({
-  "trigger", "alias", "gag", "send",
+  "trigger", "alias", "gag", "suppress", "send",
   "rule_remove", "rule_enable", "class_enable", "class_remove",
-  "untrigger", "unalias", "ungag",
+  "untrigger", "unalias", "ungag", "unsuppress",
   "music_play", "music_stop", "music_volume", "music_midi", "music_midi_reset", "msp_volume", "speech_volume",
   "sound_once",
   "panel_render", "panel_top", "panel_height", "panel_top_height",

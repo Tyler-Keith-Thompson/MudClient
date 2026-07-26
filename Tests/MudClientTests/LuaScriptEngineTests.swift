@@ -657,6 +657,28 @@ private func luaStringLiteral(_ s: String) -> String {
   }
 }
 
+@Test func gagAndSuppressShareTheEngineButStayInSeparateLanes() throws {
+  try withTestContainer {
+    Container.anthropicAPIKeyProvider.register { { nil } }
+    let engine = LuaScriptEngine()
+    engine.onEcho = { _ in }
+    try engine.load(source: #"""
+        gag("\n^\n^kxwq_hud.*")        -- multi-line gag  → buffer-delete rule
+        suppress("\n^\n^kxwq_sky.*$")  -- suppress        → buffer-delete rule
+        gag("^kxwt_")                  -- single-line gag → per-line (NOT a buffer rule)
+    """#)
+    #expect(engine.bufferDeleteRules().count == 2)         // both multi-line rules feed the shared engine
+    #expect(engine.processLine("kxwt_music foo") == nil)   // single-line gag still drops its whole line
+
+    engine.evalREPL(#"ungag("*")"#)                        // remove ALL gags…
+    #expect(engine.bufferDeleteRules().count == 1)         // …the suppress is untouched (own lane)
+    #expect(engine.processLine("kxwt_music foo") == "kxwt_music foo")  // the single-line gag is gone
+
+    engine.evalREPL(#"unsuppress("*")"#)                   // now clear suppresses
+    #expect(engine.bufferDeleteRules().isEmpty)
+  }
+}
+
 @Test func triggerStringReturnIsNotSeenByLaterTriggers() throws {
   try withTestContainer {
     Container.anthropicAPIKeyProvider.register { { nil } }

@@ -35,17 +35,21 @@ final class LuaScriptEngine: @unchecked Sendable {
         /// Pattern specificity, computed once at registration from the pattern source
         /// (see `Self.specificity(of:)`). Higher = more specific. Breaks ties after priority.
         let specificity: Int
-        /// MULTI-LINE gag only: how many lines the pattern spans (newlines in the source + 1). `nil` for an
-        /// ordinary single-line rule. When set, `regex` is compiled with line-ending anchoring (so `^`/`$`
-        /// match at each embedded newline) and is a TRUE multi-line regex — matched against a buffered window
-        /// by the streaming ``MultilineGagFilter``, which DELETES the matched span (newlines and all). Single-
-        /// line processing skips it (its pattern contains a `\n`, so it can't match one line anyway). The span
-        /// tells the filter how many trailing lines to hold so a boundary-spanning match can still complete.
+        /// BUFFER-DELETE rule (a `#suppress`, or a multi-line `#gag`): how many lines its pattern spans
+        /// (newlines in the source + 1; 1 for a single-line `#suppress`). `nil` for an ordinary single-line
+        /// `#gag` (matched per line in `processLine`). When set, `regex` is a compiled DELETE regex run
+        /// against a buffered window by the shared ``BufferDeleteFilter``, which cuts out every span it
+        /// matches. `span` tells the filter how many trailing lines to hold so a boundary-spanning match can
+        /// still complete. Both `#gag` (multi-line) and `#suppress` use the SAME filter — the only difference
+        /// is the regex compiled at registration (`#gag` extends its match to eat the whole final line).
         let multilineSpan: Int?
+        /// `#suppress` rule (char-exact delete) vs a `#gag` rule (line-oriented). Only used to keep the two in
+        /// separate lanes for listing / `#ungag` vs `#unsuppress`; the delete engine treats them identically.
+        let isSuppress: Bool
         var enabled: Bool = true
         init(id: Int, regex: Regex<AnyRegexOutput>, patternSource: String = "", handler: LuaFunctionRef?,
              oneshot: Bool = false, ruleClass: String? = nil,
-             priority: Int = 0, specificity: Int = 0, multilineSpan: Int? = nil) {
+             priority: Int = 0, specificity: Int = 0, multilineSpan: Int? = nil, isSuppress: Bool = false) {
             self.id = id
             self.regex = regex
             self.patternSource = patternSource
@@ -55,6 +59,7 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.priority = priority
             self.specificity = specificity
             self.multilineSpan = multilineSpan
+            self.isSuppress = isSuppress
         }
     }
 
@@ -540,15 +545,42 @@ final class LuaScriptEngine: @unchecked Sendable {
         return current
     }
 
-    /// The currently-enabled MULTI-line gags as (true multi-line regex, span-in-lines) pairs. Empty when none
-    /// are registered (the common case — the streaming filter then does nothing). Snapshotted under the lock.
-    func multilineGags() -> [(regex: Regex<AnyRegexOutput>, span: Int)] {
+    /// The currently-enabled BUFFER-DELETE rules (`#suppress` + multi-line `#gag`) as (delete regex, span)
+    /// pairs, feeding the shared ``BufferDeleteFilter``. Empty when none registered (the common case).
+    /// Snapshotted under the lock.
+    func bufferDeleteRules() -> [(regex: Regex<AnyRegexOutput>, span: Int)] {
         lock.lock(); defer { lock.unlock() }
         return gags.compactMap { r in r.enabled ? r.multilineSpan.map { (r.regex, $0) } : nil }
     }
 
-    /// How many lines a gag pattern spans if it contains a newline (a literal LF, or the regex escape `\n`
-    /// you type as `#gag \n^kxwq_hud`): newline-count + 1. Returns nil for an ordinary single-line pattern.
+    /// Register a `#gag` or `#suppress` rule from `pat`. Both share ONE delete engine — the only difference is
+    /// the regex compiled here: `#suppress` deletes exactly what `pat` matches; a multi-line `#gag` extends the
+    /// match with `[^\n]*\n` so the whole FINAL line goes (Reading B); a single-line `#gag` stays a per-line
+    /// rule (`multilineSpan == nil`, handled in `processLine`). Returns the new rule id, or nil if `pat` (or
+    /// the extended form) won't compile.
+    private func registerGagOrSuppress(_ pat: String, suppress: Bool) -> Int? {
+        let span = Self.multilineSpan(of: pat)
+        let regex: Regex<AnyRegexOutput>
+        let storedSpan: Int?
+        if suppress {
+            guard let rx = try? Regex(pat).anchorsMatchLineEndings() else { return nil }
+            regex = rx; storedSpan = span ?? 1                 // single-line suppress still runs in the buffer
+        } else if span != nil {
+            // multi-line gag: swallow the rest of the FINAL matched line + its newline, so the row collapses.
+            guard let rx = try? Regex("(?:" + pat + ")[^\\n]*\\n").anchorsMatchLineEndings() else { return nil }
+            regex = rx; storedSpan = span
+        } else {
+            guard let rx = try? Regex(pat) else { return nil } // single-line gag: whole-line drop in processLine
+            regex = rx; storedSpan = nil
+        }
+        let rule = Rule(id: nextId(), regex: regex, patternSource: pat, handler: nil,
+                        multilineSpan: storedSpan, isSuppress: suppress)
+        gags.append(rule)
+        return rule.id
+    }
+
+    /// How many lines a pattern spans if it contains a newline (a literal LF, or the regex escape `\n` you
+    /// type as `#gag \n^kxwq_hud`): newline-count + 1. Returns nil for a single-line pattern.
     static func multilineSpan(of src: String) -> Int? {
         let sep = "\u{1}"
         var s = src.replacingOccurrences(of: "\r\n", with: "\n")
@@ -656,40 +688,50 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.insertSorted(rule, into: &self.aliasRules)
             return [.int(Int64(rule.id))]
         }
-        // gag(pattern) -> id. Drops matching lines; removable/toggleable by id like any rule.
+        // gag(pattern) -> id. LINE-oriented hiding. A single-line pattern drops every matching line whole
+        // (its newline goes too — matched per line in `processLine`). A MULTI-LINE pattern (one containing a
+        // newline — a literal LF or the regex escape `\n`) runs in the shared BufferDeleteFilter and deletes
+        // the span it matches, ROUNDED UP so the whole FINAL matched line goes (its trailing newline eaten),
+        // collapsing rows: `#gag \n^\n^kxwq_hud.*` turns "Tree'\n\nkxwq_hud …\nkxwq_sky" into "Tree'kxwq_sky".
+        // For char-exact deletion that leaves the rest intact, use `#suppress`. (`*` is regex repeat — `.*`.)
         lua.register("gag") { [weak self] args in
             guard let self else { return [] }
-            // Bare `gag` — no pattern (the `#gag` REPL passes zero args); show the syntax AND list the
-            // registered gags, mirroring bare `#trigger` / `#alias`.
-            guard case .string(let pat)? = args.first else {
+            guard case .string(let pat)? = args.first else {   // bare `#gag` → syntax + list
                 self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
                 self.listGagRules()
                 return []
             }
-            guard var rx = try? Regex(pat) else {
+            guard let id = self.registerGagOrSuppress(pat, suppress: false) else {
                 self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
                 return []
             }
-            // MULTI-LINE gag: a pattern that contains a newline (a literal LF, or the regex escape `\n`) is a
-            // TRUE multi-line regex, matched against a buffered window and DELETING the span it matches —
-            // newlines and all. `\n` matches an actual newline; `^`/`$` match at each embedded line boundary
-            // (line-ending anchoring, enabled below). So `#gag \n^\n^kxwq_hud.*` deletes "<newline><blank
-            // line><newline>kxwq_hud…", collapsing the framing blank instead of leaving it. The span (line
-            // count) tells the streaming MultilineGagFilter how many trailing lines to hold for a match that
-            // straddles a chunk boundary. NB `*` is regex repeat, not a glob — use `.*` to mean "anything".
-            let span = Self.multilineSpan(of: pat)
-            if span != nil { rx = rx.anchorsMatchLineEndings() }
-            let rule = Rule(id: self.nextId(), regex: rx, patternSource: pat, handler: nil, multilineSpan: span)
-            self.gags.append(rule)
-            return [.int(Int64(rule.id))]
+            return [.int(Int64(id))]
         }
-        // untrigger / unalias / ungag <id | regex> — remove matching rules from ONE list (unlike
-        // rule_remove(id), which spans all three types). A bare NUMBER removes by id; anything else is
-        // compiled as a regex and matched against each rule's patternSource, so `#unalias dsleep` drops
-        // the `^dsleep$` alias. Echoes what went (or that nothing matched).
-        lua.register("untrigger") { [weak self] args in self?.unregister(args, kind: "trigger"); return [] }
-        lua.register("unalias")   { [weak self] args in self?.unregister(args, kind: "alias");   return [] }
+        // suppress(pattern) -> id. CHAR-EXACT deletion: cuts out exactly what the regex matches, anywhere in
+        // the stream — partial lines and across lines included — via the SAME BufferDeleteFilter as multi-line
+        // gag, only without the whole-final-line rounding. `#suppress \n^\n^kxwq_hud.*$` leaves the hud line's
+        // own newline (so the rows stay split); `#suppress foo` turns "xfooy" into "xy". Greedy patterns are
+        // sharp: `#suppress a.*` cuts from every `a` to end of line (`(?s)a.*` to blow through newlines too).
+        lua.register("suppress") { [weak self] args in
+            guard let self else { return [] }
+            guard case .string(let pat)? = args.first else {   // bare `#suppress` → syntax + list
+                self.usage(#"suppress: expected a valid regex pattern — e.g. suppress("\n^\n^kxwq_hud.*$")"#)
+                self.listSuppressRules()
+                return []
+            }
+            guard let id = self.registerGagOrSuppress(pat, suppress: true) else {
+                self.usage(#"suppress: expected a valid regex pattern — e.g. suppress("\n^\n^kxwq_hud.*$")"#)
+                return []
+            }
+            return [.int(Int64(id))]
+        }
+        // untrigger / unalias / ungag / unsuppress <id | regex> — remove matching rules from ONE lane (unlike
+        // rule_remove(id), which spans all types). Bare NUMBER → by id; else a regex matched against each
+        // rule's patternSource. `#ungag` never touches `#suppress` rules and vice versa.
+        lua.register("untrigger") { [weak self] args in self?.unregister(args, kind: "trigger");  return [] }
+        lua.register("unalias")   { [weak self] args in self?.unregister(args, kind: "alias");    return [] }
         lua.register("ungag")     { [weak self] args in self?.unregister(args, kind: "gag");      return [] }
+        lua.register("unsuppress"){ [weak self] args in self?.unregister(args, kind: "suppress"); return [] }
         // rule_remove(id) — drop the trigger/alias/gag with this id (from wherever it lives).
         lua.register("rule_remove") { [weak self] args in
             guard let self, let id = args.first.flatMap(Self.intArg) else { return [] }
@@ -1769,7 +1811,8 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// bare `#trigger` prints under the syntax line. `lineRules` is already kept sorted by firing order.
     private func listLineRules() { listRules(lineRules, label: "trigger", kind: "line-trigger") }
     private func listAliasRules() { listRules(aliasRules, label: "alias", kind: "alias") }
-    private func listGagRules() { listRules(gags, label: "gag", kind: "gag") }
+    private func listGagRules() { listRules(gags.filter { !$0.isSuppress }, label: "gag", kind: "gag") }
+    private func listSuppressRules() { listRules(gags.filter { $0.isSuppress }, label: "suppress", kind: "suppress") }
 
     /// `untrigger` / `unalias` / `ungag <id | regex>` — remove rules of ONE kind. Bare number → by id;
     /// otherwise the arg is a regex matched against each rule's `patternSource`. Reports what was removed.
@@ -1793,11 +1836,20 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.usage("un\(kind): '\(needle)' isn't a number or a valid regex.")
             return
         }
+        // `#gag` and `#suppress` share the `gags` array — keep the un-command in its own lane so `#ungag *`
+        // never removes a `#suppress` rule (and vice versa).
+        let lane: (Rule) -> Bool
+        switch kind {
+        case "suppress": lane = { $0.isSuppress }
+        case "gag":      lane = { !$0.isSuppress }
+        default:         lane = { _ in true }
+        }
+        let full: (Rule) -> Bool = { predicate($0) && lane($0) }
         let removed: [Rule]
         switch kind {
-        case "trigger": removed = lineRules.filter(predicate); lineRules.removeAll(where: predicate)
-        case "alias":   removed = aliasRules.filter(predicate); aliasRules.removeAll(where: predicate)
-        default:        removed = gags.filter(predicate); gags.removeAll(where: predicate)
+        case "trigger": removed = lineRules.filter(full); lineRules.removeAll(where: full)
+        case "alias":   removed = aliasRules.filter(full); aliasRules.removeAll(where: full)
+        default:        removed = gags.filter(full); gags.removeAll(where: full)
         }
         if removed.isEmpty {
             onEcho("[\(kind)] nothing matched \(matchDesc).")

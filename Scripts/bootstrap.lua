@@ -442,8 +442,14 @@ doc("alias", { sig = "alias(pattern, handler[, opts]) -> id", group = "triggers"
   text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger() (oneshot/class/priority). The MOST SPECIFIC matching alias wins (priority desc, then specificity desc, then registration order) — a narrow pattern beats a broad one regardless of load order.",
   example = "alias(\"^gg$\", function() send(\"get all from corpse\") end)" })
 doc("gag", { sig = "gag(pattern) -> id", group = "triggers",
-  text = "Drop every server line matching the pattern. Removable/toggleable by id like any rule. Bare `#gag` (no pattern) lists every registered gag (like `#trigger` / `#alias`).",
-  example = "gag(\"^kxwt_\")" })
+  text = "LINE-oriented hide. A single-line pattern drops every matching server line whole (its newline too). A MULTI-line pattern (one containing a newline / the `\\n` escape) deletes the span it matches, rounded up so the whole FINAL matched line goes — collapsing rows (e.g. `#gag \\n^\\n^kxwq_hud.*` turns a gossip line + framing blank + hud line into just the gossip line joined to what follows). For exact, non-line-rounded deletion use `suppress`. Removable/toggleable by id; bare `#gag` lists every gag.",
+  example = "gag(\"^kxwt_\")    #gag \\n^\\n^kxwq_hud.*" })
+doc("suppress", { sig = "suppress(pattern) -> id", group = "triggers",
+  text = "CHAR-EXACT delete: cut out exactly what the regex matches, anywhere in the stream — partial lines and across lines included (shares the same buffered engine as multi-line gag, minus the whole-final-line rounding). `#suppress \\n^\\n^kxwq_hud.*$` collapses a framing blank but leaves the hud line's own newline (rows stay split); `#suppress foo` turns \"xfooy\" into \"xy\". Greedy patterns are sharp. Removable/toggleable by id; bare `#suppress` lists them.",
+  example = "suppress(\"\\n^\\n^kxwq_hud.*$\")" })
+doc("unsuppress", { sig = "unsuppress(<id|regex>)", group = "triggers",
+  text = "Remove suppress rule(s) by id (a bare number) OR by regex matched against their pattern source. Only touches SUPPRESSES (never gags). (`#suppress` lists them.)",
+  example = "#unsuppress 9    #unsuppress kxwq_hud" })
 doc("rule_remove", { sig = "rule_remove(id)", group = "triggers",
   text = "Remove the trigger, alias, or gag with this id (spans all three types)." })
 doc("untrigger", { sig = "untrigger(<id|regex>)", group = "triggers",

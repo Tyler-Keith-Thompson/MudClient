@@ -121,9 +121,9 @@ extension AsyncSequence where Self: Sendable, Element == String {
     }
 
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
-        // Streaming multi-line gag matcher, persisted across chunks so a gag can span a message boundary.
-        // Empty (does nothing) unless a `gag()` pattern contains a newline.
-        var filter = MultilineGagFilter()
+        // Shared buffer-delete engine for `#suppress` + multi-line `#gag`, persisted across chunks so a rule
+        // can span a message boundary. Empty (does nothing) unless such a rule is registered.
+        var filter = BufferDeleteFilter()
         return map { output in
             // Split on the server's OWN newlines and fire triggers/single-line gags per line — nothing is
             // added, moved, or rewritten. A single-line-gagged line drops out; every surviving line (with its
@@ -136,7 +136,7 @@ extension AsyncSequence where Self: Sendable, Element == String {
             let endedInNewline = lines.last == ""
             let lastFed = endedInNewline ? lines.count - 2 : lines.count - 1
             let engine = Container.scriptInterpreter().engine
-            filter.gags = engine.multilineGags()   // refresh (a reload can change them); usually empty
+            filter.rules = engine.bufferDeleteRules()   // refresh (a reload can change them); usually empty
             // Mark LIVE (LiveGate) so triggers can tell real-time output from replayed history.
             let rendered: String = LiveGate.shared.live {
                 var acc = ""
@@ -164,25 +164,25 @@ extension AsyncSequence where Self: Sendable, Element == String {
     }
 }
 
-/// Streaming matcher for MULTI-line gags — gag patterns that span a newline (`\n^\n^kxwq_hud.*`). Unlike a
-/// single-line gag, a multi-line gag is a TRUE regex matched against a rolling buffer of rendered text, and
-/// it DELETES the span it matches — the newlines it consumes included — so `…bard?'\n\nkxwq_hud…` becomes
-/// `…bard?'\n…` (the framing blank collapses) rather than leaving the blank behind. Text is fed line by line
-/// (each already single-line-processed); the filter keeps the last `maxSpan - 1` lines buffered so a match
+/// Shared buffer-delete engine for `#suppress` and multi-line `#gag`. Both compile to a delete regex (they
+/// differ only in HOW: `#suppress` deletes exactly what it matched; multi-line `#gag` extends its regex to eat
+/// the whole final line). This engine just deletes every span its rules match from a rolling buffer of
+/// rendered text — so `…bard'\n\nkxwq_hud…` collapses rather than leaving the framing blank. Text is fed line
+/// by line (each already single-line-processed); it keeps the last `maxSpan - 1` lines buffered so a match
 /// straddling a chunk boundary can still complete, and emits everything safely past that window.
-struct MultilineGagFilter {
-    /// Enabled multi-line gags: (true multi-line regex, how many lines it spans). Refreshed by the caller.
-    var gags: [(regex: Regex<AnyRegexOutput>, span: Int)] = []
+struct BufferDeleteFilter {
+    /// Enabled delete rules: (compiled delete regex, how many lines its pattern spans). Refreshed by the caller.
+    var rules: [(regex: Regex<AnyRegexOutput>, span: Int)] = []
     /// Rendered text accumulated but not yet safe to emit (a match could still form in these trailing lines).
     private var buffer = ""
-    private var maxSpan: Int { gags.map(\.span).max() ?? 1 }
+    private var maxSpan: Int { rules.map(\.span).max() ?? 1 }
 
     /// Feed the rendered text of one line (its display text plus its own newline, or no newline for a tail).
     /// Returns the text that is now safe to render (matched spans deleted, the last `maxSpan-1` lines held).
     mutating func feed(_ text: String) -> String {
-        guard !gags.isEmpty else { return text }             // no multi-line gags → pure passthrough, no buffering
+        guard !rules.isEmpty else { return text }            // no delete rules → pure passthrough, no buffering
         buffer += text
-        for g in gags { buffer = buffer.replacing(g.regex, with: "") }  // delete every matched span (newlines and all)
+        for r in rules { buffer = buffer.replacing(r.regex, with: "") }  // delete every matched span (newlines and all)
         return emitSafePrefix()
     }
 
