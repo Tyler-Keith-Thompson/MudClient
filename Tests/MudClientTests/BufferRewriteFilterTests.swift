@@ -192,6 +192,16 @@ private func run(_ f: inout BufferRewriteFilter, _ texts: [String]) -> String {
       #expect(!out.contains("\n\n"))
     }
   }
+  // Gagging a telemetry line must NOT swallow the colour reset the server glues to its front (which ends the
+  // preceding coloured line) — else the previous colour bleeds into the next shown line.
+  @Test func gaggedLineResetCarriesForwardNoColourBleed() async throws {
+    let esc = "\u{1B}"
+    let chunk = "\(esc)[1m\(esc)[34mIt is night.\n\(esc)[37m\(esc)[0mkxwq_sky 1 1 0\nGerod is here, sound asleep.\n"
+    let out = try await runPipeline({ e in e.evalREPL(#"gag("^kxwq_")"#) }, [chunk])
+    #expect(!out.contains("kxwq_sky"))                                        // telemetry hidden
+    #expect(out.contains("\(esc)[37m\(esc)[0mGerod is here, sound asleep."))  // reset carried onto Gerod
+  }
+
   // The RPC frames each idle prompt tick as its OWN chunk "\nkxwq_prompt X" — leading newline, no trailing.
   // Gagging the prompt must NOT leave the leading "\n" as a blank line on every tick (portable repro).
   @Test func gaggedLeadingNewlinePromptChunksAddNoBlankStream() async throws {

@@ -129,6 +129,9 @@ extension AsyncSequence where Self: Sendable, Element == String {
         // partial. When that partial was gagged, the "\n" has nothing to terminate, and emitting the empty
         // leading segment paints a blank line — one per gagged tick. Track it so we can drop that segment.
         var lastPartialGagged = false
+        // Zero-width ANSI (colour codes) carried forward from gagged lines, so a reset the server glues to a
+        // hidden telemetry line still terminates the previous coloured line instead of bleeding into the next.
+        var ansiCarry = ""
         return map { output in
             var lines = output
                 .replacingOccurrences(of: "\u{E000}", with: "")
@@ -153,9 +156,15 @@ extension AsyncSequence where Self: Sendable, Element == String {
                     let isPartial = isLast && !endedInNewline
                     // processLine fires triggers + single-line gags PER LINE, on time.
                     if let display = engine.processLine(line) {
-                        acc += filter.feed(display + (isPartial ? "" : "\n"))
-                    } else if isPartial {
-                        lastPartialGagged = true   // a gagged partial → its next-chunk terminator is dropped
+                        // Carry any zero-width colour codes from gagged lines onto this one, then reset.
+                        acc += filter.feed(ansiCarry + display + (isPartial ? "" : "\n"))
+                        ansiCarry = ""
+                    } else {
+                        // Gagged: drop the visible text but KEEP its zero-width ANSI (e.g. the "\27[0m" reset
+                        // the server glues to a telemetry line to end the PRECEDING coloured line — a bold-blue
+                        // "It is night."). Without this the colour bleeds into the next shown line.
+                        ansiCarry += Self.ansiCodes(in: line)
+                        if isPartial { lastPartialGagged = true }   // a gagged partial → its terminator is dropped
                     }
                 }
                 return acc
@@ -170,6 +179,31 @@ extension AsyncSequence where Self: Sendable, Element == String {
             return rendered
         }
         .eraseToAnyAsyncSequence()
+    }
+
+    /// Extract only the zero-width ANSI escape sequences from a line (dropping every spacing character). Used
+    /// to keep a gagged line's colour codes — chiefly a `\27[0m` reset the server prefixes to a telemetry line
+    /// to terminate the preceding coloured line — so hiding the line doesn't bleed that colour forward.
+    static func ansiCodes(in s: String) -> String {
+        let scalars = Array(s.unicodeScalars)
+        var result = String.UnicodeScalarView()
+        var i = 0
+        while i < scalars.count {
+            guard scalars[i] == "\u{1B}" else { i += 1; continue }   // not ESC → a spacing char, drop it
+            var j = i + 1
+            if j < scalars.count, scalars[j] == "[" {                // CSI: ESC [ … final-byte(0x40–0x7E)
+                j += 1
+                while j < scalars.count {
+                    let c = scalars[j]; j += 1
+                    if c.value >= 0x40 && c.value <= 0x7E { break }
+                }
+            } else {
+                j = Swift.min(j + 1, scalars.count)                  // other ESC form: keep ESC + next byte
+            }
+            result.append(contentsOf: scalars[i..<j])
+            i = j
+        }
+        return String(result)
     }
 }
 
