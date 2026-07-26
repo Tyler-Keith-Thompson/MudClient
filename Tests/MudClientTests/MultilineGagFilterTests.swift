@@ -70,6 +70,24 @@ private func run(_ f: inout MultilineGagFilter, _ texts: [String]) -> String {
   #expect(out == "Draak gossips.\nAfter.\n")
 }
 
+// The user's exact case: `\n^\n^kxwq_hud.*$` against  Tree\n\nkxwq_hud …\nkxwq_sky…
+@Test func dollarAnchorLeavesTheTagLinesOwnNewline() {
+  var f = MultilineGagFilter()
+  f.gags = [mlGag(#"\n^\n^kxwq_hud.*$"#, 3)]
+  let out = run(&f, ["Thiel newbies, 'Tree'\n", "\n", "kxwq_hud the info\n", "kxwq_sky 1 1 0\n"])
+  // `.*$` matches "kxwq_hud the info" but NOT the trailing newline ($ is zero-width), so the tag line's
+  // OWN newline survives. Result: ONE newline between them — faithful, not merged. This is correct.
+  #expect(out == "Thiel newbies, 'Tree'\nkxwq_sky 1 1 0\n")
+}
+
+// To ALSO delete the tag line's newline and merge the rows, match it explicitly with \n instead of $.
+@Test func matchingTheTrailingNewlineMergesTheRows() {
+  var f = MultilineGagFilter()
+  f.gags = [mlGag(#"\n^\n^kxwq_hud.*\n"#, 3)]
+  let out = run(&f, ["Thiel newbies, 'Tree'\n", "\n", "kxwq_hud the info\n", "kxwq_sky 1 1 0\n"])
+  #expect(out == "Thiel newbies, 'Tree'kxwq_sky 1 1 0\n")   // merged, because the \n was matched too
+}
+
 @Test func noNewlineTailIsNotGivenAnExtraNewline() {
   var f = MultilineGagFilter()
   f.gags = [mlGag(#"\n^\n^kxwq_hud.*"#, 3)]
