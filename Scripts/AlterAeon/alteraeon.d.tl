@@ -18,6 +18,7 @@ global on_inventory: function()
 global apply_fight:            function(? number, ? string)
 global active_opponents:       function(? number): {any}
 global is_ally:                function(string): boolean
+global is_nomelee:             function(): boolean            -- Combat.lua: you're in nomelee (nocombat) — your kxwt X-flag carries N
 global engaged:                function(? number): boolean   -- Combat.lua: text-derived in-combat predicate
 global in_combat:              function(): boolean           -- Combat.lua: engaged(); every pilot/eq/corpse consumer sits on it
 global smap_on_map_update:     function()                    -- AIPilot.lua: called after a ;smap; grid update

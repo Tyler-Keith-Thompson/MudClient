@@ -121,31 +121,84 @@ extension AsyncSequence where Self: Sendable, Element == String {
     }
 
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
-        map { output in
+        // Streaming multi-line gag matcher, persisted across chunks so a gag can span a message boundary.
+        // Empty (does nothing) unless a `gag()` pattern contains a newline.
+        var filter = MultilineGagFilter()
+        return map { output in
+            // Split on the server's OWN newlines and fire triggers/single-line gags per line — nothing is
+            // added, moved, or rewritten. A single-line-gagged line drops out; every surviving line (with its
+            // own newline) flows into the multi-line gag filter, which may DELETE spans across lines. (The
+            // U+E000 prompt-flush marker the IAC layer inserts is dropped here — its line assembler is gone.)
             let lines = output
-                .replacingOccurrences(of: "\r", with: "")
+                .replacingOccurrences(of: "\u{E000}", with: "")
                 .components(separatedBy: CharacterSet.newlines)
+            // A trailing "" when the chunk ends in a newline is the line TERMINATOR, not a blank line.
+            let endedInNewline = lines.last == ""
+            let lastFed = endedInNewline ? lines.count - 2 : lines.count - 1
             let engine = Container.scriptInterpreter().engine
-            // Fire triggers (and gags) for every line, in order — scripts (incl. the AI pilot's
-            // catch-all) observe here. Each line is passed through the rewrite stage: `processLine`
-            // returns the line to display (possibly rewritten by a trigger), or nil if it was gagged.
-            //
-            // Keep every surviving line verbatim — including blanks, which are the MUD's own spacing.
-            // (Prompt-framing blanks around gagged telemetry are removed UPSTREAM, in the AlterAeon
-            // on_stream filter — see DClientProbe.tl — which is the one place that sees the whole raw
-            // stream, GA-flushed prompts included, before the line assembler splits it.)
-            //
-            // Mark this batch LIVE (LiveGate) so triggers can tell real-time output from replayed
-            // history via is_live() — the replay() path deliberately doesn't set this, so speech and
-            // other live-only reactions stay silent on history.
-            let out = LiveGate.shared.live { lines.compactMap { engine.processLine($0) } }
-            // Record the DISPLAYED server output (post-gag/rewrite) into the searchable transcript for
-            // `#grep`/`#received`. Gagged protocol lines (kxwt_*) are already dropped by compactMap, so
-            // this stays human-meaningful rather than filling with wire noise.
+            filter.gags = engine.multilineGags()   // refresh (a reload can change them); usually empty
+            // Mark LIVE (LiveGate) so triggers can tell real-time output from replayed history.
+            let rendered: String = LiveGate.shared.live {
+                var acc = ""
+                for (i, line) in lines.enumerated() {
+                    if i == lines.count - 1 && endedInNewline { continue }   // terminator artifact, not a line
+                    // processLine fires triggers + single-line gags PER LINE, on time. A gagged line (nil) is
+                    // dropped and never enters the buffer; everything else feeds in WITH its own newline (the
+                    // last line has none when the chunk didn't end in one — a no-newline prompt tail).
+                    guard let display = engine.processLine(line) else { continue }
+                    let newline = !(i == lastFed && !endedInNewline)
+                    acc += filter.feed(display + (newline ? "\n" : ""))
+                }
+                return acc
+            }
+            // Record the DISPLAYED server output (post-gag) for `#grep`/`#received`, one line per row.
             let store = Container.transcriptStore()
-            for line in out { store.recordReceived(line) }
-            return out.joined(separator: "\n")
+            if !rendered.isEmpty {
+                var recLines = rendered.components(separatedBy: "\n")
+                if recLines.last == "" { recLines.removeLast() }   // trailing terminator, not a row
+                for l in recLines { store.recordReceived(l) }
+            }
+            return rendered
         }
         .eraseToAnyAsyncSequence()
+    }
+}
+
+/// Streaming matcher for MULTI-line gags — gag patterns that span a newline (`\n^\n^kxwq_hud.*`). Unlike a
+/// single-line gag, a multi-line gag is a TRUE regex matched against a rolling buffer of rendered text, and
+/// it DELETES the span it matches — the newlines it consumes included — so `…bard?'\n\nkxwq_hud…` becomes
+/// `…bard?'\n…` (the framing blank collapses) rather than leaving the blank behind. Text is fed line by line
+/// (each already single-line-processed); the filter keeps the last `maxSpan - 1` lines buffered so a match
+/// straddling a chunk boundary can still complete, and emits everything safely past that window.
+struct MultilineGagFilter {
+    /// Enabled multi-line gags: (true multi-line regex, how many lines it spans). Refreshed by the caller.
+    var gags: [(regex: Regex<AnyRegexOutput>, span: Int)] = []
+    /// Rendered text accumulated but not yet safe to emit (a match could still form in these trailing lines).
+    private var buffer = ""
+    private var maxSpan: Int { gags.map(\.span).max() ?? 1 }
+
+    /// Feed the rendered text of one line (its display text plus its own newline, or no newline for a tail).
+    /// Returns the text that is now safe to render (matched spans deleted, the last `maxSpan-1` lines held).
+    mutating func feed(_ text: String) -> String {
+        guard !gags.isEmpty else { return text }             // no multi-line gags → pure passthrough, no buffering
+        buffer += text
+        for g in gags { buffer = buffer.replacing(g.regex, with: "") }  // delete every matched span (newlines and all)
+        return emitSafePrefix()
+    }
+
+    /// Flush whatever is still buffered (e.g. on disconnect) so nothing is stranded.
+    mutating func drain() -> String { defer { buffer = "" }; return buffer }
+
+    /// Emit all but the last `maxSpan - 1` complete lines — those trailing lines might still be the start of a
+    /// match once more text arrives, so they stay buffered. With no span > 1, emit everything (no holding).
+    private mutating func emitSafePrefix() -> String {
+        let hold = maxSpan - 1
+        guard hold > 0 else { defer { buffer = "" }; return buffer }
+        let newlines = buffer.indices.filter { buffer[$0] == "\n" }
+        guard newlines.count > hold else { return "" }       // not enough complete lines to emit any safely
+        let cut = buffer.index(after: newlines[newlines.count - hold - 1])
+        let emit = String(buffer[..<cut])
+        buffer = String(buffer[cut...])
+        return emit
     }
 }

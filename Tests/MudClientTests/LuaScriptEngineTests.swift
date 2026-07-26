@@ -637,44 +637,42 @@ private func luaStringLiteral(_ s: String) -> String {
   }
 }
 
-// MARK: - Line rewrite stage
+// MARK: - Gag stage (a trigger may hide a line but no longer REWRITE it)
 
-@Test func triggerReturnRewritesGagsOrLeavesLine() throws {
+@Test func triggerReturnGagsButDoesNotRewrite() throws {
   try withTestContainer {
     Container.anthropicAPIKeyProvider.register { { nil } }
     let engine = LuaScriptEngine()
     try engine.load(source: #"""
-        trigger("HELLO", function() return "GOODBYE" end)   -- string → replace
+        trigger("HELLO", function() return "GOODBYE" end)   -- string → IGNORED for display (no rewrite)
         trigger("SPAM",  function() return "" end)            -- "" → gag
         trigger("HIDE",  function() return false end)         -- false → gag
         trigger("KEEP",  function() end)                      -- no return → unchanged
     """#)
-    #expect(engine.processLine("say HELLO there") == "GOODBYE")
-    #expect(engine.processLine("SPAM SPAM SPAM") == nil)
-    #expect(engine.processLine("please HIDE me") == nil)
+    #expect(engine.processLine("say HELLO there") == "say HELLO there")  // NOT rewritten — shown verbatim
+    #expect(engine.processLine("SPAM SPAM SPAM") == nil)                 // "" still gags
+    #expect(engine.processLine("please HIDE me") == nil)                 // false still gags
     #expect(engine.processLine("KEEP this") == "KEEP this")
     #expect(engine.processLine("unmatched") == "unmatched")
   }
 }
 
-@Test func triggersChainEachSeeingRewrittenLine() throws {
+@Test func triggerStringReturnIsNotSeenByLaterTriggers() throws {
   try withTestContainer {
     Container.anthropicAPIKeyProvider.register { { nil } }
     let engine = LuaScriptEngine()
     var seen: [String] = []
     engine.onEcho = { _ in }
-    try engine.load(source: #"""
-        trigger("foo", function(line) return (line:gsub("foo", "bar")) end)
-        trigger("bar", function(line) note(line); return (line:gsub("bar", "baz")) end)
-    """#)
     engine.register("note") { args in
         if case .string(let s)? = args.first { seen.append(s) }
         return []
     }
-    // Re-load so `note` exists before the trigger fires (registration after load is fine here since
-    // the trigger only runs at processLine time).
-    #expect(engine.processLine("foo") == "baz")   // foo→bar→baz through the chain
-    #expect(seen == ["bar"])                        // the 2nd trigger saw the rewritten "bar"
+    try engine.load(source: #"""
+        trigger("foo", function(line) return (line:gsub("foo", "bar")) end)  -- return IGNORED (no rewrite)
+        trigger("foo", function(line) note(line) end)                         -- sees the ORIGINAL line
+    """#)
+    #expect(engine.processLine("foo") == "foo")   // not rewritten — shown verbatim
+    #expect(seen == ["foo"])                        // the 2nd trigger saw the ORIGINAL line, not a rewrite
   }
 }
 

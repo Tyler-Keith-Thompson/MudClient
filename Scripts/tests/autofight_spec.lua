@@ -727,6 +727,90 @@ test("ordinary health drops (and a tiny up-bounce) never restart or cast", funct
   expect(#AF.sent):eq(before)                   -- health ticks send NOTHING; no spurious opener
 end)
 
+-- ---- nomelee: the fighting prompt rotates through attackers, so a NAME change is NOT a rollover ----
+-- Under nomelee (your kxwt X-flag carries N) you're not melee-locked, so the fighting prompt names
+-- whoever is currently hitting you — it flips through the whole pack every tick. Treating each flip as a
+-- kill+rollover re-fired the opener (the `c bloodmist` spam). So under nomelee a name change RETARGETS the
+-- one continuous flow instead of restarting it; the melee behaviour above is unchanged.
+test("nomelee: a target NAME change is attacker-rotation, NOT a restart (kills the opener spam)", function()
+  state.group_flags = {}
+  to_lightning(); AF.state().aoe_mode = "off"   -- c tarrants, cast 'lightning bolt'; probing ENEMY
+  AF.on_fight(70, ENEMY); AF.lightning()        -- → c fireball (mid-probe)
+  state.group_flags = { Vaelith = "XLN" }       -- YOU are nomelee (X + N)
+  local before = seq()                          -- snapshot the flow's sends so far
+  AF.on_fight(72, "a crimson topaz")            -- name flip under nomelee → retarget, NO restart
+  expect_seq(seq(), before)                     -- NO fresh opener; the continuous flow is untouched
+  state.group_flags = {}                        -- restore melee for the rest of the suite
+end)
+
+test("nomelee: the melee restart still fires once nomelee is off (regression guard)", function()
+  state.group_flags = {}                        -- melee
+  to_lightning(); AF.state().aoe_mode = "off"
+  AF.on_fight(70, ENEMY); AF.lightning()        -- c fireball
+  AF.on_fight(72, "a crimson topaz")            -- melee name change → restart
+  expect(AF.sent[1]):eq("c tarrants")           -- fresh opener (proves the nomelee branch didn't leak on)
+  expect(#AF.sent):eq(1)
+end)
+
+test("nomelee: a manual command does NOT auto-suspend — autofight keeps driving", function()
+  state.group_flags = {}
+  AF.reset(); AF.on_fight(90, ENEMY)            -- "c tarrants" (busy)
+  expect(#AF.sent):eq(1)
+  state.group_flags = { Vaelith = "XLN" }       -- YOU are nomelee
+  AF.on_input("kick guard")                     -- manual intervention → under nomelee must NOT suspend
+  AF.tarrants()                                 -- opener lands → NOT suspended → advances to the probe now
+  expect(#AF.sent):eq(2)
+  expect(AF.sent[2]):eq(CMD.lightning)          -- (a suspend would have held this until the resume window)
+  state.group_flags = {}
+end)
+
+test("nomelee: a soulsteal PULL keeps the flow driving the pack (no idle after a kill)", function()
+  state.group_flags = {}
+  AF.reset(); AF.state().aoe_mode = "off"
+  AF.on_fight(90, ENEMY); AF.tarrants()         -- opener → probe
+  AF.on_fight(70, ENEMY); AF.lightning()        -- lightning Δ20 → fireball
+  AF.on_fight(65, ENEMY); AF.fireball()          -- winner lightning
+  AF.lightning(); AF.on_fight(10, ENEMY)        -- ≤15% at the bar → "c soulsteal"
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  state.group_flags = { Vaelith = "XLN" }        -- YOU are nomelee
+  local n = #AF.sent
+  AF.soulsteal_ok()                              -- soul PULLED → under melee this ENDS the fight; under
+  expect(#AF.sent > n):eq(true)                  -- nomelee the loop must continue (keep fighting the pack)
+  state.group_flags = {}
+end)
+
+-- ---- nomelee: a tank rescue-flip must NOT end the fight (the "3 openers" spam) --------------------
+-- Under nomelee your flesh-beast tank "rescues you and takes over the battle", so the fighting PROMPT
+-- drops to not-fighting for a tick even though combat is on. If that ends the fight, the next add is a
+-- fresh start_fight → a new opener — every rescue = another `c bloodmist`. The prompt-driven signal must
+-- HOLD the fight while engaged() (combat text) still says we're in it.
+test("nomelee: a rescue-flip (-1 right after a fighting prompt) holds — no re-open on the next add", function()
+  state.group_flags = { Vaelith = "XLN" }        -- nomelee
+  AF.reset(); AF.state().aoe_mode = "off"
+  AF.set_now(1000)
+  AF.prompt(90, "a bug eyed monk"); land_opener()  -- combat starts via the prompt → ONE opener, landed
+  local after_open = #AF.sent
+  AF.prompt(nil, nil)                             -- RESCUE FLIP (same tick as the fighting prompt) → HOLD
+  expect(AF.state().fighting):eq(true)            -- fight NOT ended
+  AF.prompt(80, "a female follower")             -- add rolls in → rollover (still fighting) → NO new opener
+  for i = after_open + 1, #AF.sent do
+    expect(AF.sent[i] ~= "c bloodmist" and AF.sent[i] ~= "c tarrants"):eq(true)
+  end
+  state.group_flags = {}
+end)
+
+test("nomelee: sustained not-fighting (no live target for FLICKER_HOLD s) DOES end the fight", function()
+  state.group_flags = { Vaelith = "XLN" }
+  AF.reset()
+  AF.set_now(1000)
+  AF.prompt(90, "a bug eyed monk"); land_opener()  -- last fighting prompt at t=1000
+  expect(AF.state().fighting):eq(true)
+  AF.set_now(1004)                               -- 4s later, still no live target named
+  AF.prompt(nil, nil)                            -- past the flicker window → real end
+  expect(AF.state().fighting):eq(false)
+  state.group_flags = {}
+end)
+
 -- ---- AOE / frostflower (crowd handling) ----------------------------------------------------------
 -- AOE is observed by what the routine casts: "c frostflower" (AOE) vs a single-target "cast 'lightning
 -- bolt'"/"c fireball". The in-flight cast has to LAND before the next one goes out, so we land it to read the

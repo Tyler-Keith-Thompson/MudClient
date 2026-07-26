@@ -849,6 +849,11 @@ fightLoop = function(winner)
          not F.soul_latched and not F.renuke_pending and not F.known_unstealable then
          F.phase = "soulsteal"
          return soulstealStep():andThen(function(r)
+
+
+
+
+            if r == "pulled" and is_nomelee and is_nomelee() then return step() end
             if r == "pulled" then return resolved(nil) end
             if r == "latched" then F.soul_latched = true; return step() end
             if r == "resisted" then F.renuke_pending = true; return step() end
@@ -1031,7 +1036,17 @@ local function on_fight(pct, name)
 
 
 
-      start_fight(pct, name); return
+
+
+
+      if is_nomelee and is_nomelee() then
+         begin_fight_promise(name)
+
+      else
+
+
+         start_fight(pct, name); return
+      end
    end
    if prev and pct < prev then
       local d = prev - pct
@@ -1068,10 +1083,30 @@ end
 
 
 local PROMPT_FRESH = 10
+
+
+local af_now = os.time
+local last_fighting_prompt = 0
+local FLICKER_HOLD = 3
 function __autofight_prompt(pct, name)
    last_prompt = os.time()
-   if pct and name and name ~= "" then on_fight(pct, name)
-   else on_fight_end() end
+   if pct and name and name ~= "" then
+      last_fighting_prompt = af_now()
+      on_fight(pct, name)
+   elseif F.fighting and is_nomelee and is_nomelee() and (af_now() - last_fighting_prompt) < FLICKER_HOLD then
+
+
+
+
+
+
+
+
+
+      return
+   else
+      on_fight_end()
+   end
 end
 
 
@@ -1216,6 +1251,13 @@ local function observe_input(cmd)
    if cmd == "" or cmd:sub(1, 1) == "#" then return end
    if (F.self_sent[cmd] or 0) > 0 then F.self_sent[cmd] = F.self_sent[cmd] - 1; return end
    if not F.on or not F.fighting then return end
+
+
+
+
+
+
+   if is_nomelee and is_nomelee() then return end
    F.suspended = true
    if F.suspend_timer and cancel then cancel(F.suspend_timer) end
    F.suspend_timer = after and after(cfg.resume_after, function()
@@ -1742,6 +1784,8 @@ _AF_TEST = {
    state = function() return F end,
    on_fight = on_fight,
    on_fight_end = on_fight_end,
+   prompt = __autofight_prompt,
+   set_now = function(t) af_now = function() return t end end,
    on_input = observe_input,
    lightning = hit_lightning, icebolt = hit_icebolt, fireball = hit_fireball,
    tarrants = hit_tarrants,

@@ -83,45 +83,25 @@ local persist = __persist
 -- `set kxwt` toggle) so re-running the handshake can't accidentally turn kxwt back OFF.
 trigger([[^kxw[tq]_supported$]], function(): any return send("set kxwt on") end)
 
--- Gag the kxwt/kxwq telemetry lines — but PRESERVE any ANSI escape codes the server glued to the FRONT of
--- one. AlterAeon sometimes emits a colour RESET (e.g. "\27[37m\27[0m") as the prefix of a machine line
--- ("\27[37m\27[0mkxwq_sky 1 1 0") when that reset really terminates the PRECEDING visible line (e.g. a
--- bold-blue "It is night..."). A plain `gag` dropped the whole raw line, taking the reset with it, so the
--- colour bled forward into the room contents / exits. So instead of dropping, return just the leading
--- escape run: the tag text is still hidden, but the reset survives. A tagline with no leading ANSI (the
--- common case) returns "" — fully gagged, no blank line, exactly as before. The raw ANSI line is the last
--- handler arg (CLAUDE.md); with no capture groups the run is `select`-able off the end.
-local function __leading_ansi(s: string): string
-  local codes: {string} = {}
-  local rest = s or ""
-  while true do
-    local c = rest:match("^(\27%[[%d;]*[A-Za-z])")   -- one CSI sequence, e.g. \27[0m / \27[1;34m
-    if not c then break end
-    codes[#codes + 1] = c
-    rest = rest:sub(#c + 1)
-  end
-  return table.concat(codes)
-end
--- ONE catch-all does both jobs: (1) ring-buffer every kxwt_/kxwq_ line so kxwt.dump([n]) can show the
--- machinery that's normally hidden, and (2) gag the tag from the display while PRESERVING any leading ANSI
--- (the __leading_ansi return, per the note above). These MUST be a single handler: a trigger that returns
--- ""/a string ENDS the line's handler chain (unlike a `gag()` rule), so a separate gag-returning trigger
--- would short-circuit a later ring-capture trigger and leave the ring empty. Capture runs BEFORE the
--- return, so the ring records every tag regardless of the gag.
+-- Hide the kxwt/kxwq telemetry lines. Two rules, split on purpose:
+--
+-- (1) A capture-only trigger that ring-buffers every tag (so kxwt.dump([n]) / `#__` can show the machinery)
+--     and returns NOTHING — it does not gag, so it never ends the handler chain. priority = -100 so it runs
+--     AFTER every kxwt PARSER and after any `.+`/`.*` catch-all parser it would otherwise outscore.
+-- (2) A plain `gag()` rule. Using a real gag (not a trigger that returns "") is deliberate: `#ungag *` /
+--     `#ungag ^kxw` can then REMOVE it and reveal the raw telemetry for debugging. Colour is safe because
+--     the gag is ANSI-AWARE at the display layer (processServerOutputForScripts, ScriptInterpreter.swift):
+--     a gagged line's zero-width ANSI escapes (e.g. a "\27[0m" reset the server glues to the front of a
+--     tag line to terminate the PRECEDING coloured line, like a bold-blue "It is night...") are still
+--     emitted — only the spacing-consuming characters are dropped — so no colour bleeds into the room text.
 local kxwt_ring: {string} = {}
 local KXWT_RING_MAX = 300
--- priority = -100: this hider must fire LAST, AFTER every kxwt PARSER, for two reasons. (1) It rewrites
--- the line to just its leading ANSI (or gags it) — a display edit that would blank the line out from under
--- any parser that ran after it. (2) It's a catch-all: without the low priority a parser whose pattern ends
--- in a `.+`/`.*` capture scores BELOW this one and would lose the tie. Running last, it only ever touches
--- display, never suppresses a parse. (The engine no longer stops the chain on a gag either — belt and
--- suspenders — but ordering the hider last is what keeps its ANSI rewrite from clobbering the line.)
-trigger([[^kxw[tq]_]], function(...: any): any
+trigger([[^kxw[tq]_]], function(...: any)
   local a = { ... }
   kxwt_ring[#kxwt_ring + 1] = a[1] as string
   if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
-  return __leading_ansi(a[#a] as string)
 end, { priority = -100 })
+gag([[^kxw[tq]_]])
 
 -- Walk direction: numeric code -> name (used by the map). The converter for the walkdir field below;
 -- an unknown code returns nil, which `field :via` assigns straight through to clear state.walkdir.

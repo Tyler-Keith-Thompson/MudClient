@@ -331,6 +331,24 @@ text = "True when `name` is you (incl. the \"you\" pronoun / your kxwt_myname) o
 
 
 
+
+
+
+
+function is_nomelee()
+   for _, f in pairs((state.group_flags) or {}) do
+      if f:find("X", 1, true) then return f:find("N", 1, true) ~= nil end
+   end
+   return false
+end
+doc(is_nomelee, { name = "is_nomelee", sig = "is_nomelee() -> bool", group = "combat",
+text = "True when YOU are in nomelee (nocombat) mode, read from your own kxwt group-flags (the X-flagged " ..
+"roster entry carrying an N). Autofight uses it to treat a fighting-prompt target change as " ..
+"attacker rotation (you're not melee-locked) rather than a fresh engagement. False until the " ..
+"roster is known.", })
+
+
+
 function engaged(now)
    if state.fighting then return true end
    return ((state.engaged_until) or 0) > (now or os.time())

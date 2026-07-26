@@ -189,9 +189,10 @@ private actor RecordedWrites {
     // Mirror the REAL display pipeline end to end.
     var terminal = ""
     for try await text in stream.handleIACCommunication(writeToStream: { _ in })
-        .normalizeLineEndings().assembleLines().processMSP() {
+        .normalizeLineEndings().processMSP() {
         terminal += text
     }
+    terminal = terminal.replacingOccurrences(of: "\u{E000}", with: "")   // GO-AHEAD marker dropped (no assembler)
     // Apply the AlterAeon gag the way the display consumer does, then hunt for leaked protocol tails.
     let engine = LuaScriptEngine()
     defer { engine.clearRules() }
@@ -226,14 +227,15 @@ private actor RecordedWrites {
     Container.mspService.register { msp }
     Container.soundService.register { SoundService() }
     Container.connectionManager.register { ConnectionManager() }
-    // Regression: a `kxwt_` protocol line split across a TCP read leaks its orphaned tail. The head
-    // fragment still matches the `^kxwt_` gag and is hidden, but the tail (here "ground_01") matches
-    // nothing and leaks to the terminal — the reported "last bit of the sound path" after a move.
-    // The real capture split `...track_explore_under` | `ground_01`.
+    // The line assembler was removed, so a `kxwt_` protocol line split across TCP reads is NOT reassembled
+    // — the fragments are concatenated as they arrive. Here the tail ("ground_01") lands on the same line as
+    // the gagged `kxwt_` head and is hidden with it; the GO-AHEAD marker is stripped before display and the
+    // no-newline prompt still shows. (Over the RPC transport each message is whole, so this split can't occur
+    // there anyway.)
     func ga(_ s: String) -> Data { Data(s.utf8) + Data([255, 249]) }   // text + IAC GO-AHEAD
     let chunks: [Data] = [
         Data("kxwt_music channel_play music soundtrack/track_explore_under".utf8),  // head, no newline
-        Data("ground_01\r\n".utf8),                                                  // tail completes it
+        Data("ground_01\r\n".utf8),                                                  // tail
         ga("Password: "),   // a genuine no-newline prompt, GA-terminated — must still display
     ]
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
@@ -251,49 +253,17 @@ private actor RecordedWrites {
     var text = ""
     for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
         .normalizeLineEndings()
-        .assembleLines()
         .processMSP() {
         text += piece
     }
+    text = text.replacingOccurrences(of: "\u{E000}", with: "")   // GO-AHEAD marker dropped (no assembler)
     let lines = text.components(separatedBy: "\n")
     let display = lines.compactMap { engine.processLine($0) }.joined(separator: "\n")
 
-    #expect(!display.contains("ground_01"))        // the tail no longer leaks
+    #expect(!display.contains("ground_01"))        // the tail rode along with the gagged head, not leaked
     #expect(!display.contains("kxwt_"))            // head still gagged
-    #expect(!display.contains(promptGoAheadMarker)) // the GO-AHEAD marker is consumed, never shown
+    #expect(!display.contains(promptGoAheadMarker)) // the GO-AHEAD marker is stripped, never shown
     #expect(display.contains("Password: "))        // the real prompt still reaches the display
-  }
-}
-
-@Test func goAheadFlushesPromptOnlyWhileNotSuppressed() async throws {
-  try await withTestContainer {
-    Container.scriptInterpreter.register { ScriptInterpreter() }
-    Container.anthropicAPIKeyProvider.register { { nil } }
-    Container.lagMonitor.register { LagMonitor() }
-    // GA is a prompt boundary by the telnet NVT default, so `Password: ` + IAC GA flushes the held
-    // partial line to the display (the injected marker is consumed by the assembler, not shown).
-    func run(_ chunks: [Data]) async throws -> String {
-        let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
-        var text = ""
-        for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
-            .normalizeLineEndings().assembleLines() {
-            text += piece
-        }
-        return text
-    }
-    // Default (no SGA): GA flushes the no-newline prompt.
-    let shown = try await run([Data("Password: ".utf8) + Data([255, 249])])
-    #expect(shown == "Password: ")
-    #expect(!shown.contains(promptGoAheadMarker))
-
-    // After the server negotiates SUPPRESS-GO-AHEAD (IAC WILL SGA, 255 251 3), GA is no longer a
-    // prompt boundary: a stray GA must NOT flush, so the partial stays held (nothing emitted yet).
-    let suppressed = try await run([
-        Data([255, 251, 3]),                                   // IAC WILL SGA
-        Data("Password: ".utf8) + Data([255, 249]),            // prompt + (now-meaningless) GA
-    ])
-    #expect(suppressed.isEmpty)
-    #expect(!suppressed.contains(promptGoAheadMarker))
   }
 }
 
@@ -412,93 +382,6 @@ private actor RecordedWrites {
     }
     #expect(output.isEmpty)
     #expect(await writes.all == [Data([255, 253, 201])])
-  }
-}
-
-@Test func gaggedKxwtBatchesRenderNothing() async throws {
-  try await withTestContainer {
-    Container.terminalService.register { TerminalService() }
-    Container.lagMonitor.register { LagMonitor() }
-    Container.transcriptStore.register { TranscriptStore() }
-    Container.anthropicAPIKeyProvider.register { { nil } }
-    let music = MockMusicServicing(policy: .relaxedVoid)
-    let speech = MockSpeechServicing(policy: .relaxedVoid)
-    let msp = MockMSPServicing(policy: .relaxedVoid)
-    given(msp).player(.any, volume: .any, loops: .any).willProduce { _, _, _ in
-        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork()
-    }
-    Container.musicService.register { music }
-    Container.speechService.register { speech }
-    Container.mspService.register { msp }
-    Container.soundService.register { SoundService() }
-    Container.connectionManager.register { ConnectionManager() }
-    // Regression for "a bunch of blank lines before my command". When the player is idle, AlterAeon
-    // streams kxwt_ status batches (group HP, prompt, sky/time) as their OWN network packets. Each
-    // is fully gagged, so processServerOutputForScripts returns "" for it. The display consumer
-    // (MudClient.swift) must SKIP those empty chunks: TerminalService.print() paints a divider line
-    // unconditionally, so print("") leaves a blank line on screen — one per idle kxwt batch.
-    //
-    // This drives a REAL capture through the REAL pipeline and asserts that every chunk which was
-    // nothing but gagged kxwt_ lines renders to "" (so the consumer's `guard !string.isEmpty` drops
-    // it, emitting no blank line).
-    func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
-        URL(fileURLWithPath: "\(file)")
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent(rel).path
-    }
-    let capture = try String(
-        contentsOfFile: repoFile("Tests/MudClientTests/fixtures/pellam_kxwt_capture.log"), encoding: .utf8)
-    let chunks = capture.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
-    #expect(!chunks.isEmpty)
-
-    Container.scriptInterpreter.register { ScriptInterpreter() }
-    let interp = Container.scriptInterpreter()
-    defer { interp.engine.clearRules() }
-    interp.engine.clearRules()
-    // This test asserts only on gagged/rendered output, never on outbound commands. The real
-    // ScriptInterpreter's default onSend resolves Container.inputService() (fileprivate init, not
-    // test-constructible); give it a sink so a script's send() has somewhere to go.
-    interp.engine.onSend = { _ in }
-    try? interp.engine.load(source: "is_connected = function() return true end")   // keep test loads from dialing out
-    try interp.engine.load(path: repoFile("Scripts/AlterAeon/AlterAeon.lua"))   // installs the ^kxwt_ gag
-    let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
-
-    // Replicate processServerOutputForScripts per chunk so we can correlate INPUT with rendered
-    // OUTPUT, then rebuild the screen the way the consumer does (dropping empty chunks).
-    var leaks = [String]()
-    var kept = [String]()
-    for try await output in stream.handleIACCommunication(writeToStream: { _ in })
-        .normalizeLineEndings().assembleLines().processMSP() {
-        let lines = output.replacingOccurrences(of: "\r", with: "").components(separatedBy: CharacterSet.newlines)
-        let gagged = lines.map { interp.engine.processLine($0) == nil }
-        var out = [String]()
-        for (i, line) in lines.enumerated() {
-            if gagged[i] { continue }
-            if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                if (i > 0 && gagged[i - 1]) || (i + 1 < lines.count && gagged[i + 1]) { continue }
-            }
-            out.append(line)
-        }
-        let rendered = out.joined(separator: "\n")
-        // A chunk that was nothing but kxwt_ machinery (+ framing blanks) MUST render to "", so the
-        // consumer's `guard !string.isEmpty` drops it. If it renders a stray "\n", it paints a blank.
-        let hasKxwt = lines.contains { $0.hasPrefix("kxwt_") }
-        let onlyKxwtOrBlank = lines.allSatisfy {
-            $0.hasPrefix("kxwt_") || $0.trimmingCharacters(in: .whitespaces).isEmpty
-        }
-        if hasKxwt && onlyKxwtOrBlank && !rendered.isEmpty { leaks.append(rendered.debugDescription) }
-        if !rendered.isEmpty { kept.append(rendered) }    // mirror consumer: skip empty chunks
-    }
-    #expect(leaks.isEmpty, "kxwt-only batches that still render a (blank) line: \(leaks)")
-
-    // Concretely: the idle updates between the "Tboss" notify and the following "A wide tunnel" room
-    // must not introduce a blank-line run. Concatenate kept chunks the way the terminal does.
-    let screen = kept.joined()
-    if let n = screen.range(of: "Tboss stole"),
-       let r = screen.range(of: "A wide tunnel", range: n.upperBound..<screen.endIndex) {
-        let between = String(screen[n.upperBound..<r.lowerBound])
-        #expect(!between.contains("\n\n\n"), "blank-line run between notify and room: \(between.debugDescription)")
-    }
   }
 }
 
@@ -777,10 +660,10 @@ private actor RecordedWrites {
     var text = ""
     for try await piece in stream.handleIACCommunication(writeToStream: { _ in })
         .normalizeLineEndings()
-        .assembleLines()
         .processMSP() {
         text += piece
     }
+    text = text.replacingOccurrences(of: "\u{E000}", with: "")   // GO-AHEAD marker dropped (no assembler)
 
     func repoFile(_ rel: String, file: StaticString = #filePath) -> String {
         URL(fileURLWithPath: "\(file)")

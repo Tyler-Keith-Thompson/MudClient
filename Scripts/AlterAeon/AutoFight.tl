@@ -849,6 +849,11 @@ fightLoop = function(winner: string): FlowPromise
        and not F.soul_latched and not F.renuke_pending and not F.known_unstealable then
       F.phase = "soulsteal"
       return soulstealStep():andThen(function(r: any): any
+        -- NOMELEE: a soul-pull must NOT end the flow. Under melee the kill rolls us onto the next mob
+        -- (kxwt -1/rollover → start_fight restarts), but under nomelee we deliberately DON'T restart on the
+        -- attacker-rotation rollover, so completing here would leave autofight idle for the rest of the
+        -- pack. Keep looping — the untargeted casts fight whoever's left until the prompt says not-fighting.
+        if r == "pulled" and is_nomelee and is_nomelee() then return step() end
         if r == "pulled"  then return resolved(nil) end          -- soul taken → stop; DEAD ends the fight
         if r == "latched" then F.soul_latched = true; return step() end   -- keep nuking the winner
         if r == "resisted" then F.renuke_pending = true; return step() end -- one nuke, then retry steal
@@ -1027,11 +1032,21 @@ local function on_fight(pct: integer, name: string)
   -- Detected authoritatively from the health bar: the NAME changed, or it jumped UP past a regen margin
   -- (a target we're already on only trends down).
   if name ~= prevname or (prev and pct >= prev + cfg.new_target_jump) then
-    -- NOTE: a rollover no longer flips AOE on by itself — AOE is driven by the crowd COUNT (a look sets
-    -- the estimate, each kxwt_mdeath decrements it), so the routine drops back to single target when the
-    -- pack is down to the last one. start_fight reads the current pack state, so if we're still pack-
-    -- sized it stays AOE across the swap, otherwise it single-targets the new enemy.
-    start_fight(pct, name); return
+    -- NOMELEE: the fighting prompt names whoever is currently hitting you, and with no melee lock that
+    -- rotates through the whole pack every tick (raw: Yulano↔student, sub-second). A NAME change is NOT a
+    -- kill+rollover here — it's attacker rotation. Re-running start_fight on each one re-fired the opener,
+    -- which was the `c bloodmist` spam (4 openers in 4s). So under nomelee, DON'T restart: just retarget
+    -- the ONE continuous flow (retitle the widget) and let it keep nuking — the casts are untargeted, so
+    -- they hit whoever the game has you fighting. The melee path is unchanged (a real kxwt rollover always
+    -- follows a kill, so start_fight fires exactly as before).
+    if is_nomelee and is_nomelee() then
+      begin_fight_promise(name)   -- retitle to the current target; the in-flight flow continues untouched
+      -- fall through to the winner-comparison update below; no new opener/probe
+    else
+      -- MELEE: a target change here means a mob died and we rolled straight onto the next (no kxwt -1) —
+      -- start the routine over on it (fresh opener/probe), the hard-won DEAD-line-independent rollover.
+      start_fight(pct, name); return
+    end
   end
   if prev and pct < prev then
     local d = prev - pct
@@ -1068,10 +1083,30 @@ end
 -- firing at all (normal play without the custom kxwq prompt), last_prompt stays 0/stale and kxwt drives
 -- exactly as before — no regression.
 local PROMPT_FRESH = 10   -- seconds; kxwt is ignored while the prompt fired within this window
+-- Injectable clock (os.time by default) so the rescue-flip hold below is unit-testable — specs advance it
+-- via _AF_TEST.set_now to simulate seconds passing without a real wall clock.
+local af_now: function(): number = os.time
+local last_fighting_prompt = 0        -- af_now() of the last prompt that named a live target
+local FLICKER_HOLD = 3                 -- s; a not-fighting nomelee prompt this soon after a fighting one is a rescue-flip
 function __autofight_prompt(pct: number, name: string)   -- pct+name when fighting; both nil when the prompt says not-fighting
   last_prompt = os.time()                               -- the machine prompt is live → authoritative
-  if pct and name and name ~= "" then on_fight(pct as integer, name)       -- start/refresh the fight from the prompt
-  else on_fight_end() end                                        -- prompt says not fighting → end it
+  if pct and name and name ~= "" then
+    last_fighting_prompt = af_now()
+    on_fight(pct as integer, name)                      -- start/refresh the fight from the prompt
+  elseif F.fighting and is_nomelee and is_nomelee() and (af_now() - last_fighting_prompt) < FLICKER_HOLD then
+    -- NOMELEE rescue-flip: your tank (a flesh beast) "rescues you and takes over the battle", so the
+    -- fighting prompt drops to not-fighting for a tick even though combat is still ON. Ending the fight
+    -- here made the very NEXT enemy a fresh start_fight → a new opener — that's the `c bloodmist` spam
+    -- every time an add rolls in (4 openers in 4s in the raw). So while a live target was named within the
+    -- last few seconds, HOLD the fight: F.fighting stays true and the next enemy is a rollover (retargeted,
+    -- no opener). We key off the recent FIGHTING prompt, NOT engaged(): the `kxwq_fighting -1` line clears
+    -- state.engaged_until, so engaged() races the melee-text that re-sets it. The fight still ends for real
+    -- once no live target has been named for FLICKER_HOLD seconds (the flow is idle by then anyway). Melee
+    -- path unchanged: on_fight_end fires on the not-fighting prompt exactly as before.
+    return   -- hold; do NOT end the fight on a transient rescue-flip
+  else
+    on_fight_end()                                       -- prompt says not fighting → end it
+  end
 end
 
 -- kxwt_fighting subscribers: FALLBACK only. Ignored while the prompt is live (a stray kxwt -1 from a
@@ -1216,6 +1251,13 @@ local function observe_input(cmd: string)
   if cmd == "" or cmd:sub(1, 1) == "#" then return end                -- ignore blanks and #control commands
   if (F.self_sent[cmd] or 0) > 0 then F.self_sent[cmd] = F.self_sent[cmd] - 1; return end
   if not F.on or not F.fighting then return end
+  -- Under nomelee, DON'T auto-suspend on a manual command. Nomelee combat is continuous (the fighting
+  -- prompt never drops to "not fighting" between mobs), so the suspend — only cleared by a clean fight
+  -- END — latches and mutes autofight for the whole fight the moment you cast one spell by hand (the "even
+  -- though the HUD showed enemy HP, autofight didn't drive" bug). So under nomelee your manual casts layer
+  -- ON TOP of autofight; only an explicit `autofight off` pauses it. (The melee path is unchanged: there a
+  -- clean between-mob boundary releases the suspend, so manual intervention still works as before.)
+  if is_nomelee and is_nomelee() then return end
   F.suspended = true
   if F.suspend_timer and cancel then cancel(F.suspend_timer) end
   F.suspend_timer = after and after(cfg.resume_after, function()
@@ -1742,6 +1784,8 @@ _AF_TEST = {
   state         = function(): AutoFightState return F end,
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,
+  prompt        = __autofight_prompt,   -- the nomelee prompt-driven combat signal (pct+name / nil,nil)
+  set_now       = function(t: number) af_now = function(): number return t end end,   -- mock the clock (rescue-flip hold)
   on_input      = observe_input,
   lightning     = hit_lightning,   icebolt      = hit_icebolt,     fireball  = hit_fireball,
   tarrants      = hit_tarrants,

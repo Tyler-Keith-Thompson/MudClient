@@ -205,21 +205,6 @@ end
 
 
 
-
-
-
-
-
-local function reinject_kxwt_tag(text)
-   if feed_server and text:match("^kxw[tq]_") then feed_server(text .. "\n"); return true end
-   return false
-end
-
-
-
-
-
-
 local function is_fighting_bar(text)
    return text:match("^kxw[tq]_fighting") ~= nil
 end
@@ -227,8 +212,6 @@ end
 local function is_hud_prompt(text)
    return parse_prompt(text) ~= nil
 end
-
-local any_case = __route.any
 
 local function handle_fighting(text)
    fighting_from_prompt(text)
@@ -241,10 +224,9 @@ end
 on_prompt = route({
    { is_fighting_bar, handle_fighting },
    { is_hud_prompt, apply_prompt_line },
-   { any_case, reinject_kxwt_tag },
+
 })
 
 _PROMPT_TEST.parse_prompt = parse_prompt
 _PROMPT_TEST.apply_prompt = apply_prompt
 _PROMPT_TEST.fighting_from_prompt = fighting_from_prompt
-_PROMPT_TEST.reinject_kxwt_tag = reinject_kxwt_tag

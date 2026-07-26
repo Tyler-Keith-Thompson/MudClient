@@ -47,11 +47,9 @@ actor Connection: AsyncSequence {
         stream.captureRaw()
             .handleIACCommunication(writeToStream: send)
             .normalizeLineEndings()
-            // Peel any script-owned in-band protocol (e.g. dclient's `;s..;e..;` framing) FIRST, so the
-            // downstream line assembler sees clean text. dclient bytes interleaved mid-line otherwise
-            // break line assembly / MSP's `!!SOUND` line detection (the directive leaks to the display).
+            // Peel any script-owned in-band protocol (e.g. dclient's `;s..;e..;` framing) FIRST, so MSP's
+            // `!!SOUND` line detection sees clean text and dclient bytes don't leak to the display.
             .filterServerStream()
-            .assembleLines()
             .processMSP()
             .processServerOutputForScripts()
             .eraseToAnyAsyncSequence()

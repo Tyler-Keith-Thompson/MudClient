@@ -329,6 +329,24 @@ doc(is_ally, { name = "is_ally", sig = "is_ally(name) -> bool", group = "combat"
   text = "True when `name` is you (incl. the \"you\" pronoun / your kxwt_myname) or a current group "
       .. "member/minion — i.e. a combat line about them is friendly, not an enemy sighting." })
 
+-- Are YOU in nomelee (`nocombat`) mode? The kxwt group block tags each member with role flags; the
+-- server marks YOUR own entry (the `X` = "you" flag) with `N` when you're nomelee (raw: `kxwq_group …
+-- XLN Vaelith`). So the truth is already on the roster — find the X-flagged member and check for N. This
+-- is the reliable, transport-agnostic "am I nomelee" signal (the fighting prompt still drives combat, but
+-- you're not melee-locked, so autofight treats target changes differently). Defaults false when the
+-- roster hasn't arrived yet (assume melee — the safe/normal path). See [[state.group_flags]].
+function is_nomelee(): boolean
+  for _, f in pairs((state.group_flags as {string:string}) or {}) do
+    if f:find("X", 1, true) then return f:find("N", 1, true) ~= nil end   -- your own entry: N ⇒ nomelee
+  end
+  return false
+end
+doc(is_nomelee, { name = "is_nomelee", sig = "is_nomelee() -> bool", group = "combat",
+  text = "True when YOU are in nomelee (nocombat) mode, read from your own kxwt group-flags (the X-flagged "
+      .. "roster entry carrying an N). Autofight uses it to treat a fighting-prompt target change as "
+      .. "attacker rotation (you're not melee-locked) rather than a fresh engagement. False until the "
+      .. "roster is known." })
+
 -- Are we engaged in a fight, kxwt-confirmed or text-inferred? THE combat predicate — HUD gating,
 -- in_combat() and every pilot/equipment consumer sit on this.
 function engaged(now: number): boolean

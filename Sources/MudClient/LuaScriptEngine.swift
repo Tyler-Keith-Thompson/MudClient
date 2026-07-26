@@ -35,10 +35,17 @@ final class LuaScriptEngine: @unchecked Sendable {
         /// Pattern specificity, computed once at registration from the pattern source
         /// (see `Self.specificity(of:)`). Higher = more specific. Breaks ties after priority.
         let specificity: Int
+        /// MULTI-LINE gag only: how many lines the pattern spans (newlines in the source + 1). `nil` for an
+        /// ordinary single-line rule. When set, `regex` is compiled with line-ending anchoring (so `^`/`$`
+        /// match at each embedded newline) and is a TRUE multi-line regex — matched against a buffered window
+        /// by the streaming ``MultilineGagFilter``, which DELETES the matched span (newlines and all). Single-
+        /// line processing skips it (its pattern contains a `\n`, so it can't match one line anyway). The span
+        /// tells the filter how many trailing lines to hold so a boundary-spanning match can still complete.
+        let multilineSpan: Int?
         var enabled: Bool = true
         init(id: Int, regex: Regex<AnyRegexOutput>, patternSource: String = "", handler: LuaFunctionRef?,
              oneshot: Bool = false, ruleClass: String? = nil,
-             priority: Int = 0, specificity: Int = 0) {
+             priority: Int = 0, specificity: Int = 0, multilineSpan: Int? = nil) {
             self.id = id
             self.regex = regex
             self.patternSource = patternSource
@@ -47,6 +54,7 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.ruleClass = ruleClass
             self.priority = priority
             self.specificity = specificity
+            self.multilineSpan = multilineSpan
         }
     }
 
@@ -507,7 +515,10 @@ final class LuaScriptEngine: @unchecked Sendable {
             if rule.oneshot { firedOneshots.append(rule.id) }
             switch result {
             case .string(let s):
-                if s.isEmpty { gagged = true } else { current = s }
+                // A handler may GAG (empty string) but NOT rewrite the displayed line — the server's text is
+                // shown verbatim. A non-empty return is ignored for display (the handler still ran, so its
+                // side effects / parsing happen; only the line-rewrite is suppressed).
+                if s.isEmpty { gagged = true }
             case .bool(false):
                 gagged = true
             default:
@@ -521,10 +532,30 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         if !firedOneshots.isEmpty { lineRules.removeAll { firedOneshots.contains($0.id) } }
         if gagged { return nil }
-        // The standalone gag list still applies to whatever the line now is.
+        // The standalone gag list still applies to whatever the line now is — but SINGLE-line gags only;
+        // multi-line gags (`multilineSpan != nil`) are matched across a buffered window by the
+        // MultilineGagFilter, not here.
         let clean = current.replacing(ansiSequence, with: "")
-        if gags.contains(where: { $0.enabled && (try? $0.regex.firstMatch(in: clean)) != nil }) { return nil }
+        if gags.contains(where: { $0.enabled && $0.multilineSpan == nil && (try? $0.regex.firstMatch(in: clean)) != nil }) { return nil }
         return current
+    }
+
+    /// The currently-enabled MULTI-line gags as (true multi-line regex, span-in-lines) pairs. Empty when none
+    /// are registered (the common case — the streaming filter then does nothing). Snapshotted under the lock.
+    func multilineGags() -> [(regex: Regex<AnyRegexOutput>, span: Int)] {
+        lock.lock(); defer { lock.unlock() }
+        return gags.compactMap { r in r.enabled ? r.multilineSpan.map { (r.regex, $0) } : nil }
+    }
+
+    /// How many lines a gag pattern spans if it contains a newline (a literal LF, or the regex escape `\n`
+    /// you type as `#gag \n^kxwq_hud`): newline-count + 1. Returns nil for an ordinary single-line pattern.
+    static func multilineSpan(of src: String) -> Int? {
+        let sep = "\u{1}"
+        var s = src.replacingOccurrences(of: "\r\n", with: "\n")
+        s = s.replacingOccurrences(of: "\\n", with: sep)   // the two-char regex escape  \n
+        s = s.replacingOccurrences(of: "\n", with: sep)    // a literal newline character
+        guard s.contains(sep) else { return nil }
+        return s.components(separatedBy: sep).count
     }
 
     /// Fire the most-specific matching alias for user input. Returns true if one matched (so the raw
@@ -635,11 +666,20 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self.listGagRules()
                 return []
             }
-            guard let rx = try? Regex(pat) else {
+            guard var rx = try? Regex(pat) else {
                 self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
                 return []
             }
-            let rule = Rule(id: self.nextId(), regex: rx, patternSource: pat, handler: nil)
+            // MULTI-LINE gag: a pattern that contains a newline (a literal LF, or the regex escape `\n`) is a
+            // TRUE multi-line regex, matched against a buffered window and DELETING the span it matches —
+            // newlines and all. `\n` matches an actual newline; `^`/`$` match at each embedded line boundary
+            // (line-ending anchoring, enabled below). So `#gag \n^\n^kxwq_hud.*` deletes "<newline><blank
+            // line><newline>kxwq_hud…", collapsing the framing blank instead of leaving it. The span (line
+            // count) tells the streaming MultilineGagFilter how many trailing lines to hold for a match that
+            // straddles a chunk boundary. NB `*` is regex repeat, not a glob — use `.*` to mean "anything".
+            let span = Self.multilineSpan(of: pat)
+            if span != nil { rx = rx.anchorsMatchLineEndings() }
+            let rule = Rule(id: self.nextId(), regex: rx, patternSource: pat, handler: nil, multilineSpan: span)
             self.gags.append(rule)
             return [.int(Int64(rule.id))]
         }
@@ -1741,7 +1781,11 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         let predicate: (Rule) -> Bool
         let matchDesc: String
-        if let id = Int(needle) {
+        if needle == "*" {
+            // `un<kind> *` — the wildcard: remove EVERY rule of this kind. (`*` alone isn't a valid regex,
+            // so it can't fall through to the regex branch.)
+            predicate = { _ in true }; matchDesc = "ALL"
+        } else if let id = Int(needle) {
             predicate = { $0.id == id }; matchDesc = "#\(id)"
         } else if let rx = try? Regex(needle) {
             predicate = { (try? rx.firstMatch(in: $0.patternSource)) != nil }; matchDesc = "/\(needle)/"

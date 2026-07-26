@@ -91,37 +91,17 @@ trigger([[^kxw[tq]_supported$]], function() return send("set kxwt on") end)
 
 
 
-local function __leading_ansi(s)
-   local codes = {}
-   local rest = s or ""
-   while true do
-      local c = rest:match("^(\27%[[%d;]*[A-Za-z])")
-      if not c then break end
-      codes[#codes + 1] = c
-      rest = rest:sub(#c + 1)
-   end
-   return table.concat(codes)
-end
-
-
-
 
 
 
 local kxwt_ring = {}
 local KXWT_RING_MAX = 300
-
-
-
-
-
-
 trigger([[^kxw[tq]_]], function(...)
    local a = { ... }
    kxwt_ring[#kxwt_ring + 1] = a[1]
    if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
-   return __leading_ansi(a[#a])
 end, { priority = -100 })
+gag([[^kxw[tq]_]])
 
 
 

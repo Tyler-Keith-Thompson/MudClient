@@ -201,25 +201,10 @@ local function fighting_from_prompt(text: string): boolean
    return false
 end
 
--- kxwq_fighting isn't the ONLY GA-flushed tag — the server ends several kxwt/kxwq telemetry tags with IAC
--- GO-AHEAD, so the line assembler hands them to on_prompt instead of the trigger pipeline (VERIFIED in the
--- raw log: `kxwq_spellup fire shield\xff\xf9…`). Their REAL triggers then never fire — which is why
--- auto-maintain stopped (`maintain <spell>` is issued from the kxwt_spellup trigger, AlterAeon.lua), along
--- with the spells widget, spelldown/spst, the recovery spellup/spelldown hooks, and the death banners. So any
--- kxwt tag that lands here (other than the kxwq_hud vitals prompt parsed above, and kxwq_fighting driven
--- directly) is RE-INJECTED as a proper newline line via feed_server, so the normal pipeline dispatches it to
--- its actual trigger. The re-fed line ends in \n (no GA) so it can't loop back into on_prompt, and the kxwt
--- catch-all gag still hides it from the display.
-local function reinject_kxwt_tag(text: string): boolean
-   if feed_server and text:match("^kxw[tq]_") then feed_server(text .. "\n"); return true end
-   return false
-end
-
--- First-match dispatch table (`route`, Scripts/Foundation/Route.tl) mirroring on_prompt's original
--- if/elseif priority: fighting bar (kxwq_fighting, GA-flushed) → hud vitals prompt (kxwq_hud, parsed) →
--- any other GA-flushed kxwt tag (reinjected). Predicates are mutually exclusive by construction (the
--- fighting-bar prefix can never also parse as a hud prompt), so this is byte-identical to the original
--- first-match chain, not merely equivalent.
+-- NOTE: this whole on_prompt path is now largely inert — the line assembler that surfaced GA-flushed tags
+-- to on_prompt was removed, so on_prompt is no longer driven by the host. We deliberately do NOT re-inject
+-- kxwt/kxwq tags back into the pipeline (no feed_server here): server bytes are shown as received, nothing
+-- is re-fed. The dispatch table below is kept only for its still-unit-tested parse/apply helpers.
 local function is_fighting_bar(text: string): boolean
    return text:match("^kxw[tq]_fighting") ~= nil
 end
@@ -227,8 +212,6 @@ end
 local function is_hud_prompt(text: string): boolean
    return parse_prompt(text) ~= nil
 end
-
-local any_case = __route.any
 
 local function handle_fighting(text: string)
    fighting_from_prompt(text)
@@ -241,10 +224,9 @@ end
 on_prompt = route({
    { is_fighting_bar, handle_fighting },   -- kxwq_fighting line
    { is_hud_prompt,   apply_prompt_line }, -- kxwq_hud vitals prompt (parse + apply)
-   { any_case,        reinject_kxwt_tag }, -- other GA-flushed kxwt tag
+   -- (no catch-all: other GA-flushed tags are NOT re-injected — see note above)
 })
 
 _PROMPT_TEST.parse_prompt = parse_prompt
 _PROMPT_TEST.apply_prompt = apply_prompt
 _PROMPT_TEST.fighting_from_prompt = fighting_from_prompt
-_PROMPT_TEST.reinject_kxwt_tag = reinject_kxwt_tag
