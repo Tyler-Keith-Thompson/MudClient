@@ -103,6 +103,13 @@ trigger([[^kxw[tq]_]], function(...: any)
 end, { priority = -100 })
 gag([[^kxw[tq]_]])
 
+-- Collapse the blank line the server frames around the kxwq_hud vitals bar into a single newline (so gagging
+-- the hud doesn't leave a gap): a multi-line #replace of "<nl><blank><nl>kxwq_hud…" with one "\n". (`[[ ]]`
+-- keeps the backslash-n literal so it's the regex newline escape, matching what `#replace \n^\n^kxwq_hud* \n`
+-- types.) NB the ^kxw[tq]_ gag above drops the hud line single-line BEFORE the buffer sees it, so this only
+-- bites the framing blank when that gag is off (e.g. after `#ungag *`).
+replace([[\n^\n^kxwq_hud*]], [[\n]])
+
 -- Walk direction: numeric code -> name (used by the map). The converter for the walkdir field below;
 -- an unknown code returns nil, which `field :via` assigns straight through to clear state.walkdir.
 local WALK: {string:string} = { ["0"]="north", ["1"]="east", ["2"]="south", ["3"]="west", ["4"]="northeast",

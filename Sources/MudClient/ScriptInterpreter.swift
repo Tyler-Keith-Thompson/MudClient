@@ -147,17 +147,17 @@ extension AsyncSequence where Self: Sendable, Element == String {
             let endedInNewline = lines.last == ""
             let engine = Container.scriptInterpreter().engine
             filter.rules = engine.bufferRewriteRules()   // refresh (a reload can change them); usually empty
+            // Stage 1: single-line processing (triggers + single-line gags) → this chunk's display text.
             // Mark LIVE (LiveGate) so triggers can tell real-time output from replayed history.
-            let rendered: String = LiveGate.shared.live {
+            let processed: String = LiveGate.shared.live {
                 var acc = ""
                 for (i, line) in lines.enumerated() {
                     let isLast = i == lines.count - 1
                     if isLast && endedInNewline { continue }   // terminator artifact, not a line
                     let isPartial = isLast && !endedInNewline
-                    // processLine fires triggers + single-line gags PER LINE, on time.
                     if let display = engine.processLine(line) {
                         // Carry any zero-width colour codes from gagged lines onto this one, then reset.
-                        acc += filter.feed(ansiCarry + display + (isPartial ? "" : "\n"))
+                        acc += ansiCarry + display + (isPartial ? "" : "\n")
                         ansiCarry = ""
                     } else {
                         // Gagged: drop the visible text but KEEP its zero-width ANSI (e.g. the "\27[0m" reset
@@ -169,14 +169,19 @@ extension AsyncSequence where Self: Sendable, Element == String {
                 }
                 return acc
             }
+            // Stage 2: multi-line gag/replace rules. Show optimistically; if a match completed across chunks,
+            // un-print the already-shown lines it now covers (retract) before rendering the correction.
+            let (retract, emit) = filter.feed(processed)
+            if retract > 0 { Container.terminalService().retract(retract) }
             // Record the DISPLAYED server output (post-gag) for `#grep`/`#received`, one line per row.
             let store = Container.transcriptStore()
-            if !rendered.isEmpty {
-                var recLines = rendered.components(separatedBy: "\n")
+            if retract > 0 { store.retractReceived(retract) }
+            if !emit.isEmpty {
+                var recLines = emit.components(separatedBy: "\n")
                 if recLines.last == "" { recLines.removeLast() }   // trailing terminator, not a row
                 for l in recLines { store.recordReceived(l) }
             }
-            return rendered
+            return emit
         }
         .eraseToAnyAsyncSequence()
     }
@@ -214,35 +219,51 @@ extension AsyncSequence where Self: Sendable, Element == String {
 /// rolling buffer of rendered text — so `…bard'\n\nkxwq_hud…` collapses (or gets a newline put back). Text is
 /// fed line by line (each already single-line-processed); it keeps the last `maxSpan - 1` lines buffered so a
 /// match straddling a chunk boundary can still complete, and emits everything safely past that window.
+/// Shared engine for `#gag`/`#suppress`/`#replace`/`#substitute` (each a regex → replacement). Instead of
+/// HOLDING text while a multi-line match might still form (which blocks display), it shows everything
+/// OPTIMISTICALLY and, when a later chunk COMPLETES a match spanning already-shown lines, reports how many
+/// rendered lines to un-print (retract) plus the correction to render. `shown` mirrors the display's last
+/// `maxSpan` lines; each feed diffs `shown` against the rule-corrected text and returns that (retract, emit).
 struct BufferRewriteFilter {
     /// Enabled rules: (compiled regex, replacement text, how many lines its pattern spans). Refreshed by caller.
     var rules: [(regex: Regex<AnyRegexOutput>, replacement: String, span: Int)] = []
-    /// Rendered text accumulated but not yet safe to emit (a match could still form in these trailing lines).
-    private var buffer = ""
+    /// The text currently ON SCREEN, windowed to the last `maxSpan` lines (older can't be part of a match).
+    private var shown = ""
     private var maxSpan: Int { rules.map(\.span).max() ?? 1 }
 
-    /// Feed the rendered text of one line (its display text plus its own newline, or no newline for a tail).
-    /// Returns the text now safe to render (each rule's matches rewritten, the last `maxSpan-1` lines held).
-    mutating func feed(_ text: String) -> String {
-        guard !rules.isEmpty else { return text }            // no rules → pure passthrough, no buffering
-        buffer += text
-        for r in rules { buffer = buffer.replacing(r.regex, with: r.replacement) }  // apply regex → replacement
-        return emitSafePrefix()
+    /// Feed a chunk's rendered text. Returns how many previously-shown COMPLETE lines to un-print, and the
+    /// text to render now. With no multi-line rules it's a pure passthrough `(0, text)`.
+    mutating func feed(_ text: String) -> (retract: Int, emit: String) {
+        guard !rules.isEmpty else { return (0, text) }
+        let candidate = shown + text
+        var corrected = candidate
+        for r in rules { corrected = corrected.replacing(r.regex, with: r.replacement) }
+        // Longest common prefix of what's shown and what SHOULD be shown, tracked at both the character level
+        // (n) and the last shared line boundary (lastNL).
+        var i = shown.startIndex, j = corrected.startIndex, n = 0, lastNL = 0
+        while i < shown.endIndex, j < corrected.endIndex, shown[i] == corrected[j] {
+            n += 1
+            if shown[i] == "\n" { lastNL = n }
+            i = shown.index(after: i); j = corrected.index(after: j)
+        }
+        // Retract the complete lines of `shown` past the last shared boundary; re-render from that boundary.
+        // When nothing needs retracting the divergence is a pure append (or an edit inside the pending line),
+        // so emit only the character-level delta — never re-emit already-shown text.
+        let retract = shown.dropFirst(lastNL).reduce(0) { $0 + ($1 == "\n" ? 1 : 0) }
+        let emit = String(corrected.dropFirst(retract == 0 ? n : lastNL))
+        shown = Self.lastLines(of: corrected, maxSpan)
+        return (retract, emit)
     }
 
-    /// Flush whatever is still buffered (e.g. on disconnect) so nothing is stranded.
-    mutating func drain() -> String { defer { buffer = "" }; return buffer }
-
-    /// Emit all but the last `maxSpan - 1` complete lines — those trailing lines might still be the start of a
-    /// match once more text arrives, so they stay buffered. With no span > 1, emit everything (no holding).
-    private mutating func emitSafePrefix() -> String {
-        let hold = maxSpan - 1
-        guard hold > 0 else { defer { buffer = "" }; return buffer }
-        let newlines = buffer.indices.filter { buffer[$0] == "\n" }
-        guard newlines.count > hold else { return "" }       // not enough complete lines to emit any safely
-        let cut = buffer.index(after: newlines[newlines.count - hold - 1])
-        let emit = String(buffer[..<cut])
-        buffer = String(buffer[cut...])
-        return emit
+    /// Keep only the last `k` newline-delimited lines of `s` (plus any trailing partial).
+    private static func lastLines(of s: String, _ k: Int) -> String {
+        guard k >= 1 else { return s }
+        var count = 0, idx = s.endIndex
+        while idx > s.startIndex {
+            let prev = s.index(before: idx)
+            if s[prev] == "\n" { count += 1; if count > k { return String(s[idx...]) } }
+            idx = prev
+        }
+        return s
     }
 }

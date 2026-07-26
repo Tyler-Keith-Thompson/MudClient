@@ -105,6 +105,13 @@ gag([[^kxw[tq]_]])
 
 
 
+
+
+
+replace([[\n^\n^kxwq_hud*]], [[\n]])
+
+
+
 local WALK = { ["0"] = "north", ["1"] = "east", ["2"] = "south", ["3"] = "west", ["4"] = "northeast",
 ["5"] = "southeast", ["6"] = "southwest", ["7"] = "northwest", ["20"] = "up", ["30"] = "down", }
 local function walk_name(code) return WALK[code] end

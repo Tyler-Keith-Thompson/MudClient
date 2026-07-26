@@ -652,6 +652,30 @@ final class TerminalService {
         }
     }
 
+    /// Un-print the last `n` COMPLETED output lines. Used when a multi-line gag/replace match only completes
+    /// AFTER its earlier lines were already shown optimistically (see `BufferRewriteFilter`): we drop them
+    /// from the scrollback shadow and repaint the region. While scrolled back we only touch the shadow (the
+    /// frozen viewport already matches, and repainting would fight a drag-selection); a later resume redraws.
+    func retract(_ n: Int) {
+        guard n > 0, let l = layout() else { return }
+        scrollbackLock.lock()
+        let remove = Swift.min(n, scrollbackLines.count)
+        if remove > 0 {
+            scrollbackLines.removeLast(remove)
+            if scrollbackStamps.count >= remove { scrollbackStamps.removeLast(remove) }
+            wrapCache = nil
+        }
+        scrollbackLock.unlock()
+        guard remove > 0, scrollOffset == 0 else { return }
+        writeToStandardOut(data: Data("\u{1B}[?25l".utf8))       // hide cursor for the repaint (no flicker)
+        let rows = physicalRows(width: l.width)
+        paintRegion(l, rows: rows)                                // repaint the region from the shortened shadow
+        let col = visibleLength(rows.last ?? "") + 1
+        writeToStandardOut(data: Data("\u{1B}[\(l.outputBottom);\(col)H\u{1B}7".utf8))   // park + DECSC-save
+        drawFurniture(l)                                          // furniture + input line
+        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
+    }
+
     /// Repaint all furniture without writing any output (e.g. after a panel-only state change).
     func refreshFurniture() {
         guard let l = layout() else { return }

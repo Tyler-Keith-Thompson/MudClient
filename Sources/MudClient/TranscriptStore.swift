@@ -48,6 +48,20 @@ final class TranscriptStore: @unchecked Sendable {
         append(Entry(kind: .received, origin: nil, text: text, at: Date()))
     }
 
+    /// Remove the last `n` RECEIVED entries — a multi-line gag/replace whose match completed after those lines
+    /// were already recorded/shown, so the transcript matches the display after they're un-printed. Only the
+    /// trailing received entries are dropped; sent/echo lines interleaved after them are left in place.
+    func retractReceived(_ n: Int) {
+        guard n > 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        var removed = 0
+        var i = entries.count - 1
+        while i >= 0 && removed < n {
+            if entries[i].kind == .received { entries.remove(at: i); removed += 1 }
+            i -= 1
+        }
+    }
+
     /// Record a locally-echoed line (script `echo(...)`, `↗/↙ claude`) so `#grep` can find it. NOT called
     /// for the `#grep`/`#sent`/`#received` dump output itself — those render straight to the echo sink,
     /// bypassing this, so viewing the transcript never re-appends to it.

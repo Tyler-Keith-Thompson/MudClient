@@ -36,9 +36,6 @@ _PROMPT_TEST = _PROMPT_TEST or {}
 local function boot(name: string) pcall(require, name) end
 boot("Parse")
 if not __parse then dofile("Scripts/Foundation/Parse.lua") end
-boot("Route")
-if not __route then dofile("Scripts/Foundation/Route.lua") end
-local route = __route.route
 
 -- Send the three prompt formats. Shared by the connect trigger below and the load-time call further down,
 -- so a mid-session #reload re-applies them without needing a reconnect.
@@ -201,31 +198,20 @@ local function fighting_from_prompt(text: string): boolean
    return false
 end
 
--- NOTE: this whole on_prompt path is now largely inert — the line assembler that surfaced GA-flushed tags
--- to on_prompt was removed, so on_prompt is no longer driven by the host. We deliberately do NOT re-inject
--- kxwt/kxwq tags back into the pipeline (no feed_server here): server bytes are shown as received, nothing
--- is re-fed. The dispatch table below is kept only for its still-unit-tested parse/apply helpers.
-local function is_fighting_bar(text: string): boolean
-   return text:match("^kxw[tq]_fighting") ~= nil
-end
-
-local function is_hud_prompt(text: string): boolean
-   return parse_prompt(text) ~= nil
-end
-
-local function handle_fighting(text: string)
-   fighting_from_prompt(text)
-end
-
-local function apply_prompt_line(text: string)
-   apply_prompt(parse_prompt(text))
-end
-
-on_prompt = route({
-   { is_fighting_bar, handle_fighting },   -- kxwq_fighting line
-   { is_hud_prompt,   apply_prompt_line }, -- kxwq_hud vitals prompt (parse + apply)
-   -- (no catch-all: other GA-flushed tags are NOT re-injected — see note above)
-})
+-- on_prompt is gone (the host line-assembler that surfaced GA-flushed tags to it was removed). The kxwq_hud
+-- vitals bar and the kxwq_fighting enemy-health bar now arrive as ORDINARY newline lines, so we parse them
+-- with plain triggers — the Lua way, no host hook. These fire even though the `^kxw[tq]_` gag hides the line
+-- from the display, because a gag is display-only and does NOT stop the trigger chain. Idempotent with any
+-- Combat.lua trigger on the same tag (only one path sees a given tag). The handler's first arg is the clean
+-- (ANSI-stripped) line.
+trigger([[^kxw[tq]_fighting]], function(...: any)
+   local a = { ... }
+   fighting_from_prompt(a[1] as string)
+end, { priority = 50 })
+trigger([[^kxw[tq]_hud|]], function(...: any)
+   local a = { ... }
+   apply_prompt(parse_prompt(a[1] as string))
+end, { priority = 50 })
 
 _PROMPT_TEST.parse_prompt = parse_prompt
 _PROMPT_TEST.apply_prompt = apply_prompt

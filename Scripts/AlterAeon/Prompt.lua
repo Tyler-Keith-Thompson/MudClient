@@ -36,9 +36,6 @@ _PROMPT_TEST = _PROMPT_TEST or {}
 local function boot(name) pcall(require, name) end
 boot("Parse")
 if not __parse then dofile("Scripts/Foundation/Parse.lua") end
-boot("Route")
-if not __route then dofile("Scripts/Foundation/Route.lua") end
-local route = __route.route
 
 
 
@@ -205,27 +202,16 @@ end
 
 
 
-local function is_fighting_bar(text)
-   return text:match("^kxw[tq]_fighting") ~= nil
-end
 
-local function is_hud_prompt(text)
-   return parse_prompt(text) ~= nil
-end
 
-local function handle_fighting(text)
-   fighting_from_prompt(text)
-end
-
-local function apply_prompt_line(text)
-   apply_prompt(parse_prompt(text))
-end
-
-on_prompt = route({
-   { is_fighting_bar, handle_fighting },
-   { is_hud_prompt, apply_prompt_line },
-
-})
+trigger([[^kxw[tq]_fighting]], function(...)
+   local a = { ... }
+   fighting_from_prompt(a[1])
+end, { priority = 50 })
+trigger([[^kxw[tq]_hud|]], function(...)
+   local a = { ... }
+   apply_prompt(parse_prompt(a[1]))
+end, { priority = 50 })
 
 _PROMPT_TEST.parse_prompt = parse_prompt
 _PROMPT_TEST.apply_prompt = apply_prompt

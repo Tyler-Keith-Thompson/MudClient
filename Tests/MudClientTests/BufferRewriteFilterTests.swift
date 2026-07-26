@@ -41,11 +41,24 @@ private func rule(_ pattern: String, replacement: String = "", lineRounded: Bool
   return (try! Regex(src).anchorsMatchLineEndings(), replacement, span)
 }
 
-private func run(_ f: inout BufferRewriteFilter, _ texts: [String]) -> String {
-  var out = ""
-  for t in texts { out += f.feed(t) }
-  out += f.drain()
-  return out
+/// Simulate the terminal: apply each feed's (retract, emit) — retract removes trailing complete lines, emit
+/// appends — and return the final on-screen text. Also returns the total lines retracted across the run.
+private func run(_ f: inout BufferRewriteFilter, _ texts: [String]) -> String { render(&f, texts).text }
+private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text: String, retracted: Int) {
+  var lines: [String] = []
+  var pending = ""
+  var retracted = 0
+  for t in texts {
+    let (retract, emit) = f.feed(t)
+    if retract > 0 { lines.removeLast(min(retract, lines.count)); retracted += retract }
+    var combined = pending + emit
+    while let nl = combined.firstIndex(of: "\n") {
+      lines.append(String(combined[..<nl]))
+      combined = String(combined[combined.index(after: nl)...])
+    }
+    pending = combined
+  }
+  return (lines.map { $0 + "\n" }.joined() + pending, retracted)
 }
 
 @Test func noRulesIsPlainPassthrough() {
@@ -95,6 +108,20 @@ private func run(_ f: inout BufferRewriteFilter, _ texts: [String]) -> String {
   var f = BufferRewriteFilter()
   f.rules = [rule(#"\n^\n^kxwq_hud.*"#, replacement: "", lineRounded: true)]
   #expect(run(&f, ["a\n", "b\n", "HP>"]) == "a\nb\nHP>")
+}
+
+// The whole point of the new engine: a match spanning chunks is SHOWN optimistically, then the offending
+// rows are UN-PRINTED (retracted) when a later chunk completes it — not held back and blocked.
+@Test func partialMatchShowsThenRetractsOnCompletion() {
+  var f = BufferRewriteFilter()
+  f.rules = [rule(#"\n^\n^kxwq_hud.*"#, replacement: "", lineRounded: true)]
+  // The blank + hud line are shown as they arrive; only when "kxwq_hud …" lands does the match complete.
+  let mid = render(&f, ["Tree'\n", "\n"])
+  #expect(mid.text == "Tree'\n\n")         // the blank is shown optimistically, nothing retracted yet
+  #expect(mid.retracted == 0)
+  let all = render(&f, ["Tree'\n", "\n", "kxwq_hud info\n", "kxwq_sky\n"])
+  #expect(all.text == "Tree'kxwq_sky\n")   // the blank + hud collapsed away
+  #expect(all.retracted >= 1)              // the already-shown blank line was un-printed
 }
 
 // Serialized: these share the cached Container.scriptInterpreter, so run them one at a time.
