@@ -121,33 +121,42 @@ extension AsyncSequence where Self: Sendable, Element == String {
     }
 
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
-        // Shared buffer-delete engine for `#suppress` + multi-line `#gag`, persisted across chunks so a rule
-        // can span a message boundary. Empty (does nothing) unless such a rule is registered.
-        var filter = BufferDeleteFilter()
+        // Shared buffer-rewrite engine for `#gag`/`#suppress`/`#replace`/`#substitute`, persisted across chunks
+        // so a rule can span a message boundary. Empty (does nothing) unless such a rule is registered.
+        var filter = BufferRewriteFilter()
+        // Did the PREVIOUS chunk end with a no-newline partial that was GAGGED (so nothing is on screen for
+        // it)? The RPC frames each idle tick as "\nkxwq_prompt X" — the leading "\n" TERMINATES the previous
+        // partial. When that partial was gagged, the "\n" has nothing to terminate, and emitting the empty
+        // leading segment paints a blank line — one per gagged tick. Track it so we can drop that segment.
+        var lastPartialGagged = false
         return map { output in
-            // Split on the server's OWN newlines and fire triggers/single-line gags per line — nothing is
-            // added, moved, or rewritten. A single-line-gagged line drops out; every surviving line (with its
-            // own newline) flows into the multi-line gag filter, which may DELETE spans across lines. (The
-            // U+E000 prompt-flush marker the IAC layer inserts is dropped here — its line assembler is gone.)
-            let lines = output
+            var lines = output
                 .replacingOccurrences(of: "\u{E000}", with: "")
                 .components(separatedBy: CharacterSet.newlines)
-            // A trailing "" when the chunk ends in a newline is the line TERMINATOR, not a blank line.
+            // Drop a leading empty segment that is really the (invisible) terminator of the previous chunk's
+            // gagged partial — not a fresh blank line. This is the fix for "gagging kxwq_prompt adds a blank
+            // per tick": each "\nkxwq_prompt X" chunk otherwise contributes the "\n" as a blank once its
+            // prompt is gagged and the prior prompt (which the "\n" was terminating) is gagged too.
+            if lastPartialGagged, lines.first == "" { lines.removeFirst() }
+            lastPartialGagged = false
+            // A trailing "" when the chunk ends in a newline is the line TERMINATOR, not a blank line; the last
+            // segment otherwise is a no-newline partial (a prompt, or a line split across reads/messages).
             let endedInNewline = lines.last == ""
-            let lastFed = endedInNewline ? lines.count - 2 : lines.count - 1
             let engine = Container.scriptInterpreter().engine
-            filter.rules = engine.bufferDeleteRules()   // refresh (a reload can change them); usually empty
+            filter.rules = engine.bufferRewriteRules()   // refresh (a reload can change them); usually empty
             // Mark LIVE (LiveGate) so triggers can tell real-time output from replayed history.
             let rendered: String = LiveGate.shared.live {
                 var acc = ""
                 for (i, line) in lines.enumerated() {
-                    if i == lines.count - 1 && endedInNewline { continue }   // terminator artifact, not a line
-                    // processLine fires triggers + single-line gags PER LINE, on time. A gagged line (nil) is
-                    // dropped and never enters the buffer; everything else feeds in WITH its own newline (the
-                    // last line has none when the chunk didn't end in one — a no-newline prompt tail).
-                    guard let display = engine.processLine(line) else { continue }
-                    let newline = !(i == lastFed && !endedInNewline)
-                    acc += filter.feed(display + (newline ? "\n" : ""))
+                    let isLast = i == lines.count - 1
+                    if isLast && endedInNewline { continue }   // terminator artifact, not a line
+                    let isPartial = isLast && !endedInNewline
+                    // processLine fires triggers + single-line gags PER LINE, on time.
+                    if let display = engine.processLine(line) {
+                        acc += filter.feed(display + (isPartial ? "" : "\n"))
+                    } else if isPartial {
+                        lastPartialGagged = true   // a gagged partial → its next-chunk terminator is dropped
+                    }
                 }
                 return acc
             }
@@ -164,25 +173,26 @@ extension AsyncSequence where Self: Sendable, Element == String {
     }
 }
 
-/// Shared buffer-delete engine for `#suppress` and multi-line `#gag`. Both compile to a delete regex (they
-/// differ only in HOW: `#suppress` deletes exactly what it matched; multi-line `#gag` extends its regex to eat
-/// the whole final line). This engine just deletes every span its rules match from a rolling buffer of
-/// rendered text — so `…bard'\n\nkxwq_hud…` collapses rather than leaving the framing blank. Text is fed line
-/// by line (each already single-line-processed); it keeps the last `maxSpan - 1` lines buffered so a match
-/// straddling a chunk boundary can still complete, and emits everything safely past that window.
-struct BufferDeleteFilter {
-    /// Enabled delete rules: (compiled delete regex, how many lines its pattern spans). Refreshed by the caller.
-    var rules: [(regex: Regex<AnyRegexOutput>, span: Int)] = []
+/// Shared buffer-rewrite engine for `#gag`/`#suppress`/`#replace`/`#substitute`. Every rule compiles to a
+/// (regex, replacement): delete-style commands replace with "", `#replace`/`#substitute` with the given text;
+/// line-rounded commands (`#gag`/`#replace`) extend their regex to eat the whole final matched line, char-
+/// exact ones (`#suppress`/`#substitute`) don't. This engine just applies each `regex → replacement` over a
+/// rolling buffer of rendered text — so `…bard'\n\nkxwq_hud…` collapses (or gets a newline put back). Text is
+/// fed line by line (each already single-line-processed); it keeps the last `maxSpan - 1` lines buffered so a
+/// match straddling a chunk boundary can still complete, and emits everything safely past that window.
+struct BufferRewriteFilter {
+    /// Enabled rules: (compiled regex, replacement text, how many lines its pattern spans). Refreshed by caller.
+    var rules: [(regex: Regex<AnyRegexOutput>, replacement: String, span: Int)] = []
     /// Rendered text accumulated but not yet safe to emit (a match could still form in these trailing lines).
     private var buffer = ""
     private var maxSpan: Int { rules.map(\.span).max() ?? 1 }
 
     /// Feed the rendered text of one line (its display text plus its own newline, or no newline for a tail).
-    /// Returns the text that is now safe to render (matched spans deleted, the last `maxSpan-1` lines held).
+    /// Returns the text now safe to render (each rule's matches rewritten, the last `maxSpan-1` lines held).
     mutating func feed(_ text: String) -> String {
-        guard !rules.isEmpty else { return text }            // no delete rules → pure passthrough, no buffering
+        guard !rules.isEmpty else { return text }            // no rules → pure passthrough, no buffering
         buffer += text
-        for r in rules { buffer = buffer.replacing(r.regex, with: "") }  // delete every matched span (newlines and all)
+        for r in rules { buffer = buffer.replacing(r.regex, with: r.replacement) }  // apply regex → replacement
         return emitSafePrefix()
     }
 

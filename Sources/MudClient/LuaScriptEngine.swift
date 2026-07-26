@@ -43,13 +43,18 @@ final class LuaScriptEngine: @unchecked Sendable {
         /// still complete. Both `#gag` (multi-line) and `#suppress` use the SAME filter — the only difference
         /// is the regex compiled at registration (`#gag` extends its match to eat the whole final line).
         let multilineSpan: Int?
-        /// `#suppress` rule (char-exact delete) vs a `#gag` rule (line-oriented). Only used to keep the two in
-        /// separate lanes for listing / `#ungag` vs `#unsuppress`; the delete engine treats them identically.
-        let isSuppress: Bool
+        /// Which display-edit command created this rule — "gag" / "suppress" / "replace" / "substitute" (nil
+        /// for triggers/aliases). Keeps the four in separate lanes for listing and `#un…`; the buffer engine
+        /// treats them identically (it just applies `regex → replacement`).
+        let gagCommand: String?
+        /// Text a buffer rule substitutes for each match — "" for `#gag`/`#suppress` (delete), the given
+        /// string for `#replace`/`#substitute`.
+        let replacement: String
         var enabled: Bool = true
         init(id: Int, regex: Regex<AnyRegexOutput>, patternSource: String = "", handler: LuaFunctionRef?,
              oneshot: Bool = false, ruleClass: String? = nil,
-             priority: Int = 0, specificity: Int = 0, multilineSpan: Int? = nil, isSuppress: Bool = false) {
+             priority: Int = 0, specificity: Int = 0, multilineSpan: Int? = nil,
+             gagCommand: String? = nil, replacement: String = "") {
             self.id = id
             self.regex = regex
             self.patternSource = patternSource
@@ -59,7 +64,8 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.priority = priority
             self.specificity = specificity
             self.multilineSpan = multilineSpan
-            self.isSuppress = isSuppress
+            self.gagCommand = gagCommand
+            self.replacement = replacement
         }
     }
 
@@ -545,38 +551,59 @@ final class LuaScriptEngine: @unchecked Sendable {
         return current
     }
 
-    /// The currently-enabled BUFFER-DELETE rules (`#suppress` + multi-line `#gag`) as (delete regex, span)
-    /// pairs, feeding the shared ``BufferDeleteFilter``. Empty when none registered (the common case).
-    /// Snapshotted under the lock.
-    func bufferDeleteRules() -> [(regex: Regex<AnyRegexOutput>, span: Int)] {
+    /// The currently-enabled BUFFER rules (`#suppress`/`#substitute` + multi-line `#gag`/`#replace`) as
+    /// (regex, replacement, span) triples, feeding the shared ``BufferRewriteFilter``. Empty when none are
+    /// registered (the common case). Snapshotted under the lock.
+    func bufferRewriteRules() -> [(regex: Regex<AnyRegexOutput>, replacement: String, span: Int)] {
         lock.lock(); defer { lock.unlock() }
-        return gags.compactMap { r in r.enabled ? r.multilineSpan.map { (r.regex, $0) } : nil }
+        return gags.compactMap { r in r.enabled ? r.multilineSpan.map { (r.regex, r.replacement, $0) } : nil }
     }
 
-    /// Register a `#gag` or `#suppress` rule from `pat`. Both share ONE delete engine — the only difference is
-    /// the regex compiled here: `#suppress` deletes exactly what `pat` matches; a multi-line `#gag` extends the
-    /// match with `[^\n]*\n` so the whole FINAL line goes (Reading B); a single-line `#gag` stays a per-line
-    /// rule (`multilineSpan == nil`, handled in `processLine`). Returns the new rule id, or nil if `pat` (or
-    /// the extended form) won't compile.
-    private func registerGagOrSuppress(_ pat: String, suppress: Bool) -> Int? {
+    /// Register a `#gag`/`#suppress`/`#replace`/`#substitute` rule. All four share ONE buffer engine — they
+    /// differ only in the regex compiled here and the replacement text. `lineRounded` (gag/replace) extends
+    /// the match with `[^\n]*\n` so the whole FINAL matched line goes (Reading B); otherwise (suppress/
+    /// substitute) the match is exact. A single-line `#gag` is the one exception: it stays a per-line whole-
+    /// line drop in `processLine` (`multilineSpan == nil`). Returns the new rule id, or nil if it won't compile.
+    private func registerDisplayRule(_ pat: String, command: String, replacement: String, lineRounded: Bool) -> Int? {
         let span = Self.multilineSpan(of: pat)
         let regex: Regex<AnyRegexOutput>
         let storedSpan: Int?
-        if suppress {
-            guard let rx = try? Regex(pat).anchorsMatchLineEndings() else { return nil }
-            regex = rx; storedSpan = span ?? 1                 // single-line suppress still runs in the buffer
-        } else if span != nil {
-            // multi-line gag: swallow the rest of the FINAL matched line + its newline, so the row collapses.
-            guard let rx = try? Regex("(?:" + pat + ")[^\\n]*\\n").anchorsMatchLineEndings() else { return nil }
-            regex = rx; storedSpan = span
-        } else {
-            guard let rx = try? Regex(pat) else { return nil } // single-line gag: whole-line drop in processLine
+        if command == "gag" && span == nil {
+            guard let rx = try? Regex(pat) else { return nil }   // single-line gag → per-line whole-line drop
             regex = rx; storedSpan = nil
+        } else {
+            let src = lineRounded ? "(?:" + pat + ")[^\\n]*\\n" : pat
+            guard let rx = try? Regex(src).anchorsMatchLineEndings() else { return nil }
+            regex = rx; storedSpan = span ?? 1                    // single-line suppress/substitute run at span 1
         }
         let rule = Rule(id: nextId(), regex: regex, patternSource: pat, handler: nil,
-                        multilineSpan: storedSpan, isSuppress: suppress)
+                        multilineSpan: storedSpan, gagCommand: command, replacement: replacement)
         gags.append(rule)
         return rule.id
+    }
+
+    /// Parse a `#replace`/`#substitute` invocation into (pattern, replacement). Two string args are used as-is
+    /// (the Lua form `replace("re", "text")`); a single string (from the `#replace re text` REPL) splits on
+    /// its LAST space, so the regex may contain spaces but the replacement may not (use the two-arg form for
+    /// that). Escapes in the replacement are interpreted: `\n` `\t` `\r` `\\`. Returns nil if it can't parse.
+    static func parseReplaceArgs(_ args: [LuaValue]) -> (pattern: String, replacement: String)? {
+        let strings = args.compactMap { if case .string(let s) = $0 { return s } else { return nil } }
+        if strings.count >= 2 { return (strings[0], unescapeReplacement(strings[1])) }
+        guard let only = strings.first, let sp = only.range(of: " ", options: .backwards) else { return nil }
+        return (String(only[..<sp.lowerBound]), unescapeReplacement(String(only[sp.upperBound...])))
+    }
+
+    /// Interpret backslash escapes in replacement text so `#replace … \n` puts an actual newline back.
+    static func unescapeReplacement(_ s: String) -> String {
+        var out = ""; var i = s.startIndex
+        while i < s.endIndex {
+            if s[i] == "\\", let n = s.index(i, offsetBy: 1, limitedBy: s.endIndex), n < s.endIndex {
+                switch s[n] { case "n": out += "\n"; case "t": out += "\t"; case "r": out += "\r"
+                              case "\\": out += "\\"; default: out.append(s[i]); out.append(s[n]) }
+                i = s.index(after: n)
+            } else { out.append(s[i]); i = s.index(after: i) }
+        }
+        return out
     }
 
     /// How many lines a pattern spans if it contains a newline (a literal LF, or the regex escape `\n` you
@@ -701,8 +728,41 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self.listGagRules()
                 return []
             }
-            guard let id = self.registerGagOrSuppress(pat, suppress: false) else {
+            guard let id = self.registerDisplayRule(pat, command: "gag", replacement: "", lineRounded: true) else {
                 self.usage(#"gag: expected a valid regex pattern — e.g. gag("^kxwt_")"#)
+                return []
+            }
+            return [.int(Int64(id))]
+        }
+        // replace(pattern, text) -> id. Like `gag` in HOW it matches (line-oriented; a multi-line pattern eats
+        // the whole final matched line), but PUTS `text` in place of the match instead of deleting it. So
+        // `#replace \n^\n^kxwq_hud.* \n` collapses the hud line + framing blank and drops a newline back in →
+        // rows split, no `$` trick. Text escapes: \n \t \r \\. Bare `#replace` lists the rules.
+        lua.register("replace") { [weak self] args in
+            guard let self else { return [] }
+            guard let (pat, repl) = Self.parseReplaceArgs(args) else {
+                self.usage(#"replace: expected (pattern, text) — e.g. replace("\n^\n^kxwq_hud.*", "\n")"#)
+                self.listReplaceRules()
+                return []
+            }
+            guard let id = self.registerDisplayRule(pat, command: "replace", replacement: repl, lineRounded: true) else {
+                self.usage(#"replace: expected a valid regex pattern — e.g. replace("\n^\n^kxwq_hud.*", "\n")"#)
+                return []
+            }
+            return [.int(Int64(id))]
+        }
+        // substitute(pattern, text) -> id. Like `suppress` in HOW it matches (CHAR-EXACT), but PUTS `text` in
+        // place of the match instead of deleting it — the classic in-line substitution. `#substitute foo bar`
+        // turns "xfooy" into "xbary". Text escapes: \n \t \r \\. Bare `#substitute` lists the rules.
+        lua.register("substitute") { [weak self] args in
+            guard let self else { return [] }
+            guard let (pat, repl) = Self.parseReplaceArgs(args) else {
+                self.usage(#"substitute: expected (pattern, text) — e.g. substitute("^You are hungry\.$", "")"#)
+                self.listSubstituteRules()
+                return []
+            }
+            guard let id = self.registerDisplayRule(pat, command: "substitute", replacement: repl, lineRounded: false) else {
+                self.usage(#"substitute: expected a valid regex pattern — e.g. substitute("hungry", "peckish")"#)
                 return []
             }
             return [.int(Int64(id))]
@@ -719,7 +779,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                 self.listSuppressRules()
                 return []
             }
-            guard let id = self.registerGagOrSuppress(pat, suppress: true) else {
+            guard let id = self.registerDisplayRule(pat, command: "suppress", replacement: "", lineRounded: false) else {
                 self.usage(#"suppress: expected a valid regex pattern — e.g. suppress("\n^\n^kxwq_hud.*$")"#)
                 return []
             }
@@ -728,10 +788,12 @@ final class LuaScriptEngine: @unchecked Sendable {
         // untrigger / unalias / ungag / unsuppress <id | regex> — remove matching rules from ONE lane (unlike
         // rule_remove(id), which spans all types). Bare NUMBER → by id; else a regex matched against each
         // rule's patternSource. `#ungag` never touches `#suppress` rules and vice versa.
-        lua.register("untrigger") { [weak self] args in self?.unregister(args, kind: "trigger");  return [] }
-        lua.register("unalias")   { [weak self] args in self?.unregister(args, kind: "alias");    return [] }
-        lua.register("ungag")     { [weak self] args in self?.unregister(args, kind: "gag");      return [] }
-        lua.register("unsuppress"){ [weak self] args in self?.unregister(args, kind: "suppress"); return [] }
+        lua.register("untrigger")   { [weak self] args in self?.unregister(args, kind: "trigger");    return [] }
+        lua.register("unalias")     { [weak self] args in self?.unregister(args, kind: "alias");      return [] }
+        lua.register("ungag")       { [weak self] args in self?.unregister(args, kind: "gag");        return [] }
+        lua.register("unsuppress")  { [weak self] args in self?.unregister(args, kind: "suppress");   return [] }
+        lua.register("unreplace")   { [weak self] args in self?.unregister(args, kind: "replace");    return [] }
+        lua.register("unsubstitute"){ [weak self] args in self?.unregister(args, kind: "substitute"); return [] }
         // rule_remove(id) — drop the trigger/alias/gag with this id (from wherever it lives).
         lua.register("rule_remove") { [weak self] args in
             guard let self, let id = args.first.flatMap(Self.intArg) else { return [] }
@@ -1811,8 +1873,10 @@ final class LuaScriptEngine: @unchecked Sendable {
     /// bare `#trigger` prints under the syntax line. `lineRules` is already kept sorted by firing order.
     private func listLineRules() { listRules(lineRules, label: "trigger", kind: "line-trigger") }
     private func listAliasRules() { listRules(aliasRules, label: "alias", kind: "alias") }
-    private func listGagRules() { listRules(gags.filter { !$0.isSuppress }, label: "gag", kind: "gag") }
-    private func listSuppressRules() { listRules(gags.filter { $0.isSuppress }, label: "suppress", kind: "suppress") }
+    private func listGagRules() { listRules(gags.filter { $0.gagCommand == "gag" }, label: "gag", kind: "gag") }
+    private func listSuppressRules() { listRules(gags.filter { $0.gagCommand == "suppress" }, label: "suppress", kind: "suppress") }
+    private func listReplaceRules() { listRules(gags.filter { $0.gagCommand == "replace" }, label: "replace", kind: "replace") }
+    private func listSubstituteRules() { listRules(gags.filter { $0.gagCommand == "substitute" }, label: "substitute", kind: "substitute") }
 
     /// `untrigger` / `unalias` / `ungag <id | regex>` — remove rules of ONE kind. Bare number → by id;
     /// otherwise the arg is a regex matched against each rule's `patternSource`. Reports what was removed.
@@ -1836,13 +1900,12 @@ final class LuaScriptEngine: @unchecked Sendable {
             self.usage("un\(kind): '\(needle)' isn't a number or a valid regex.")
             return
         }
-        // `#gag` and `#suppress` share the `gags` array — keep the un-command in its own lane so `#ungag *`
-        // never removes a `#suppress` rule (and vice versa).
+        // gag/suppress/replace/substitute all share the `gags` array — keep each un-command in its own lane so
+        // `#ungag *` only removes gags, `#unsuppress *` only suppresses, etc.
         let lane: (Rule) -> Bool
         switch kind {
-        case "suppress": lane = { $0.isSuppress }
-        case "gag":      lane = { !$0.isSuppress }
-        default:         lane = { _ in true }
+        case "trigger", "alias": lane = { _ in true }
+        default:                 lane = { $0.gagCommand == kind }
         }
         let full: (Rule) -> Bool = { predicate($0) && lane($0) }
         let removed: [Rule]

@@ -450,6 +450,18 @@ doc("suppress", { sig = "suppress(pattern) -> id", group = "triggers",
 doc("unsuppress", { sig = "unsuppress(<id|regex>)", group = "triggers",
   text = "Remove suppress rule(s) by id (a bare number) OR by regex matched against their pattern source. Only touches SUPPRESSES (never gags). (`#suppress` lists them.)",
   example = "#unsuppress 9    #unsuppress kxwq_hud" })
+doc("replace", { sig = "replace(pattern, text) -> id", group = "triggers",
+  text = "Matches like `gag` (LINE-oriented — a multi-line pattern eats the whole final matched line) but PUTS `text` where the match was instead of deleting it. So `#replace \\n^\\n^kxwq_hud.* \\n` collapses the hud line + framing blank and puts a newline back (rows split, no `$` trick). Replacement escapes: \\n \\t \\r \\\\. Bare `#replace` lists them. In the `#replace` REPL the LAST space splits pattern from text (use `replace(\"re\", \"text\")` if the replacement needs spaces).",
+  example = "#replace \\n^\\n^kxwq_hud.* \\n" })
+doc("substitute", { sig = "substitute(pattern, text) -> id", group = "triggers",
+  text = "Matches like `suppress` (CHAR-EXACT) but PUTS `text` where the match was — classic in-line substitution. `#substitute foo bar` turns \"xfooy\" into \"xbary\". Replacement escapes: \\n \\t \\r \\\\. Bare `#substitute` lists them. In the REPL the LAST space splits pattern from text.",
+  example = "#substitute hungry peckish" })
+doc("unreplace", { sig = "unreplace(<id|regex>)", group = "triggers",
+  text = "Remove replace rule(s) by id or by regex matched against their pattern source. Only touches REPLACEs. (`#replace` lists them.)",
+  example = "#unreplace 9    #unreplace kxwq_hud" })
+doc("unsubstitute", { sig = "unsubstitute(<id|regex>)", group = "triggers",
+  text = "Remove substitute rule(s) by id or by regex matched against their pattern source. Only touches SUBSTITUTEs. (`#substitute` lists them.)",
+  example = "#unsubstitute 4    #unsubstitute hungry" })
 doc("rule_remove", { sig = "rule_remove(id)", group = "triggers",
   text = "Remove the trigger, alias, or gag with this id (spans all three types)." })
 doc("untrigger", { sig = "untrigger(<id|regex>)", group = "triggers",
