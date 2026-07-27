@@ -135,9 +135,14 @@ extension AsyncSequence where Self: Sendable, Element == String {
         // hidden telemetry line still terminates the previous coloured line instead of bleeding into the next.
         var ansiCarry = ""
         return map { output in
-            var lines = output
-                .replacingOccurrences(of: "\u{E000}", with: "")
-                .components(separatedBy: CharacterSet.newlines)
+            let stripped = output.replacingOccurrences(of: "\u{E000}", with: "")
+            // A fully-peeled chunk (e.g. a `;sgroup;…;egroup;` frame the on_stream filter consumed) has no
+            // display bytes. Skip it WITHOUT touching cross-chunk state: otherwise it would reset
+            // `lastPartialGagged`, so a hidden partial's terminator (a prompt tick, or the hud bar the buffer
+            // rule just deleted) arriving in the NEXT real chunk would no longer be dropped and would paint a
+            // stray blank — one per telemetry burst.
+            if stripped.isEmpty { return "" }
+            var lines = stripped.components(separatedBy: CharacterSet.newlines)
             // Drop a leading empty segment that is really the (invisible) terminator of the previous chunk's
             // gagged partial — not a fresh blank line. This is the fix for "gagging kxwq_prompt adds a blank
             // per tick": each "\nkxwq_prompt X" chunk otherwise contributes the "\n" as a blank once its
@@ -174,6 +179,10 @@ extension AsyncSequence where Self: Sendable, Element == String {
             // Stage 2: multi-line gag/replace rules. Show optimistically; if a match completed across chunks,
             // un-print the already-shown lines it now covers (retract) before rendering the correction.
             let (retract, emit) = filter.feed(processed)
+            // A rule that deleted this chunk's trailing PARTIAL (e.g. the hud bar) leaves its terminator to
+            // arrive next chunk as an orphaned leading newline — drop it the same way we drop a gagged
+            // partial's terminator, so it never paints a stray blank.
+            if filter.droppedTrailingPartial { lastPartialGagged = true }
             let store = Container.transcriptStore()
             if retract > 0 {
                 Container.terminalService().retract(retract)
@@ -228,14 +237,22 @@ struct BufferRewriteFilter {
     /// The text currently ON SCREEN, windowed to the last `maxSpan` lines (older can't be part of a match).
     private var shown = ""
     private var maxSpan: Int { rules.map(\.span).max() ?? 1 }
+    /// Set by the last `feed` when a rule DELETED this chunk's trailing partial (a hidden line with no newline
+    /// yet — e.g. the kxwq_hud vitals bar). That partial's own terminator arrives next chunk as an orphaned
+    /// leading newline; the caller drops it (same as a gagged partial's terminator) so it never paints a blank.
+    private(set) var droppedTrailingPartial = false
 
     /// Feed a chunk's rendered text. Returns how many previously-shown COMPLETE lines to un-print, and the
     /// text to render now. With no multi-line rules it's a pure passthrough `(0, text)`.
     mutating func feed(_ text: String) -> (retract: Int, emit: String) {
-        guard !rules.isEmpty else { return (0, text) }
+        guard !rules.isEmpty else { droppedTrailingPartial = false; return (0, text) }
         let candidate = shown + text
         var corrected = candidate
         for r in rules { corrected = corrected.replacing(r.regex, with: r.replacement) }
+        // If this chunk ended in a partial (no trailing newline) and a rule ate it, flag its now-orphaned
+        // terminator for the caller to drop next chunk.
+        let trailing = text.last == "\n" ? "" : String(text[(text.lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex)...])
+        droppedTrailingPartial = !trailing.isEmpty && !corrected.hasSuffix(trailing)
         // Longest common prefix of what's shown and what SHOULD be shown, tracked at both the character level
         // (n) and the last shared line boundary (lastNL).
         var i = shown.startIndex, j = corrected.startIndex, n = 0, lastNL = 0
