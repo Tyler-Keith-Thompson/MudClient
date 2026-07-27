@@ -101,7 +101,7 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
 // frame; deleting it (instead of keeping it) bleeds the previous line's colour down the screen.
 @Test func deleteRuleKeepsAnsiResetInsideTheDeletedSpan() {
   var f = BufferRewriteFilter()
-  let pat = #"(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+"#   // the real ANSI-aware hud suppress
+  let pat = #"(?:\nkxw[tq]_hud[^\n]*)+"#   // the real ANSI-aware hud suppress
   f.rules = [(try! Regex(pat).anchorsMatchLineEndings(), "", 4)]
   let out = run(&f, ["Bard'\n", "\u{1B}[0m\nkxwq_hud|354|354\n", "next\n"])
   #expect(!out.contains("kxwq_hud"))          // the hud line is deleted
@@ -379,7 +379,7 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
       // The exact default AlterAeon telemetry rules (AlterAeon.tl): a char-exact #suppress that eats the
       // kxwq_hud vitals bar + its framing blank (empty when idle, a zero-width ANSI reset mid-combat) + any
       // back-to-back hud run, and the (?!hud)-scoped per-line gag for the rest.
-      engine.evalREPL(##"suppress([[(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+]])"##)
+      engine.evalREPL(##"suppress([[(?:\nkxw[tq]_hud[^\n]*)+]])"##)
       engine.evalREPL(#"gag("^kxw[tq]_(?!hud)")"#)
       let src = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
       var acc = ""

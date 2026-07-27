@@ -226,11 +226,11 @@ struct BufferRewriteFilter {
         var corrected = candidate
         for r in rules {
             if r.replacement.isEmpty {
-                // Delete-style rule (#gag/#suppress): remove the SPACING characters but KEEP the zero-width
-                // ANSI in the deleted span — "suppression allows ANSI through". Otherwise a colour RESET the
-                // server tucks into a hidden telemetry frame (e.g. carried onto the hud line the rule eats)
-                // would be deleted, and the previous line's colour would bleed down the screen.
-                corrected = corrected.replacing(r.regex) { match in Self.ansiCodes(in: String(match.0)) }
+                // Delete-style rule (#gag/#suppress): match the VISIBLE text only (ANSI stripped first, so the
+                // Lua pattern never mentions `\x1b`) and remove just the matched visible characters — every
+                // zero-width ANSI escape stays put. "Suppression passes ANSI through": a colour RESET the server
+                // tucks into a hidden telemetry frame still lands, so the previous line's colour can't bleed.
+                corrected = Self.deleteMatchingVisible(corrected, r.regex)
             } else {
                 corrected = corrected.replacing(r.regex, with: r.replacement)
             }
@@ -266,6 +266,41 @@ struct BufferRewriteFilter {
             idx = prev
         }
         return s
+    }
+
+    /// Delete a rule's matches, ANSI-transparently: the regex runs against the VISIBLE text (ANSI stripped, so
+    /// patterns never mention `\x1b`), and only the matched visible scalars are dropped — every ANSI escape is
+    /// kept in place. So a colour reset the server tucks around/into a hidden telemetry line survives the gag.
+    static func deleteMatchingVisible(_ text: String, _ regex: Regex<AnyRegexOutput>) -> String {
+        let scalars = Array(text.unicodeScalars)
+        var visIndex = [Int]()             // clean-scalar order → its index in `scalars`
+        var cleanScalars = [Unicode.Scalar]()
+        var i = 0
+        while i < scalars.count {
+            if scalars[i] == "\u{1B}" {                              // skip an ANSI escape sequence
+                var j = i + 1
+                if j < scalars.count, scalars[j] == "[" {
+                    j += 1
+                    while j < scalars.count { let c = scalars[j]; j += 1; if c.value >= 0x40 && c.value <= 0x7E { break } }
+                } else { j = Swift.min(j + 1, scalars.count) }
+                i = j
+            } else {
+                visIndex.append(i); cleanScalars.append(scalars[i]); i += 1
+            }
+        }
+        let clean = String(String.UnicodeScalarView(cleanScalars))
+        let matches = clean.matches(of: regex)
+        guard !matches.isEmpty else { return text }
+        var drop = [Bool](repeating: false, count: scalars.count)
+        let cv = clean.unicodeScalars
+        for m in matches {
+            let cs = cv.distance(from: cv.startIndex, to: m.range.lowerBound)
+            let ce = cv.distance(from: cv.startIndex, to: m.range.upperBound)
+            for k in cs..<ce { drop[visIndex[k]] = true }           // mark the matched VISIBLE scalars only
+        }
+        var out = String.UnicodeScalarView()
+        for idx in 0..<scalars.count where !drop[idx] { out.append(scalars[idx]) }   // ANSI never dropped
+        return String(out)
     }
 
     /// Extract only the zero-width ANSI escape sequences from `s` (dropping every spacing character). Used to

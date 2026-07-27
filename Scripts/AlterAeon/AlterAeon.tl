@@ -111,11 +111,12 @@ end, { priority = -100 })
 -- line-rounded #replace can't match it until chunks later (LEAKS 10/57), and a put-back `\n` stacks a blank
 -- per tick (#substitute → 187 blanks); the prior line already owns its break, so nothing goes back. The hud's
 -- OWN newline arrives a chunk later, orphaned — the display engine drops it (a buffer-rule-removed trailing
--- partial is treated like a gagged one). Net over a real capture: 0 flicker, 0 hud leak, 14 blanks. The
--- framing "blank" is empty when idle but a zero-width ANSI colour-reset (\27[…m) mid-combat, so the pattern
--- allows a run of ANSI escapes; `(…)+` eats back-to-back huds. The gag below is scoped NOT to touch hud
--- ((?!hud)) so hud reaches this rule. (`[[ ]]`: `\n` = newline, `\x1b` = ESC.)
-suppress([[(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+]])
+-- partial is treated like a gagged one). Net over a real capture: 0 flicker, 0 hud leak, 14 blanks. This
+-- pattern is ANSI-FREE on purpose: the engine strips ANSI before matching and only removes the matched VISIBLE
+-- characters, leaving every colour code in place — so a reset the server tucks around/into the hud frame still
+-- lands and colour never bleeds. `(…)+` eats back-to-back huds. The gag below is scoped NOT to touch hud
+-- ((?!hud)) so hud reaches this rule. (`[[ ]]` keeps `\n` literal = the regex newline escape.)
+suppress([[(?:\nkxw[tq]_hud[^\n]*)+]])
 
 -- Hide the remaining kxwt/kxwq telemetry lines per-line. Scoped to exclude hud (handled above); every other
 -- tag (prompt, sky, time, exp, group, …) is dropped whole. `#ungag *` still reveals these for debugging.

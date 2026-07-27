@@ -115,7 +115,8 @@ end, { priority = -100 })
 
 
 
-suppress([[(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+]])
+
+suppress([[(?:\nkxw[tq]_hud[^\n]*)+]])
 
 
 
