@@ -241,9 +241,13 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
   // (the transcript, post-retract) — not the emit stream. Catches every regression from that saga at once:
   // telemetry LEAK, blank STREAM, and display CHURN (the flicker of a line painted then un-printed).
   @Test func fullDisplayFromRealCapture() async throws {
-    let path = "/Users/tylerthompson/workspace/MudClient/Tests/MudClientTests/fixtures/display_pipeline_capture.log"
-    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }   // fixture is local-only
+    // Resolve from RUNFILES (the fixture is a bazel `data` dep) and REQUIRE it — a guardrail that silently
+    // skips when its fixture is unreadable is worse than none (that vacuous-pass is the flawed-harness trap).
+    let path = URL(fileURLWithPath: "\(#filePath)").deletingLastPathComponent()
+      .appendingPathComponent("fixtures/display_pipeline_capture.log").path
+    let text = try #require(try? String(contentsOfFile: path, encoding: .utf8), "guardrail fixture missing: \(path)")
     let chunks = text.split(separator: "\n").compactMap { Data(base64Encoded: String($0.split(separator: " ").last ?? $0)) }  // "HH:MM:SS.mmm <base64>"
+    #expect(chunks.count > 100)   // …and that it actually parsed (not an empty/garbled read masquerading as a pass)
     try await withTestContainer {
       Container.terminalService.register { TerminalService() }
       Container.sessionLog.register { SessionLog() }

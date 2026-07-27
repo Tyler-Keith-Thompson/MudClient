@@ -4,6 +4,16 @@ A terminal MUD client (Swift) for AlterAeon, with the game logic, HUD, and an AI
 hot-reloadable Lua. The Swift side is a generic host (screen/panels, telnet, an embedded Lua 5.4, and a
 few builtins); everything game-specific lives in `Scripts/`.
 
+## Display bugs (blanks, colour bleed, leaked telemetry, flicker, merged lines) — READ THIS FIRST
+
+**`docs/inbound-display-pipeline.md` is the authoritative map of server bytes → rendered screen.** Any such
+bug is a stage in that pipeline, and almost always the display-editing layer (`#gag`/`#suppress`/`#replace`/
+`#substitute` — Lua rules in `AlterAeon/AlterAeon.tl`, applied by `BufferRewriteFilter` /
+`processServerOutputForScripts` in Swift). Do NOT build a parallel model of the pipeline and reason about it —
+a sim WILL diverge and tell you the wrong thing. **Replay the user's actual `mud_raw.log` through the REAL
+pipeline** and measure the FINAL display (the transcript), gated by
+`fullDisplayFromRealCapture`. Believe the user's screen; it is ground truth.
+
 ## Answering "how does <game thing> work?" (AlterAeon mechanics)
 
 **Grep the scraped help corpus first — don't guess.** `tools/finetune/help_raw/` is a local (gitignored)

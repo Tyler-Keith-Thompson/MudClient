@@ -13,6 +13,7 @@ swift_test(
         "//Scripts:lua_srcs",
         "//Sources/MudClient:swift_srcs",
         "fixtures/pellam_kxwt_capture.log",
+        "fixtures/display_pipeline_capture.log",   # the display-pipeline guardrail replays this real capture
     ],
     visibility = ["//visibility:public"],
     deps = [
