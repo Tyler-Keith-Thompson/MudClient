@@ -4,18 +4,13 @@ swift_test(
     name = "MudClientTests",
     size = "small",
     srcs = glob(["*.swift"]),
-    # The Lua-script load test and the raw-log repro read these from runfiles (resolved via #filePath).
+    # The Lua-script load tests and raw-log repros load the REAL scripts from runfiles (resolved via
+    # #filePath). Depend on the globbed //Scripts:lua_srcs filegroup — the SAME set the app + Lua suite
+    # load — so a script that requires a sibling (e.g. AlterAeon.lua -> Foundation/Parse.lua) resolves,
+    # and a newly added/moved script is never silently dropped (the old hand-list went stale at the
+    # Foundation/AlterAeon reorg, so every load("Scripts")/require test broke).
     data = [
-        "//Scripts:bootstrap.lua",
-        "//Scripts:Foundation/_dsl.lua",
-        "//Scripts:Foundation/_rx.lua",
-        "//Scripts:Foundation/_persist.lua",
-        "//Scripts:AlterAeon/AlterAeon.lua",
-        "//Scripts:AlterAeon/Audio.lua",
-        "//Scripts:AlterAeon/Combat.lua",
-        "//Scripts:AlterAeon/Corpse.lua",
-        "//Scripts:AlterAeon/Recovery.lua",
-        "//Scripts:AlterAeon/AIPilot.lua",
+        "//Scripts:lua_srcs",
         "//Sources/MudClient:swift_srcs",
         "fixtures/pellam_kxwt_capture.log",
     ],

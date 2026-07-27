@@ -122,7 +122,9 @@ extension AsyncSequence where Self: Sendable, Element == String {
 
     func processServerOutputForScripts() -> AnyAsyncSequence<String> {
         // Shared buffer-rewrite engine for `#gag`/`#suppress`/`#replace`/`#substitute`, persisted across chunks
-        // so a rule can span a message boundary. Empty (does nothing) unless such a rule is registered.
+        // so a rule can span a message boundary. It shows text optimistically and un-prints already-shown lines
+        // when a LATER chunk completes a match spanning them — so a telemetry tick that lands seconds after the
+        // blank it frames still retroactively removes the gap. Empty (does nothing) unless a rule is registered.
         var filter = BufferRewriteFilter()
         // Did the PREVIOUS chunk end with a no-newline partial that was GAGGED (so nothing is on screen for
         // it)? The RPC frames each idle tick as "\nkxwq_prompt X" — the leading "\n" TERMINATES the previous
@@ -172,10 +174,11 @@ extension AsyncSequence where Self: Sendable, Element == String {
             // Stage 2: multi-line gag/replace rules. Show optimistically; if a match completed across chunks,
             // un-print the already-shown lines it now covers (retract) before rendering the correction.
             let (retract, emit) = filter.feed(processed)
-            if retract > 0 { Container.terminalService().retract(retract) }
-            // Record the DISPLAYED server output (post-gag) for `#grep`/`#received`, one line per row.
             let store = Container.transcriptStore()
-            if retract > 0 { store.retractReceived(retract) }
+            if retract > 0 {
+                Container.terminalService().retract(retract)
+                store.retractReceived(retract)
+            }
             if !emit.isEmpty {
                 var recLines = emit.components(separatedBy: "\n")
                 if recLines.last == "" { recLines.removeLast() }   // trailing terminator, not a row
@@ -212,18 +215,13 @@ extension AsyncSequence where Self: Sendable, Element == String {
     }
 }
 
-/// Shared buffer-rewrite engine for `#gag`/`#suppress`/`#replace`/`#substitute`. Every rule compiles to a
-/// (regex, replacement): delete-style commands replace with "", `#replace`/`#substitute` with the given text;
-/// line-rounded commands (`#gag`/`#replace`) extend their regex to eat the whole final matched line, char-
-/// exact ones (`#suppress`/`#substitute`) don't. This engine just applies each `regex → replacement` over a
-/// rolling buffer of rendered text — so `…bard'\n\nkxwq_hud…` collapses (or gets a newline put back). Text is
-/// fed line by line (each already single-line-processed); it keeps the last `maxSpan - 1` lines buffered so a
-/// match straddling a chunk boundary can still complete, and emits everything safely past that window.
-/// Shared engine for `#gag`/`#suppress`/`#replace`/`#substitute` (each a regex → replacement). Instead of
-/// HOLDING text while a multi-line match might still form (which blocks display), it shows everything
-/// OPTIMISTICALLY and, when a later chunk COMPLETES a match spanning already-shown lines, reports how many
-/// rendered lines to un-print (retract) plus the correction to render. `shown` mirrors the display's last
-/// `maxSpan` lines; each feed diffs `shown` against the rule-corrected text and returns that (retract, emit).
+/// Shared engine for `#gag`/`#suppress`/`#replace`/`#substitute` (each a regex → replacement). A multi-line
+/// match may only COMPLETE chunks later (a telemetry tick lands seconds after the blank it frames), so this
+/// shows everything OPTIMISTICALLY and, when a later chunk completes a match spanning already-shown lines,
+/// reports how many rendered lines to un-print (retract) plus the correction. `shown` mirrors the display's
+/// last `maxSpan` lines and PERSISTS across chunks — that persistence is load-bearing: it gives a match its
+/// leading context (e.g. the `\n` before a framing blank) even when ticks are seconds apart, so the collapse
+/// still happens. Each feed diffs `shown` against the rule-corrected text and returns that (retract, emit).
 struct BufferRewriteFilter {
     /// Enabled rules: (compiled regex, replacement text, how many lines its pattern spans). Refreshed by caller.
     var rules: [(regex: Regex<AnyRegexOutput>, replacement: String, span: Int)] = []

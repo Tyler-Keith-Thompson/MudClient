@@ -101,14 +101,25 @@ trigger([[^kxw[tq]_]], function(...: any)
   kxwt_ring[#kxwt_ring + 1] = a[1] as string
   if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
 end, { priority = -100 })
-gag([[^kxw[tq]_]])
 
--- Collapse the blank line the server frames around the kxwq_hud vitals bar into a single newline (so gagging
--- the hud doesn't leave a gap): a multi-line #replace of "<nl><blank><nl>kxwq_hud…" with one "\n". (`[[ ]]`
--- keeps the backslash-n literal so it's the regex newline escape, matching what `#replace \n^\n^kxwq_hud* \n`
--- types.) NB the ^kxw[tq]_ gag above drops the hud line single-line BEFORE the buffer sees it, so this only
--- bites the framing blank when that gag is off (e.g. after `#ungag *`).
-replace([[\n^\n^kxwq_hud*]], [[\n]])
+-- The server frames the kxwq_hud vitals bar with a leading blank line ("…<nl><blank><nl>kxwq_hud|…"), so
+-- hiding hud as a plain per-line gag would leave that blank orphaned. This collapses the whole frame — the
+-- leading newline + the framing "blank" + the hud line — leaving only the previous line's own break, so the
+-- gap disappears and consecutive hud ticks don't stack blanks. It gags only the LAST line of the match (the
+-- hud), never the first; the display engine shows text eagerly and, when the hud tick lands a chunk or two
+-- after the blank it frames, retroactively un-prints them (see BufferRewriteFilter). Measured on a real
+-- capture: this = no leak + 9 blanks, vs a line-rounded #replace (10/57 hud lines LEAK — hud is a chunk-final
+-- PARTIAL with no trailing newline, which a line-rounded `[^\n]*\n` can't match until chunks later) and vs a
+-- #substitute that puts a `\n` back (187 blanks — the put-back newline stacks one per tick). So it must be a
+-- char-exact DELETE (#suppress): the previous line already owns its terminator, nothing goes back. The framing
+-- "blank" is empty when idle but a zero-width ANSI colour-reset (\27[…m) mid-combat, so the pattern allows a
+-- run of ANSI escapes there; the trailing `(…)+` eats back-to-back hud lines. The gag below is scoped to NOT
+-- touch hud ((?!hud)) so hud reaches this buffer rule. (`[[ ]]`: `\n` = newline, `\x1b` = ESC.)
+suppress([[\n(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+]])
+
+-- Hide the remaining kxwt/kxwq telemetry lines per-line. Scoped to exclude hud (handled above); every other
+-- tag (prompt, sky, time, exp, group, …) is dropped whole. `#ungag *` still reveals these for debugging.
+gag([[^kxw[tq]_(?!hud)]])
 
 -- Walk direction: numeric code -> name (used by the map). The converter for the walkdir field below;
 -- an unknown code returns nil, which `field :via` assigns straight through to clear state.walkdir.

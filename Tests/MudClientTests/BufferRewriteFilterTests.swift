@@ -42,7 +42,7 @@ private func rule(_ pattern: String, replacement: String = "", lineRounded: Bool
 }
 
 /// Simulate the terminal: apply each feed's (retract, emit) — retract removes trailing complete lines, emit
-/// appends — and return the final on-screen text. Also returns the total lines retracted across the run.
+/// appends — and return the final on-screen text plus the total lines retracted across the run.
 private func run(_ f: inout BufferRewriteFilter, _ texts: [String]) -> String { render(&f, texts).text }
 private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text: String, retracted: Int) {
   var lines: [String] = []
@@ -110,18 +110,19 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
   #expect(run(&f, ["a\n", "b\n", "HP>"]) == "a\nb\nHP>")
 }
 
-// The whole point of the new engine: a match spanning chunks is SHOWN optimistically, then the offending
-// rows are UN-PRINTED (retracted) when a later chunk completes it — not held back and blocked.
-@Test func partialMatchShowsThenRetractsOnCompletion() {
+// The point of the retraction engine: a match completing LATER (the hud tick lands after the blank it frames)
+// retroactively un-prints the already-shown rows, however late it arrives.
+@Test func lateMatchRetroactivelyRemovesAlreadyShownRows() {
   var f = BufferRewriteFilter()
   f.rules = [rule(#"\n^\n^kxwq_hud.*"#, replacement: "", lineRounded: true)]
-  // The blank + hud line are shown as they arrive; only when "kxwq_hud …" lands does the match complete.
+  // The blank shows optimistically; nothing to retract yet.
   let mid = render(&f, ["Tree'\n", "\n"])
-  #expect(mid.text == "Tree'\n\n")         // the blank is shown optimistically, nothing retracted yet
+  #expect(mid.text == "Tree'\n\n")
   #expect(mid.retracted == 0)
+  // When "kxwq_hud …" finally lands, the match completes and the already-shown blank + hud are un-printed.
   let all = render(&f, ["Tree'\n", "\n", "kxwq_hud info\n", "kxwq_sky\n"])
-  #expect(all.text == "Tree'kxwq_sky\n")   // the blank + hud collapsed away
-  #expect(all.retracted >= 1)              // the already-shown blank line was un-printed
+  #expect(all.text == "Tree'kxwq_sky\n")
+  #expect(all.retracted >= 1)
 }
 
 // Serialized: these share the cached Container.scriptInterpreter, so run them one at a time.
@@ -130,6 +131,8 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
     try await withTestContainer {
       Container.scriptInterpreter.register { ScriptInterpreter() }
       Container.transcriptStore.register { TranscriptStore() }
+      Container.terminalService.register { TerminalService() }   // the buffer's idle-flush paints a held tail here
+      Container.sessionLog.register { SessionLog() }              // …and session-logs it (never dials/opens a file)
       Container.anthropicAPIKeyProvider.register { { nil } }
       let engine = Container.scriptInterpreter().engine
       engine.onEcho = { _ in }
@@ -175,6 +178,7 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
   @Test func fullScriptsUserRepro() async throws {
     try await withTestContainer {
       Container.terminalService.register { TerminalService() }
+      Container.sessionLog.register { SessionLog() }   // idle-flush session-logs the held tail (no file opened)
       Container.lagMonitor.register { LagMonitor() }
       Container.transcriptStore.register { TranscriptStore() }
       Container.scriptInterpreter.register { ScriptInterpreter() }
@@ -189,6 +193,7 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
       Container.mspService.register { msp }
       Container.soundService.register { SoundService() }
       Container.connectionManager.register { ConnectionManager() }
+      Container.netConnection.register { NetConnection() }   // scripts resolve it via connect/send; never dials (Lua connect is stubbed)
       let repoRoot = URL(fileURLWithPath: "\(#filePath)").deletingLastPathComponent()
         .deletingLastPathComponent().deletingLastPathComponent().path
       let prev = FileManager.default.currentDirectoryPath
@@ -245,10 +250,11 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
   @Test func replayUserRawGagAddsNoBlankStream() async throws {
     let path = "/Users/tylerthompson/workspace/MudClient/Tests/MudClientTests/fixtures/user_prompt_blanks_raw.log"
     guard let b64 = try? String(contentsOfFile: path, encoding: .utf8) else { return }  // fixture is local-only
-    let chunks = b64.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
+    let chunks = b64.split(separator: "\n").compactMap { Data(base64Encoded: String($0.split(separator: " ").last ?? $0)) }  // strip "HH:MM:SS.mmm " stamp if present
     func run(gag: Bool) async throws -> String {
       return try await withTestContainer {
         Container.terminalService.register { TerminalService() }
+        Container.sessionLog.register { SessionLog() }   // idle-flush session-logs the held tail (no file opened)
         Container.lagMonitor.register { LagMonitor() }
         Container.transcriptStore.register { TranscriptStore() }
         Container.scriptInterpreter.register { ScriptInterpreter() }
@@ -276,6 +282,53 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
     func blanks(_ s: String) -> Int { s.components(separatedBy: "\n").filter { $0.isEmpty }.count }
     #expect(!with.contains("kxwq_prompt"))            // prompts are hidden
     #expect(blanks(with) <= blanks(without) + 2)      // …WITHOUT adding a blank per gagged tick
+  }
+
+  // FULL SCRIPTS, the user's ACTUAL raw.log (a walk + a fight + a rest): the server frames the kxwq_hud
+  // vitals bar with a leading blank ("…<nl><blank>kxwq_hud|…"), which used to leak one stray blank per
+  // telemetry tick — a STREAM of them while resting/fighting, when hud ticks back-to-back. The default
+  // AlterAeon rules (a char-exact #suppress owning hud + its framing blank + the (?!hud)-scoped gag) must
+  // collapse that frame so hud is hidden WITHOUT any blank, and never leak the raw hud/prompt text.
+  // The fixture is pre-peeled of ;s…;e…; frames (that peeling is DClientProbe's on_stream, which needs the
+  // full scripts the bazel sandbox can't load) so the Swift display pipeline is exercised faithfully.
+  @Test func fullScriptsHudFrameNoBlankStream() async throws {
+    let path = "/Users/tylerthompson/workspace/MudClient/Tests/MudClientTests/fixtures/hud_frame_blanks_peeled.log"
+    guard let b64 = try? String(contentsOfFile: path, encoding: .utf8) else { return }  // fixture is local-only
+    let chunks = b64.split(separator: "\n").compactMap { Data(base64Encoded: String($0.split(separator: " ").last ?? $0)) }  // strip "HH:MM:SS.mmm " stamp if present
+    let out: String = try await withTestContainer {
+      Container.terminalService.register { TerminalService() }
+      Container.sessionLog.register { SessionLog() }   // idle-flush session-logs the held tail (no file opened)
+      Container.lagMonitor.register { LagMonitor() }
+      Container.transcriptStore.register { TranscriptStore() }
+      Container.scriptInterpreter.register { ScriptInterpreter() }
+      Container.anthropicAPIKeyProvider.register { { nil } }
+      let msp = MockMSPServicing(policy: .relaxedVoid)
+      given(msp).player(.any, volume: .any, loops: .any).willProduce { _,_,_ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork() }
+      Container.mspService.register { msp }
+      Container.musicService.register { MockMusicServicing(policy: .relaxedVoid) }
+      Container.speechService.register { MockSpeechServicing(policy: .relaxedVoid) }
+      Container.soundService.register { SoundService() }
+      Container.connectionManager.register { ConnectionManager() }
+      let engine = Container.scriptInterpreter().engine
+      engine.onEcho = { _ in }; engine.onSend = { _ in }
+      // The exact default AlterAeon telemetry rules (AlterAeon.tl): a char-exact #suppress that eats the
+      // kxwq_hud vitals bar + its framing blank (empty when idle, a zero-width ANSI reset mid-combat) + any
+      // back-to-back hud run, and the (?!hud)-scoped per-line gag for the rest.
+      engine.evalREPL(##"suppress([[\n(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+]])"##)
+      engine.evalREPL(#"gag("^kxw[tq]_(?!hud)")"#)
+      let src = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+      var acc = ""
+      for try await s in src.captureRaw().handleIACCommunication(writeToStream: { _ in })
+        .normalizeLineEndings().filterServerStream().processMSP().processServerOutputForScripts() { acc += s }
+      return acc
+    }
+    // A run of 2+ blank lines is the telemetry stream. One or two survive from the server's own double-spacing
+    // (the login banner; a room-metadata block) — those are the MUD's, not ours — so allow a small margin.
+    let strayRuns = out.components(separatedBy: "\n\n\n").count - 1
+    #expect(!out.contains("kxwq_hud"))        // the vitals bar never leaks as raw text
+    #expect(!out.contains("kxwq_prompt"))     // nor the prompt
+    #expect(strayRuns <= 3)                   // no telemetry blank-stream (was 46 before the fix)
   }
 }
 

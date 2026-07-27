@@ -7,10 +7,13 @@
 //
 //      MUD_RAW_LOG=/tmp/mud_raw.log just run
 //
-//  Each network chunk is written as one base64 line, preserving exact chunk boundaries
-//  (so a replay reproduces the same streaming fragmentation that triggers buffer bugs).
-//  The file is a ring buffer capped at the last `keep` chunks so it never grows without
-//  bound. Off entirely when the env var is unset.
+//  Each network chunk is written as one line `HH:MM:SS.mmm <base64>`, preserving exact chunk
+//  boundaries (so a replay reproduces the same streaming fragmentation that triggers buffer bugs)
+//  AND the wall-clock arrival time of each chunk — so inter-chunk timing (the thing a time-bounded
+//  display buffer depends on) is visible directly in the log, not guessed at. Decoders split on the
+//  first space and base64-decode the remainder; a bare-base64 line (no space, older captures) still
+//  decodes as the whole line. The file is a ring buffer capped at the last `keep` chunks so it never
+//  grows without bound. Off entirely when the env var is unset.
 //
 
 import Afluent
@@ -21,6 +24,13 @@ final class RawCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var sinceTrim = 0
     private static let keep = 1000
+    /// Wall-clock stamp per chunk. Only ever touched under `lock` (in `record`), so the non-Sendable
+    /// DateFormatter is safe to share.
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
 
     init?() {
         // On by default to `mud_raw.log` (ring-buffered, so bounded) — a capture is always ready
@@ -33,8 +43,8 @@ final class RawCapture: @unchecked Sendable {
     }
 
     func record(_ data: Data) {
-        let line = Data((data.base64EncodedString() + "\n").utf8)
         lock.lock(); defer { lock.unlock() }
+        let line = Data((Self.stamp.string(from: Date()) + " " + data.base64EncodedString() + "\n").utf8)
         if let handle = try? FileHandle(forWritingTo: url) {
             handle.seekToEndOfFile(); handle.write(line); try? handle.close()
         } else {

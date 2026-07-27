@@ -101,14 +101,25 @@ trigger([[^kxw[tq]_]], function(...)
    kxwt_ring[#kxwt_ring + 1] = a[1]
    if #kxwt_ring > KXWT_RING_MAX then table.remove(kxwt_ring, 1) end
 end, { priority = -100 })
-gag([[^kxw[tq]_]])
 
 
 
 
 
 
-replace([[\n^\n^kxwq_hud*]], [[\n]])
+
+
+
+
+
+
+
+
+suppress([[\n(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+]])
+
+
+
+gag([[^kxw[tq]_(?!hud)]])
 
 
 

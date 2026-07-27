@@ -184,7 +184,7 @@ private actor RecordedWrites {
           let content = try? String(contentsOfFile: path, encoding: .utf8) else {
         print("REPLAY: set REPLAY_FILE to a capture to run this"); return
     }
-    let chunks = content.split(separator: "\n").compactMap { Data(base64Encoded: String($0)) }
+    let chunks = content.split(separator: "\n").compactMap { Data(base64Encoded: String($0.split(separator: " ").last ?? $0)) }  // strip "HH:MM:SS.mmm " stamp if present
     let stream = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
     // Mirror the REAL display pipeline end to end.
     var terminal = ""
@@ -415,7 +415,7 @@ private actor RecordedWrites {
     // AlterAeon's game logic is split across AlterAeon + its sibling files (Recovery/Combat/Corpse/Audio);
     // load the whole family so the `kxwt.corpse` command (now in Corpse.lua) is registered.
     for f in ["AlterAeon", "Audio", "Combat", "Corpse", "Recovery"] {
-        try engine.load(path: repoFile("Scripts/\(f).lua"))
+        try engine.load(path: repoFile("Scripts/AlterAeon/\(f).lua"))
     }
     var echoed = [String]()
     engine.onEcho = { echoed.append($0) }
@@ -429,13 +429,14 @@ private actor RecordedWrites {
     #expect(dump.contains("kxwt_mdeath A grey scaled imp"))
     #expect(dump.contains("kxwt_prompt 1 2 3 4 5 6"))
 
-    // `#kxwt corpse on` toggles the harvest→bsac→sac automation.
+    // `#autoHarvest on` arms the after-kill harvest→bsac→sac automation (moved out of `kxwt corpse` into
+    // its own `autoHarvest` control table in Corpse.lua; the callable table maps `autoHarvest on/status`).
     echoed.removeAll()
-    engine.evalREPL("kxwt corpse on")
+    engine.evalREPL("autoHarvest on")
     #expect(echoed.contains { $0.lowercased().contains("corpse automation on") })
     echoed.removeAll()
-    engine.evalREPL("kxwt corpse status")
-    #expect(echoed.contains { $0.contains("corpse ON") })
+    engine.evalREPL("autoHarvest status")
+    #expect(echoed.contains { $0.contains("[harvest]") && $0.contains("ON") })
   }
 }
 
@@ -584,7 +585,7 @@ private actor RecordedWrites {
     // Load the full AlterAeon family (recover/combat/corpse globals moved into sibling files) so the AI
     // command classifier AIPilot uses can resolve them, mirroring the real load("Scripts").
     for f in ["AlterAeon", "Audio", "Combat", "Corpse", "Recovery", "AIPilot"] {
-        try engine.load(path: repoFile("Scripts/\(f).lua"))
+        try engine.load(path: repoFile("Scripts/AlterAeon/\(f).lua"))
     }
 
     var echoed = [String]()

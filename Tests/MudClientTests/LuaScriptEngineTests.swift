@@ -126,43 +126,51 @@ import AppKit
   }
 }
 
-@Test func loadDirectoryRunsTopLevelLuaInOrderExcludingSubdirsAndUnderscored() throws {
+@Test func loadDirectoryRunsTopLevelThenDescendsOneLevelExcludingTestsUnderscoreAndNonLua() throws {
   try withTestContainer {
     Container.anthropicAPIKeyProvider.register { { nil } }
-    // End-to-end over the REAL host primitives (__list_dir/__path_kind/__run_file) + the pure-Lua
-    // loader: a directory loads its top-level *.lua in case-insensitive alphabetical order (there is
-    // no manifest anymore — order emerges from require + declared deps), skipping subdirectories,
-    // non-.lua files, and `_`-prefixed files. Each file is run via require() with the loaded dir added
-    // as a search root; the directory loader busts the cache per file so a second load re-runs them.
+    // End-to-end over the REAL host primitives (__list_dir/__path_kind/__run_file) + the pure-Lua loader:
+    // a directory runs its top-level *.lua in case-insensitive alphabetical order (there is no manifest —
+    // order emerges from require + declared deps), then DESCENDS ONE LEVEL into subdirectories (that's how
+    // Scripts/ picks up Foundation/ + AlterAeon/), skipping `tests/` and `_`/`.`-prefixed dirs. Non-.lua
+    // files and `_`-prefixed files are skipped. Each file runs via require() with the loaded dir added as a
+    // search root; the loader busts the cache per file so a second load re-runs everything.
     let fm = FileManager.default
     let dir = fm.temporaryDirectory.appendingPathComponent("loadtest-\(UUID().uuidString)")
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     defer { try? fm.removeItem(at: dir) }
-    // Each script appends its tag to a global; alphabetical run order should give "a,b".
+    // Each script appends its tag to a global. Top level runs alphabetically ("a" then "b").
     try #"_order = (_order or "") .. "b""#.write(
         to: dir.appendingPathComponent("b.lua"), atomically: true, encoding: .utf8)
     try #"_order = (_order or "") .. "a""#.write(
         to: dir.appendingPathComponent("a.lua"), atomically: true, encoding: .utf8)
     try #"_order = (_order or "") .. "X""#.write(
-        to: dir.appendingPathComponent("_priv.lua"), atomically: true, encoding: .utf8)   // _-prefixed
-    try "not lua".write(to: dir.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8)
+        to: dir.appendingPathComponent("_priv.lua"), atomically: true, encoding: .utf8)   // _-prefixed → skip
+    try "not lua".write(to: dir.appendingPathComponent("notes.txt"), atomically: true, encoding: .utf8) // non-.lua → skip
+    // A plain subdir IS descended one level (→ "S"); `tests/` and `_`-prefixed dirs are NOT.
     try fm.createDirectory(at: dir.appendingPathComponent("sub"), withIntermediateDirectories: true)
     try #"_order = (_order or "") .. "S""#.write(
-        to: dir.appendingPathComponent("sub/inner.lua"), atomically: true, encoding: .utf8)  // subdir
+        to: dir.appendingPathComponent("sub/inner.lua"), atomically: true, encoding: .utf8)  // descended
+    try fm.createDirectory(at: dir.appendingPathComponent("tests"), withIntermediateDirectories: true)
+    try #"_order = (_order or "") .. "T""#.write(
+        to: dir.appendingPathComponent("tests/spec.lua"), atomically: true, encoding: .utf8)  // tests/ → skip
+    try fm.createDirectory(at: dir.appendingPathComponent("_hidden"), withIntermediateDirectories: true)
+    try #"_order = (_order or "") .. "H""#.write(
+        to: dir.appendingPathComponent("_hidden/h.lua"), atomically: true, encoding: .utf8)   // _-dir → skip
 
     let engine = LuaScriptEngine()
     var echoed: [String] = []
     engine.onEcho = { echoed.append($0) }
     try engine.load(source: "load(\(luaStringLiteral(dir.path)))")
     engine.evalREPL("echo(_order)")
-    #expect(echoed == ["ab"])   // a.lua then b.lua; _priv.lua, notes.txt, sub/ all skipped
+    #expect(echoed == ["abS"])   // a, b (top level, alpha) then sub/inner (descent); _priv/notes/tests/_hidden skipped
 
     // A second directory load re-runs each file (require cache is busted per file), proving load()'s
     // interactive "run it again now" intent survives the move to require.
     echoed.removeAll()
     try engine.load(source: "load(\(luaStringLiteral(dir.path)))")
     engine.evalREPL("echo(_order)")
-    #expect(echoed == ["abab"])
+    #expect(echoed == ["abSabS"])
   }
 }
 
