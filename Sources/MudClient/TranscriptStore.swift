@@ -35,6 +35,9 @@ final class TranscriptStore: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [Entry] = []
     private let limit: Int
+    /// Running total of lines un-printed by `retractReceived` — a diagnostic for display CHURN (the flicker of
+    /// a line painted then retracted). Regression tests assert it stays low over a real capture.
+    private(set) var totalRetracted = 0
 
     init(limit: Int = 10_000) { self.limit = limit }
 
@@ -54,6 +57,7 @@ final class TranscriptStore: @unchecked Sendable {
     func retractReceived(_ n: Int) {
         guard n > 0 else { return }
         lock.lock(); defer { lock.unlock() }
+        totalRetracted += n
         var removed = 0
         var i = entries.count - 1
         while i >= 0 && removed < n {

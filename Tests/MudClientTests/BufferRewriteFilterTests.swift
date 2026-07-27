@@ -97,6 +97,17 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
   #expect(run(&f, ["xfooy\n"]) == "xbary\n")
 }
 
+// A delete-style rule must pass zero-width ANSI THROUGH — the server tucks a colour reset into the telemetry
+// frame; deleting it (instead of keeping it) bleeds the previous line's colour down the screen.
+@Test func deleteRuleKeepsAnsiResetInsideTheDeletedSpan() {
+  var f = BufferRewriteFilter()
+  let pat = #"(?:\x1b\[[0-9;?]*[ -/]*[@-~])*(?:\nkxw[tq]_hud[^\n]*)+"#   // the real ANSI-aware hud suppress
+  f.rules = [(try! Regex(pat).anchorsMatchLineEndings(), "", 4)]
+  let out = run(&f, ["Bard'\n", "\u{1B}[0m\nkxwq_hud|354|354\n", "next\n"])
+  #expect(!out.contains("kxwq_hud"))          // the hud line is deleted
+  #expect(out.contains("\u{1B}[0m"))          // …but the colour reset rides through (no bleed)
+}
+
 @Test func bystanderLinesAreNotMerged() {
   var f = BufferRewriteFilter()
   f.rules = [rule(#"\n^\n^kxwq_hud.*"#, replacement: "", lineRounded: true)]
@@ -222,6 +233,59 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
       // The whole real inbound pipeline, real scripts, the user's exact rules: prompts dropped, NO blanks.
       #expect(!out.contains("kxwq_prompt"))
       #expect(!out.contains("\n\n"))
+    }
+  }
+
+  // THE GUARDRAIL that was missing (see memory display-pipeline-debugging-discipline): replay a REAL captured
+  // raw.log through the ENTIRE real pipeline with the REAL default rules, then assert on the FINAL DISPLAY
+  // (the transcript, post-retract) — not the emit stream. Catches every regression from that saga at once:
+  // telemetry LEAK, blank STREAM, and display CHURN (the flicker of a line painted then un-printed).
+  @Test func fullDisplayFromRealCapture() async throws {
+    let path = "/Users/tylerthompson/workspace/MudClient/Tests/MudClientTests/fixtures/display_pipeline_capture.log"
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return }   // fixture is local-only
+    let chunks = text.split(separator: "\n").compactMap { Data(base64Encoded: String($0.split(separator: " ").last ?? $0)) }  // "HH:MM:SS.mmm <base64>"
+    try await withTestContainer {
+      Container.terminalService.register { TerminalService() }
+      Container.sessionLog.register { SessionLog() }
+      Container.lagMonitor.register { LagMonitor() }
+      Container.transcriptStore.register { TranscriptStore() }
+      Container.scriptInterpreter.register { ScriptInterpreter() }
+      Container.anthropicAPIKeyProvider.register { { nil } }
+      let msp = MockMSPServicing(policy: .relaxedVoid)
+      given(msp).player(.any, volume: .any, loops: .any).willProduce { _,_,_ in
+        DeferredTask<AudioPlayer> { throw CancellationError() }.eraseToAnyUnitOfWork() }
+      Container.mspService.register { msp }
+      Container.musicService.register { MockMusicServicing(policy: .relaxedVoid) }
+      Container.speechService.register { MockSpeechServicing(policy: .relaxedVoid) }
+      Container.soundService.register { SoundService() }
+      Container.connectionManager.register { ConnectionManager() }
+      Container.netConnection.register { NetConnection() }
+      let repoRoot = URL(fileURLWithPath: "\(#filePath)").deletingLastPathComponent()
+        .deletingLastPathComponent().deletingLastPathComponent().path
+      let prev = FileManager.default.currentDirectoryPath
+      FileManager.default.changeCurrentDirectoryPath(repoRoot)
+      defer { FileManager.default.changeCurrentDirectoryPath(prev) }
+      let engine = Container.scriptInterpreter().engine
+      engine.onEcho = { _ in }; engine.onSend = { _ in }
+      try engine.load(source: "connect = function() end; is_connected = function() return true end")
+      do { try engine.load(source: "load(\"Scripts\")") } catch { Swift.print("LOAD ERR:", error) }
+      // Feed each captured chunk as its own Data, byte-for-byte, through the WHOLE real chain.
+      let src = AsyncStream<Data> { c in for ch in chunks { c.yield(ch) }; c.finish() }
+      for try await _ in src.captureRaw().handleIACCommunication(writeToStream: { _ in })
+        .normalizeLineEndings().filterServerStream().processMSP().processServerOutputForScripts() {}
+      // The transcript's RECEIVED entries are the final on-screen text (recordReceived − retractReceived).
+      let store = Container.transcriptStore()
+      let display = store.received(last: nil).map { TranscriptStore.strip($0.text) }
+      let leaks = display.filter { $0.contains("kxwq_") || $0.contains("kxwt_") }
+      let blanks = display.filter { $0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+      var runs = 0
+      for i in display.indices where i + 1 < display.count
+        && display[i].trimmingCharacters(in: .whitespaces).isEmpty
+        && display[i + 1].trimmingCharacters(in: .whitespaces).isEmpty { runs += 1 }
+      Swift.print("=== REAL CAPTURE DISPLAY: \(display.count) lines, \(blanks) blanks, \(runs) consec-runs, churn=\(store.totalRetracted), leaks=\(leaks.count) ===")
+      #expect(leaks.isEmpty)               // no telemetry ever reaches the screen (leak regressions)
+      #expect(runs == 0)                   // no blank STREAM (the empty-chunk / framing regressions)
+      #expect(store.totalRetracted <= 2)   // no display CHURN — a line painted then un-printed (the flicker)
     }
   }
   // Gagging a telemetry line must NOT swallow the colour reset the server glues to its front (which ends the

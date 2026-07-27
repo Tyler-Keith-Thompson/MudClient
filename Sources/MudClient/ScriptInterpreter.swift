@@ -170,7 +170,7 @@ extension AsyncSequence where Self: Sendable, Element == String {
                         // Gagged: drop the visible text but KEEP its zero-width ANSI (e.g. the "\27[0m" reset
                         // the server glues to a telemetry line to end the PRECEDING coloured line — a bold-blue
                         // "It is night."). Without this the colour bleeds into the next shown line.
-                        ansiCarry += Self.ansiCodes(in: line)
+                        ansiCarry += BufferRewriteFilter.ansiCodes(in: line)
                         if isPartial { lastPartialGagged = true }   // a gagged partial → its terminator is dropped
                     }
                 }
@@ -198,30 +198,6 @@ extension AsyncSequence where Self: Sendable, Element == String {
         .eraseToAnyAsyncSequence()
     }
 
-    /// Extract only the zero-width ANSI escape sequences from a line (dropping every spacing character). Used
-    /// to keep a gagged line's colour codes — chiefly a `\27[0m` reset the server prefixes to a telemetry line
-    /// to terminate the preceding coloured line — so hiding the line doesn't bleed that colour forward.
-    static func ansiCodes(in s: String) -> String {
-        let scalars = Array(s.unicodeScalars)
-        var result = String.UnicodeScalarView()
-        var i = 0
-        while i < scalars.count {
-            guard scalars[i] == "\u{1B}" else { i += 1; continue }   // not ESC → a spacing char, drop it
-            var j = i + 1
-            if j < scalars.count, scalars[j] == "[" {                // CSI: ESC [ … final-byte(0x40–0x7E)
-                j += 1
-                while j < scalars.count {
-                    let c = scalars[j]; j += 1
-                    if c.value >= 0x40 && c.value <= 0x7E { break }
-                }
-            } else {
-                j = Swift.min(j + 1, scalars.count)                  // other ESC form: keep ESC + next byte
-            }
-            result.append(contentsOf: scalars[i..<j])
-            i = j
-        }
-        return String(result)
-    }
 }
 
 /// Shared engine for `#gag`/`#suppress`/`#replace`/`#substitute` (each a regex → replacement). A multi-line
@@ -248,7 +224,17 @@ struct BufferRewriteFilter {
         guard !rules.isEmpty else { droppedTrailingPartial = false; return (0, text) }
         let candidate = shown + text
         var corrected = candidate
-        for r in rules { corrected = corrected.replacing(r.regex, with: r.replacement) }
+        for r in rules {
+            if r.replacement.isEmpty {
+                // Delete-style rule (#gag/#suppress): remove the SPACING characters but KEEP the zero-width
+                // ANSI in the deleted span — "suppression allows ANSI through". Otherwise a colour RESET the
+                // server tucks into a hidden telemetry frame (e.g. carried onto the hud line the rule eats)
+                // would be deleted, and the previous line's colour would bleed down the screen.
+                corrected = corrected.replacing(r.regex) { match in Self.ansiCodes(in: String(match.0)) }
+            } else {
+                corrected = corrected.replacing(r.regex, with: r.replacement)
+            }
+        }
         // If this chunk ended in a partial (no trailing newline) and a rule ate it, flag its now-orphaned
         // terminator for the caller to drop next chunk.
         let trailing = text.last == "\n" ? "" : String(text[(text.lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex)...])
@@ -280,5 +266,30 @@ struct BufferRewriteFilter {
             idx = prev
         }
         return s
+    }
+
+    /// Extract only the zero-width ANSI escape sequences from `s` (dropping every spacing character). Used to
+    /// keep a hidden line's colour codes — chiefly a `\27[0m` reset the server tucks around a telemetry line to
+    /// terminate the preceding coloured line — so gagging/suppressing the line doesn't bleed that colour forward.
+    static func ansiCodes(in s: String) -> String {
+        let scalars = Array(s.unicodeScalars)
+        var result = String.UnicodeScalarView()
+        var i = 0
+        while i < scalars.count {
+            guard scalars[i] == "\u{1B}" else { i += 1; continue }   // not ESC → a spacing char, drop it
+            var j = i + 1
+            if j < scalars.count, scalars[j] == "[" {                // CSI: ESC [ … final-byte(0x40–0x7E)
+                j += 1
+                while j < scalars.count {
+                    let c = scalars[j]; j += 1
+                    if c.value >= 0x40 && c.value <= 0x7E { break }
+                }
+            } else {
+                j = Swift.min(j + 1, scalars.count)                  // other ESC form: keep ESC + next byte
+            }
+            result.append(contentsOf: scalars[i..<j])
+            i = j
+        }
+        return String(result)
     }
 }

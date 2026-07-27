@@ -441,25 +441,25 @@ doc("trigger", { sig = "trigger(pattern, handler[, opts]) -> id", group = "trigg
 doc("alias", { sig = "alias(pattern, handler[, opts]) -> id", group = "triggers",
   text = "Register an input alias. Matching typed input is swallowed and handler(input, cap1, …) runs. Same opts as trigger() (oneshot/class/priority). The MOST SPECIFIC matching alias wins (priority desc, then specificity desc, then registration order) — a narrow pattern beats a broad one regardless of load order.",
   example = "alias(\"^gg$\", function() send(\"get all from corpse\") end)" })
-doc("gag", { sig = "gag(pattern) -> id", group = "triggers",
+doc("gag", { sig = "gag(pattern) -> id", group = "display",
   text = "LINE-oriented hide. A single-line pattern drops every matching server line whole (its newline too). A MULTI-line pattern (one containing a newline / the `\\n` escape) deletes the span it matches, rounded up so the whole FINAL matched line goes — collapsing rows (e.g. `#gag \\n^\\n^kxwq_hud.*` turns a gossip line + framing blank + hud line into just the gossip line joined to what follows). For exact, non-line-rounded deletion use `suppress`. Removable/toggleable by id; bare `#gag` lists every gag.",
   example = "gag(\"^kxwt_\")    #gag \\n^\\n^kxwq_hud.*" })
-doc("suppress", { sig = "suppress(pattern) -> id", group = "triggers",
+doc("suppress", { sig = "suppress(pattern) -> id", group = "display",
   text = "CHAR-EXACT delete: cut out exactly what the regex matches, anywhere in the stream — partial lines and across lines included (shares the same buffered engine as multi-line gag, minus the whole-final-line rounding). `#suppress \\n^\\n^kxwq_hud.*$` collapses a framing blank but leaves the hud line's own newline (rows stay split); `#suppress foo` turns \"xfooy\" into \"xy\". Greedy patterns are sharp. Removable/toggleable by id; bare `#suppress` lists them.",
   example = "suppress(\"\\n^\\n^kxwq_hud.*$\")" })
-doc("unsuppress", { sig = "unsuppress(<id|regex>)", group = "triggers",
+doc("unsuppress", { sig = "unsuppress(<id|regex>)", group = "display",
   text = "Remove suppress rule(s) by id (a bare number) OR by regex matched against their pattern source. Only touches SUPPRESSES (never gags). (`#suppress` lists them.)",
   example = "#unsuppress 9    #unsuppress kxwq_hud" })
-doc("replace", { sig = "replace(pattern, text) -> id", group = "triggers",
+doc("replace", { sig = "replace(pattern, text) -> id", group = "display",
   text = "Matches like `gag` (LINE-oriented — a multi-line pattern eats the whole final matched line) but PUTS `text` where the match was instead of deleting it. So `#replace \\n^\\n^kxwq_hud.* \\n` collapses the hud line + framing blank and puts a newline back (rows split, no `$` trick). Replacement escapes: \\n \\t \\r \\\\. Bare `#replace` lists them. In the `#replace` REPL the LAST space splits pattern from text (use `replace(\"re\", \"text\")` if the replacement needs spaces).",
   example = "#replace \\n^\\n^kxwq_hud.* \\n" })
-doc("substitute", { sig = "substitute(pattern, text) -> id", group = "triggers",
+doc("substitute", { sig = "substitute(pattern, text) -> id", group = "display",
   text = "Matches like `suppress` (CHAR-EXACT) but PUTS `text` where the match was — classic in-line substitution. `#substitute foo bar` turns \"xfooy\" into \"xbary\". Replacement escapes: \\n \\t \\r \\\\. Bare `#substitute` lists them. In the REPL the LAST space splits pattern from text.",
   example = "#substitute hungry peckish" })
-doc("unreplace", { sig = "unreplace(<id|regex>)", group = "triggers",
+doc("unreplace", { sig = "unreplace(<id|regex>)", group = "display",
   text = "Remove replace rule(s) by id or by regex matched against their pattern source. Only touches REPLACEs. (`#replace` lists them.)",
   example = "#unreplace 9    #unreplace kxwq_hud" })
-doc("unsubstitute", { sig = "unsubstitute(<id|regex>)", group = "triggers",
+doc("unsubstitute", { sig = "unsubstitute(<id|regex>)", group = "display",
   text = "Remove substitute rule(s) by id or by regex matched against their pattern source. Only touches SUBSTITUTEs. (`#substitute` lists them.)",
   example = "#unsubstitute 4    #unsubstitute hungry" })
 doc("rule_remove", { sig = "rule_remove(id)", group = "triggers",
@@ -470,7 +470,7 @@ doc("untrigger", { sig = "untrigger(<id|regex>)", group = "triggers",
 doc("unalias", { sig = "unalias(<id|regex>)", group = "triggers",
   text = "Remove input alias(es) by id (a bare number) OR by regex matched against their pattern source. Only touches ALIASES.",
   example = "#unalias 4    #unalias dsleep" })
-doc("ungag", { sig = "ungag(<id|regex>)", group = "triggers",
+doc("ungag", { sig = "ungag(<id|regex>)", group = "display",
   text = "Remove gag(s) by id (a bare number) OR by regex matched against their pattern source. Only touches GAGS. (`#gag` lists them.)",
   example = "#ungag 9    #ungag ^kxwt_" })
 doc("rule_enable", { sig = "rule_enable(id, on)", group = "triggers",
