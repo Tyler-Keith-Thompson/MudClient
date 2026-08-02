@@ -84,6 +84,12 @@ if rx then
    tag([[^You (?:conjure and )?throw a .* fireball at ]], "fireball"),
    tag([[^You use a small crystal to focus your powers and throw a confusing wash of color and force at ]], "prism"),
    tag([[^Spiked flowers of ice quickly form on everything in a ring around you!$]], "frostflower"),
+
+
+
+
+
+   tag([[^.+ is engulfed in a writhing mass of biting ethereal mouths!$]], "rotting"),
    tag([[^A shower of .* sparks suddenly engulfs]], "shower"),
    tag([[^An ethereal hand appears and attacks .+ from behind!$]], "tarrants"),
    tag([[^You tap your life, and .* toward ]], "bloodmist"))

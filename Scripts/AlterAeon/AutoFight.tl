@@ -6,14 +6,23 @@
 -- THE ROUTINE (per fight, driven off kxwt_fighting + a few combat lines):
 --   0. OPENER:           bloodmist when HP is healthy (> cfg.bloodmist_hp_min — it costs hp to cast), else
 --                        the free tarrants. (A known-winner target skips straight past the probe below.)
+--   0b. ROTTING SPHERE:  right after the opener lands, prime Nar's spectral-rot DoT (`rotting sphere` — a
+--                        very-slow TOXIC damage-over-time debuff). It's a MAINTAINED debuff, not a nuke:
+--                        cast it once here, then RE-APPLY it every cfg.rot_refresh winner-nukes (see NUKE),
+--                        but NEVER in finish range (a slow cast on a near-dead mob just delays the soulsteal).
+--                        Landed line: "<target> is engulfed in a writhing mass of biting ethereal mouths!".
+--                        A mana/fizzle on the DoT is NON-fatal (it's a bonus, not a gate) — we proceed to the
+--                        probe/nuke regardless; only the winner nuke halts on out-of-mana.
 --   1. PROBE:            on COMBAT START, cast the PRIMARY probes lightning bolt (once) then fireball (once);
 --                        compare how much each dropped the enemy's health %; the bigger drop WINS. (Coarse %
 --                        heuristic — fine.) If NEITHER primary cleared cfg.probe_enough, also try the
 --                        FALLBACK probes icebolt then prism (once each), then pick among all four — icebolt/
 --                        prism are rarely best, so we only pay for them when both primaries flopped.
---   2. NUKE:             keep casting the WINNER until the enemy is dead.
+--   2. NUKE:             keep casting the WINNER until the enemy is dead, re-applying rotting sphere every
+--                        cfg.rot_refresh winner-nukes (step 0b).
 --   3. FINISH:           when the enemy is NEARLY dead (<= cfg.soulsteal_pct), cast soulsteal. If it's
---                        RESISTED, nuke once more with the winner then retry soulsteal — repeat until it
+--                        RESISTED, nuke once more with the winner (a FAST winner nuke — never the slow rotting
+--                        sphere, which is gated out of finish range) then retry soulsteal — repeat until it
 --                        lands or the enemy dies. If instead soulsteal LATCHES ("You magically latch
 --                        onto <x>'s soul and wait for <x> to weaken…" — the dormant/dread-portent form),
 --                        the soul isn't captured yet: keep nuking the winner (do NOT re-cast soulsteal)
@@ -88,6 +97,8 @@ local record Cfg
   icebolt_cmd:      string
   fireball_cmd:     string
   prism_cmd:        string
+  rotting_cmd:      string
+  rot_refresh:      integer
   probe_enough:     integer
   fireball_bias:    integer
   soulsteal_cmd:    string
@@ -119,6 +130,12 @@ local cfg: Cfg = {
   icebolt_cmd      = "c icebolt",    -- COLD; a FALLBACK probe now — only tried if lightning+fireball underwhelm
   fireball_cmd     = "c fireball",   -- the FIRE probe/nuke (PRIMARY, tried every fight)
   prism_cmd        = "c prism",      -- LIGHT; a FALLBACK probe — only tried when lightning+fireball both underwhelm
+  rotting_cmd      = "cast 'rotting sphere'",  -- Nar's spectral rot: a very-slow TOXIC damage-over-time DEBUFF,
+                                     -- woven into the routine (primed after the opener, refreshed every
+                                     -- rot_refresh nukes). NOT a probe/winner spell — it's always maintained,
+                                     -- never compared. Multi-word name → quoted, like the lightning bolt cmd.
+  rot_refresh      = 3,              -- re-apply rotting sphere after this many winner-nukes (its DoT has faded
+                                     -- by then); keep it modest so the debuff stays up without stealing rounds
   probe_enough     = 5,              -- % health a single PRIMARY (lightning/fireball) hit must clear to SKIP the
                                      -- icebolt/prism fallback probes (they're rarely best, so don't bother
                                      -- trying them if a primary already hits hard)
@@ -206,6 +223,7 @@ local record AutoFightState
   suspend_timer:     integer
   room_burst_timer:  integer
   last_damage_spell: string
+  rot_since:         integer   -- winner-nukes since the last rotting-sphere application (DoT refresh counter)
 end
 global _AUTOFIGHT: AutoFightState
 _AUTOFIGHT = _AUTOFIGHT or { on = true } as AutoFightState
@@ -220,6 +238,7 @@ F.lightning_drop    = F.lightning_drop or 0
 F.icebolt_drop      = F.icebolt_drop or 0
 F.fireball_drop     = F.fireball_drop or 0
 F.prism_drop        = F.prism_drop or 0
+F.rot_since         = F.rot_since or 0            -- winner-nukes since the last rotting-sphere application
 F.fallback_tried    = F.fallback_tried or false   -- did we already run the icebolt/prism fallback probes this fight?
 F.finish_ready      = F.finish_ready or false     -- authoritative "target near death" latch: switch to soulsteal
 -- engage() state: initiating a fight from out of combat by casting the opener (`target x` alone doesn't
@@ -430,6 +449,7 @@ local FIGHT_RESET: {string:any} = {
   icebolt_drop  = 0,
   fireball_drop = 0,
   prism_drop    = 0,
+  rot_since     = 0,        -- fresh DoT-refresh counter each fight (rotting sphere primed after the opener)
   fallback_tried = false,
   last_damage_spell = NIL,
   soul_latched  = false,
@@ -763,6 +783,27 @@ local function nextBar(): FlowPromise
   end)
 end
 
+-- rotStep() — cast the rotting-sphere DoT (Nar's spectral rot) and await ITS landed line ("engulfed in a
+-- writhing mass of biting ethereal mouths!"). It's a MAINTAINED debuff woven into the routine — primed
+-- right after the opener (afterOpener) and re-applied every cfg.rot_refresh winner-nukes (fightLoop), never
+-- in finish range. Reuses castStep, so pacing/retry/suspend/mana all behave exactly like any other cast (the
+-- spell is VERY slow to cast, but the await IS event-driven — the two "You begin/complete the spell" progress
+-- lines have no subscriber and are dropped; only the landed line resolves it). ATTRIBUTION: we tag
+-- last_damage_spell "rotting" (which on_fight's drop accounting ignores) so the DoT's own tick window isn't
+-- miscredited to a probe spell; residual ticks during the probe add roughly-equal noise to both primaries,
+-- within the coarse-% tolerance the probe already documents.
+local function rotStep(): FlowPromise
+  F.last_damage_spell = "rotting"; F.phase = "rot"
+  return castStep(cfg.rotting_cmd, "rotting", nil)
+end
+
+-- Are we in the soulsteal/finish zone (near death)? The DoT is gated OUT of this — a slow rotting-sphere
+-- cast on a near-dead mob just delays the kill (and, on a soulsteal resist, the re-nuke must be a FAST
+-- winner nuke, never this). Mirrors fightLoop's soulsteal gate.
+local function finishing(): boolean
+  return F.finish_ready or (F.pct ~= nil and F.pct > 0 and F.pct <= cfg.soulsteal_pct)
+end
+
 -- STAGE 1 — the OPENER. Resolves when it LANDS (or is given up after max_tries). Skipped (resolves at
 -- once) when an engage already threw it (opener_primed) or we're AOEing a pack from the off.
 opener = function(): FlowPromise
@@ -864,11 +905,25 @@ fightLoop = function(winner: string): FlowPromise
         return step()
       end)
     end
+    -- Refresh the rotting-sphere DoT every cfg.rot_refresh winner-nukes — but ONLY in the normal nuke phase:
+    -- never during AOE (single-target debuff), never in finish range, and never on the post-resist re-nuke
+    -- (renuke_pending → that must be exactly ONE FAST winner nuke before retrying soulsteal). The DoT doesn't
+    -- advance the nuke count; on mana it HALTS like any cast (we're already committed mid-fight, unlike the
+    -- non-fatal prime in afterOpener).
+    if winner and not aoe_active() and not F.renuke_pending and not finishing()
+       and (F.rot_since or 0) >= cfg.rot_refresh then
+      F.rot_since = 0
+      return rotStep():andThen(function(o: any): any
+        if o == "mana" then return never_p() end
+        return step()
+      end)
+    end
     F.renuke_pending = false
     -- Read the LIVE field first: a mid-fight autofight.winner() override sets F.winner_spell, and this
     -- re-read (mirroring the AOE override's re-read-every-cast pattern) picks it up on the very next nuke
     -- instead of continuing to cast the stale CAPTURED `winner` upvalue.
     local w = F.winner_spell or winner or "lightning"  -- edge: AOE cleared before any winner was learned
+    F.rot_since = (F.rot_since or 0) + 1               -- count this winner-nuke toward the next DoT refresh
     F.last_damage_spell = w; F.phase = "nuke"
     return castStep((cfg as {string:any})[w .. "_cmd"] as string, w, nil):andThen(function(o: any): any
       if o == "mana" then return never_p() end
@@ -878,12 +933,17 @@ fightLoop = function(winner: string): FlowPromise
   return step()
 end
 
--- After the opener lands: a known winner or an AOE pack skips the probe; otherwise probe, then nuke the
--- winner it resolves with.
+-- After the opener lands: prime the rotting-sphere DoT, then a known winner or an AOE pack skips the probe;
+-- otherwise probe, then nuke the winner it resolves with. An AOE pack skips the DoT entirely (single-target
+-- debuff — we're bursting the room with frostflower/fireball). The DoT prime is NON-fatal: on mana/fizzle we
+-- proceed to the probe/nuke anyway (it's a bonus, not a gate); the nuke phase halts on out-of-mana as usual.
 afterOpener = function(): FlowPromise
-  if aoe_active()     then return fightLoop(nil) end
-  if F.known_winner   then return fightLoop(F.known_winner) end
-  return probe():andThen(function(winner: any): any return fightLoop(winner as string) end)
+  if aoe_active() then return fightLoop(nil) end
+  local function proceed(): FlowPromise
+    if F.known_winner then return fightLoop(F.known_winner) end
+    return probe():andThen(function(winner: any): any return fightLoop(winner as string) end)
+  end
+  return rotStep():andThen(function(_: any): any return proceed() end)
 end
 
 -- Build + START the whole per-fight promise chain; return its TAIL (cancelling the tail cascades upstream
@@ -1129,6 +1189,7 @@ local function hit_lightning()   if landedS then landedS:onNext("lightning")   e
 local function hit_icebolt()     if landedS then landedS:onNext("icebolt")     end end
 local function hit_fireball()    if landedS then landedS:onNext("fireball")    end end
 local function hit_prism()       if landedS then landedS:onNext("prism")       end end
+local function hit_rotting()     if landedS then landedS:onNext("rotting")     end end   -- rotting sphere DoT landed
 local function hit_frostflower() if landedS then landedS:onNext("frostflower") end end
 -- DORMANT (see cfg.shower_cmd): shower isn't in the routine, so no stage ever awaits "shower" — the push
 -- has no matching subscriber and is dropped. Wired only to keep the "A shower of … sparks" string live.
@@ -1544,7 +1605,7 @@ doc(autofight.tank, { name = "autofight.tank", sig = "autofight.tank(['on'|'off'
 
 function autofight.on()
   F.on = true
-  say("armed — tarrants → lightning/fireball probe → nuke winner → soulsteal")
+  say("armed — opener → rotting sphere → lightning/fireball probe → nuke winner (rot refresh) → soulsteal")
   -- Armed mid-fight (e.g. after a manual off): (re)start the reactive flow on the current enemy.
   if F.fighting and combatStartS then combatStartS:onNext(true) end
 end
@@ -1732,10 +1793,11 @@ doc("attack", { sig = "attack(target) -> promise", group = "combat",
   example = "#attack('orc')" })
 
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
-  text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes "
-      .. "icebolt vs fireball and keeps the harder-hitting one, then soulsteals when the enemy is nearly "
-      .. "dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by default; any command "
-      .. "YOU type suspends it briefly so you can intervene." })
+  text = "Arm the deterministic auto-fight routine: on combat start it casts the opener (bloodmist/tarrants), "
+      .. "primes the rotting-sphere DoT, probes lightning vs fireball and keeps the harder-hitting one "
+      .. "(re-applying rotting sphere every few nukes), then soulsteals when the enemy is nearly dead "
+      .. "(one FAST re-nuke on a resist, never the slow DoT). Paced (one cast per resolution) and OFF by "
+      .. "default; any command YOU type suspends it briefly so you can intervene." })
 doc(autofight.off, { name = "autofight.off", sig = "autofight.off()", group = "combat",
   text = "Disarm the auto-fight routine and end any in-progress fight tracking." })
 doc(autofight.status, { name = "autofight.status", sig = "autofight.status()", group = "combat",
@@ -1788,6 +1850,7 @@ _AF_TEST = {
   set_now       = function(t: number) af_now = function(): number return t end end,   -- mock the clock (rescue-flip hold)
   on_input      = observe_input,
   lightning     = hit_lightning,   icebolt      = hit_icebolt,     fireball  = hit_fireball,
+  rotting       = hit_rotting,     -- rotting sphere landed ("engulfed in a writhing mass of biting ethereal mouths!")
   tarrants      = hit_tarrants,
   prism         = hit_prism,       bloodmist    = hit_bloodmist,   opener_cmd = opener_cmd,
   is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS,    save_winners = save_winners,

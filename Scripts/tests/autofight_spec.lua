@@ -34,7 +34,7 @@ end
 -- Land the currently-in-flight spell by name (drives the resolution handler the trigger would call).
 local LAND = {
   lightning = AF.lightning, icebolt = AF.icebolt, fireball = AF.fireball, prism = AF.prism,
-  tarrants = AF.tarrants, bloodmist = AF.bloodmist, frostflower = AF.frostflower,
+  tarrants = AF.tarrants, bloodmist = AF.bloodmist, frostflower = AF.frostflower, rotting = AF.rotting,
 }
 -- Spell → the exact wire command it casts (lightning's isn't "c lightning").
 local CMD = {
@@ -49,7 +49,8 @@ local function land_opener() OPENER_LAND[AF.sent[#AF.sent]]() end
 local function to_lightning()
   AF.reset()
   AF.on_fight(90, ENEMY)   -- combat start → "c tarrants"
-  AF.tarrants()            -- tarrants LANDED → "cast 'lightning bolt'"
+  AF.tarrants()            -- tarrants LANDED → "cast 'rotting sphere'" (DoT prime)
+  AF.rotting()             -- rotting sphere LANDED → "cast 'lightning bolt'"
 end
 
 -- Behaviour probes for learned-winner PERSISTENCE (all observable, no internal reads): start a FRESH
@@ -62,6 +63,7 @@ end
 --                            which a one-shot probe cast would never do.
 local function fight_probes(name)
   AF.on_fight(90, name); land_opener()
+  AF.rotting()   -- DoT prime lands → the first probe cast
   if AF.sent[#AF.sent] ~= CMD.lightning then return false end
   AF.lightning()
   return AF.sent[#AF.sent] == "c fireball"
@@ -69,6 +71,7 @@ end
 local function fight_nukes(name, spell)
   local cmd = CMD[spell]
   AF.on_fight(90, name); land_opener()
+  AF.rotting()   -- DoT prime lands → the known-winner nuke
   if AF.sent[#AF.sent] ~= cmd then return false end
   LAND[spell]()
   return AF.sent[#AF.sent] == cmd
@@ -87,29 +90,33 @@ local function capture_echo(fn)
 end
 
 -- ---- (a) full fight command sequence -------------------------------------------------------------
-test("full fight: tarrants → lightning/fireball probe → nuke winner → soulsteal (resist → re-nuke → retry)", function()
-  to_lightning()                      -- sent: c tarrants, cast 'lightning bolt'
+test("full fight: tarrants → rotting sphere prime → lightning/fireball probe → nuke winner (rotting refresh every 3 nukes) → soulsteal (resist → re-nuke → retry)", function()
+  to_lightning()                      -- sent: c tarrants, cast 'rotting sphere', cast 'lightning bolt'
   AF.on_fight(70, ENEMY)             -- lightning Δ20 — a % change NEVER casts
   AF.lightning()                      -- lightning LANDED → "c fireball" (probe advances immediately)
   AF.on_fight(65, ENEMY)             -- fireball Δ5
-  AF.fireball()                        -- fireball LANDED → decide (lightning wins, primary cleared bar) → nuke lightning
+  AF.fireball()                        -- fireball LANDED → decide (lightning wins, primary cleared bar) → nuke lightning (rot_since=1)
   -- each winner-nuke now decides on the BAR boundary: land, THEN the fresh kxwt_fighting % (on_fight IS
   -- the boundary — it fires barS itself, no separate seam needed).
-  AF.lightning(); AF.on_fight(50, ENEMY)  -- landed → bar → "cast 'lightning bolt'"
-  AF.lightning(); AF.on_fight(35, ENEMY)  -- landed → bar → "cast 'lightning bolt'"
-  AF.lightning(); AF.on_fight(20, ENEMY)  -- landed → bar → "cast 'lightning bolt'"
+  AF.lightning(); AF.on_fight(50, ENEMY)  -- landed → bar → "cast 'lightning bolt'" (rot_since=2)
+  AF.lightning(); AF.on_fight(35, ENEMY)  -- landed → bar → "cast 'lightning bolt'" (rot_since=3)
+  AF.lightning(); AF.on_fight(20, ENEMY)  -- landed → bar → rot_since>=3, pct>15 → REFRESH "cast 'rotting sphere'" (rot_since=0)
+  AF.rotting()                            -- DoT refresh landed → resumes the winner nuke → "cast 'lightning bolt'" (rot_since=1)
   AF.lightning(); AF.on_fight(10, ENEMY)  -- landed, now ≤15% at the bar → "c soulsteal"
-  AF.resist()                        -- soulsteal RESISTED → re-nuke → "cast 'lightning bolt'"
+  AF.resist()                        -- soulsteal RESISTED → one FAST re-nuke (never rotting) → "cast 'lightning bolt'"
   AF.lightning(); AF.on_fight(10, ENEMY)   -- re-nuke landed → bar → retry "c soulsteal"
   AF.soulsteal_ok()                  -- landed → done (no further sends)
   AF.dead()                          -- enemy dead → fight ends
 
   expect_seq(seq(), {
     "c tarrants",
+    "cast 'rotting sphere'",                          -- DoT prime after the opener
     "cast 'lightning bolt'", "c fireball",              -- primary probes
-    "cast 'lightning bolt'", "cast 'lightning bolt'", "cast 'lightning bolt'", "cast 'lightning bolt'",  -- winner nuked (65→50→35→20→10)
+    "cast 'lightning bolt'", "cast 'lightning bolt'", "cast 'lightning bolt'",  -- winner nuked ×3 (65→50→35)
+    "cast 'rotting sphere'",                          -- DoT refresh after 3 winner-nukes
+    "cast 'lightning bolt'",                          -- 4th winner nuke, resumed after the refresh
     "c soulsteal",                                   -- finish attempt
-    "cast 'lightning bolt'",                          -- re-nuke after the resist
+    "cast 'lightning bolt'",                          -- re-nuke after the resist (fast, never rotting)
     "c soulsteal",                                   -- retry — lands
   })
   -- lightning was learned as the winner: the NEXT fight vs the same name skips the probe and nukes lightning.
@@ -153,7 +160,7 @@ end)
 -- ---- the FALLBACK tier: icebolt → prism, probed only when BOTH primaries (lightning/fireball) underwhelm
 
 test("the fallback tier is SKIPPED when a primary (lightning or fireball) already clears the threshold", function()
-  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → lightning
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()   -- opener → DoT prime → lightning
   AF.on_fight(70, ENEMY); AF.lightning()              -- lightning Δ20 (>= probe_enough) → fireball
   AF.on_fight(68, ENEMY); AF.fireball()                 -- fireball Δ2 → decide: 20 clears the bar → nuke, no fallback
   expect(AF.sent[#AF.sent]):eq(CMD.lightning)         -- decided → nuking lightning, never probed icebolt/prism
@@ -164,7 +171,7 @@ test("the fallback tier is SKIPPED when a primary (lightning or fireball) alread
 end)
 
 test("the fallback tier IS probed when both primaries underwhelm: icebolt then prism, and prism can win", function()
-  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener → lightning
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()   -- opener → DoT prime → lightning
   AF.on_fight(87, ENEMY); AF.lightning()              -- lightning Δ3 (< 5) → fireball
   AF.on_fight(85, ENEMY); AF.fireball()                 -- fireball Δ2 (< 5) → decide: both weak → fallback icebolt
   expect(seq()[#seq()]):eq("c icebolt")               -- first fallback probe went out
@@ -180,7 +187,7 @@ test("prism loses ties: a weak-but-tied icebolt (fallback) still beats prism aft
   -- icebolt/prism must each clear fireball's handicap (fireball_drop + cfg.fireball_bias = 1+5 = 6) to be
   -- in contention at all, so this tie is driven at Δ7/Δ7 (was Δ4/Δ4 pre-bias) — same "tie" intent, just
   -- above fireball's now-preferred floor.
-  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()
   AF.on_fight(88, ENEMY); AF.lightning()              -- lightning Δ2 (< 5) → fireball
   AF.on_fight(87, ENEMY); AF.fireball()                 -- fireball Δ1 (< 5) → fallback icebolt
   AF.on_fight(80, ENEMY); AF.icebolt()                -- icebolt Δ7 (clears fireball's 1+bias=6 floor) → prism
@@ -195,6 +202,80 @@ test("a known prism winner skips the probe and nukes prism straight away", funct
   AF.remember("a Gnomian guard", "prism")             -- learned from a prior fight (prism is a valid winner now)
   expect(fight_nukes(ENEMY, "prism")):eq(true)        -- opener → known winner → nuke prism, no probe
   for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end   -- the first probe cast never appears
+end)
+
+-- ---- rotting sphere (DoT weave) -------------------------------------------------------------------
+-- Nar's spectral rot: a very-slow TOXIC damage-over-time DEBUFF, woven into the routine on top of the
+-- lightning/fireball probe + learned-winner nuke. Primed once right after the opener lands (skipped only
+-- when aoe_active() at that moment), then re-applied every cfg.rot_refresh (3) winner-nukes — but never in
+-- finish range, and never as the post-soulsteal-resist re-nuke (that's always exactly one FAST winner nuke).
+
+test("rotting sphere: primed once right after the opener lands, before the probe", function()
+  AF.reset()
+  AF.on_fight(90, ENEMY)                 -- "c tarrants"
+  AF.tarrants()                          -- opener LANDED → DoT prime
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  AF.rotting()                           -- DoT prime LANDED → first probe
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+end)
+
+test("rotting sphere: refreshed every 3 winner-nukes while nuking (not in finish range)", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()             -- → fireball
+  AF.on_fight(65, ENEMY); AF.fireball()               -- decide → winner lightning → nuke1 (rot_since=1)
+  AF.lightning(); AF.on_fight(60, ENEMY)             -- nuke2 (rot_since=2)
+  AF.lightning(); AF.on_fight(55, ENEMY)             -- nuke3 (rot_since=3)
+  AF.lightning(); AF.on_fight(50, ENEMY)             -- rot_since>=3, pct(50) > 15 → REFRESH (rot_since=0)
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  AF.rotting()                                       -- DoT refresh LANDED → resumes nuking at once → nuke4 (rot_since=1)
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  local rots = 0
+  for _, cmd in ipairs(seq()) do if cmd == "cast 'rotting sphere'" then rots = rots + 1 end end
+  expect(rots):eq(2)   -- the opener prime + exactly one refresh after 3 winner-nukes
+end)
+
+test("rotting sphere: never refreshed once in finish range, even past the 3-nuke cadence", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.fireball()      -- winner lightning → nuke1 (rot_since=1)
+  AF.lightning(); AF.on_fight(10, ENEMY)    -- ≤15% at the bar → "c soulsteal" (never reached nuke2/3)
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  AF.soul_unstealable()                     -- rejected → back to nuking, never re-casts soulsteal
+  -- stay in finish range for several more nukes — plenty to cross the 3-nuke cadence if it applied here
+  for _ = 1, 4 do
+    AF.lightning(); AF.on_fight(5, ENEMY)
+    expect(AF.sent[#AF.sent]):eq(CMD.lightning)   -- always the fast winner nuke, never rotting sphere
+  end
+  local rots = 0
+  for _, cmd in ipairs(seq()) do if cmd == "cast 'rotting sphere'" then rots = rots + 1 end end
+  expect(rots):eq(1)   -- only the original opener prime — no in-finish-range refresh
+end)
+
+test("rotting sphere: a soulsteal RESIST re-nukes with the fast winner — never the slow DoT", function()
+  to_lightning()
+  AF.on_fight(70, ENEMY); AF.lightning()
+  AF.on_fight(60, ENEMY); AF.fireball()      -- winner lightning → nuke
+  AF.lightning(); AF.on_fight(10, ENEMY)    -- ≤15% → "c soulsteal"
+  AF.resist()                                -- RESISTED → the one re-nuke must be the fast winner, not the DoT
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+end)
+
+test("rotting sphere: a fizzled prime retries the same cast, then gives up after max_tries and proceeds to the probe", function()
+  AF.reset(); AF.on_fight(90, ENEMY); AF.tarrants()   -- opener LANDED → DoT prime cast
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  AF.fail()                                  -- fizzle → retries the SAME spell (non-fatal, never a gate)
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  for _ = 1, AF.cfg.max_tries - 1 do AF.fail() end   -- exhaust the remaining tries
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)   -- gave up on the DoT → proceeds to the probe, never stalls
+end)
+
+test("rotting sphere: never cast in AOE 'on' — DoT is skipped entirely for a pack", function()
+  AF.reset(); AF.state().aoe_mode = "on"
+  AF.on_fight(90, ENEMY)                       -- start → straight to AOE (opener AND the DoT prime both skipped)
+  expect(AF.sent[1]):eq("c frostflower")
+  AF.frostflower()                             -- landed → cast again (repeat)
+  expect(AF.sent[2]):eq("c frostflower")
+  for _, cmd in ipairs(seq()) do expect(cmd == "cast 'rotting sphere'"):eq(false) end
 end)
 
 -- ---- bloodmist opener (only when HP can spare it) ------------------------------------------------
@@ -220,7 +301,9 @@ test("the fight opens with bloodmist when HP is healthy, then hands off to the p
   state.hp, state.maxhp = 80, 100
   AF.reset(); AF.on_fight(90, ENEMY)                  -- opener chosen by HP → bloodmist
   expect(seq()[#seq()]):eq("c bloodmist")
-  AF.bloodmist()                                      -- opener LANDED → lightning probe
+  AF.bloodmist()                                      -- opener LANDED → rotting sphere DoT prime
+  expect(seq()[#seq()]):eq("cast 'rotting sphere'")
+  AF.rotting()                                        -- DoT prime LANDED → lightning probe
   expect(seq()[#seq()]):eq(CMD.lightning)
   state.hp, state.maxhp = sh, smh
 end)
@@ -261,7 +344,9 @@ end)
 test("an opener that keeps failing is given up after max_tries — never stalls", function()
   AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants"
   for _ = 1, AF.cfg.max_tries do AF.fail() end   -- fizzles max_tries times (each after a fail line)
-  expect(AF.sent[#AF.sent]):eq(CMD.lightning)     -- gave up on tarrants, moved on to the first probe
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")   -- gave up on tarrants, moved on to the DoT prime
+  AF.rotting()
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)     -- DoT prime lands → the first probe
 end)
 
 -- fireball can BACKFIRE ("Your fireball backfires, and blows up in your face!") — it hit US, not the
@@ -291,19 +376,25 @@ test("suspend: a user-typed command halts sends until the resume window", functi
   AF.reset(); AF.on_fight(90, ENEMY)       -- "c tarrants" (busy)
   expect(#AF.sent):eq(1)
   AF.on_input("kick guard")                -- the USER intervenes → suspends
-  AF.tarrants()                            -- tarrants lands, but suspended → no probe cast
+  AF.tarrants()                            -- tarrants lands, but suspended → no DoT-prime cast
   expect(#AF.sent):eq(1)
   AF.expire_resume()                       -- resume window elapses → routine resumes
   expect(#AF.sent):eq(2)
-  expect(AF.sent[2]):eq(CMD.lightning)
+  expect(AF.sent[2]):eq("cast 'rotting sphere'")
+  AF.rotting()                             -- DoT prime lands → the first probe
+  expect(#AF.sent):eq(3)
+  expect(AF.sent[3]):eq(CMD.lightning)
 end)
 
 test("suspend: our OWN sends echoing back do NOT suspend", function()
   AF.reset(); AF.on_fight(90, ENEMY)       -- we send "c tarrants"
   AF.on_input("c tarrants")                -- its echo returns through the input observer
-  AF.tarrants()                            -- opener lands → NOT suspended → advances to the probe
+  AF.tarrants()                            -- opener lands → NOT suspended → advances to the DoT prime
   expect(#AF.sent):eq(2)
-  expect(AF.sent[2]):eq(CMD.lightning)
+  expect(AF.sent[2]):eq("cast 'rotting sphere'")
+  AF.rotting()                             -- DoT prime lands → the first probe
+  expect(#AF.sent):eq(3)
+  expect(AF.sent[3]):eq(CMD.lightning)
 end)
 
 -- ---- (e) winner pick: bigger %-drop wins ---------------------------------------------------------
@@ -381,7 +472,9 @@ test("engage: target + opener, retry opener on fail, then hand off to the probe 
   expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
   AF.tarrants()                                        -- opener LANDED → wait for combat to start (no send)
   expect_seq(seq(), { "target orc", "c tarrants", "c tarrants" })
-  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → first probe
+  AF.on_fight(90, ENEMY)                               -- combat starts → skip opener → DoT prime
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  AF.rotting()                                         -- DoT prime landed → first probe
   expect(AF.sent[#AF.sent]):eq(CMD.lightning)
   AF.on_fight_end()                                    -- fight over → on_dead fires once
   expect(dead):eq(true)
@@ -479,7 +572,7 @@ test("a fresh fight clears the soul_latched flag", function()
   AF.dead()                                  -- fight ends
   -- NEW fight vs the same name (winner lightning is now known): reaching ≤15% must SOULSTEAL again — a
   -- latch left set would keep nuking and never cast it, so the soulsteal send proves the flag cleared.
-  AF.on_fight(90, ENEMY); AF.tarrants()      -- known winner → nuke lightning
+  AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()  -- DoT prime → known winner → nuke lightning
   AF.lightning(); AF.on_fight(8, ENEMY)      -- landed → bar drops to ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
 end)
@@ -583,6 +676,7 @@ test("a soulless target is REMEMBERED: a LATER fight vs the same name never cast
   -- whole time and must NEVER cast soulsteal, just keep nuking the known winner.
   local before = #seq()
   AF.on_fight(90, ENEMY); land_opener()     -- fresh engagement
+  AF.rotting()                              -- DoT prime lands → known winner → nuke lightning
   for _ = 1, 4 do
     LAND[AF.sent[#AF.sent] == CMD.lightning and "lightning" or "fireball"]()
     AF.on_fight(5, ENEMY)                   -- deep in finish range every tick
@@ -676,7 +770,9 @@ test("engage() with a known winner goes opener → known nuke (no probe)", funct
   AF.winners()["gnomian guard"] = "icebolt"
   autofight.engage(ENEMY)                  -- target + opener; opener_primed
   AF.tarrants()                            -- opener landed (engaging)…
-  AF.on_fight(90, ENEMY)                   -- …combat starts → primed + known → straight to nuke
+  AF.on_fight(90, ENEMY)                   -- …combat starts → primed → DoT prime
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  AF.rotting()                             -- DoT prime lands → known → straight to nuke
   expect(AF.sent[#AF.sent]):eq("c icebolt")
 end)
 
@@ -758,16 +854,19 @@ test("nomelee: a manual command does NOT auto-suspend — autofight keeps drivin
   expect(#AF.sent):eq(1)
   state.group_flags = { Vaelith = "XLN" }       -- YOU are nomelee
   AF.on_input("kick guard")                     -- manual intervention → under nomelee must NOT suspend
-  AF.tarrants()                                 -- opener lands → NOT suspended → advances to the probe now
+  AF.tarrants()                                 -- opener lands → NOT suspended → advances to the DoT prime now
   expect(#AF.sent):eq(2)
-  expect(AF.sent[2]):eq(CMD.lightning)          -- (a suspend would have held this until the resume window)
+  expect(AF.sent[2]):eq("cast 'rotting sphere'")  -- (a suspend would have held this until the resume window)
+  AF.rotting()
+  expect(#AF.sent):eq(3)
+  expect(AF.sent[3]):eq(CMD.lightning)
   state.group_flags = {}
 end)
 
 test("nomelee: a soulsteal PULL keeps the flow driving the pack (no idle after a kill)", function()
   state.group_flags = {}
   AF.reset(); AF.state().aoe_mode = "off"
-  AF.on_fight(90, ENEMY); AF.tarrants()         -- opener → probe
+  AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()  -- opener → DoT prime → probe
   AF.on_fight(70, ENEMY); AF.lightning()        -- lightning Δ20 → fireball
   AF.on_fight(65, ENEMY); AF.fireball()          -- winner lightning
   AF.lightning(); AF.on_fight(10, ENEMY)        -- ≤15% at the bar → "c soulsteal"
@@ -834,19 +933,19 @@ end)
 
 test("aoe 'auto': crowd whittled to the last one drops back to single target (the exit fix)", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → cast 'lightning bolt' in flight
-  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- look: 2 hostiles → AOE
-  AF.lightning()                               -- in-flight lightning lands → next cast is AOE
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- fighting; c tarrants → cast 'rotting sphere' in flight (pack not yet set)
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- look: 2 hostiles → AOE armed
+  AF.rotting()                                 -- DoT prime lands → probe starts already-packed → AOE override
   expect(AF.sent[#AF.sent]):eq("c frostflower")
   AF.mdeath("A dire ape")                      -- one dies → estimate below pack size
   AF.frostflower()                             -- in-flight frostflower lands → back to single target
   expect(AF.sent[#AF.sent]):ne("c frostflower")   -- a single-target spell now, not another AOE
-  expect(AF.sent[#AF.sent]):eq("c fireball")
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)     -- probe pointer never advanced past lightning (never cast pre-AOE)
 end)
 
 test("aoe 'off' never AOEs, even with a pack-sized crowd count", function()
   AF.reset(); AF.state().aoe_mode = "off"
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
+  AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()  -- c tarrants → DoT prime → cast 'lightning bolt' in flight
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
   AF.lightning()                               -- lands → single-target next (forced off regardless of count)
   expect(AF.sent[#AF.sent]):eq("c fireball")
@@ -855,9 +954,9 @@ end)
 
 test("crowd count + AOE reset when combat truly ends (kxwt -1)", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'rotting sphere' in flight (pack not yet set)
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")
-  AF.lightning()                               -- lands → AOE cast (confirms we're packed)
+  AF.rotting()                                 -- DoT prime lands → AOE cast (confirms we're packed)
   expect(AF.sent[#AF.sent]):eq("c frostflower")
   AF.on_fight_end()                            -- -1 → combat over → crowd estimate zeroed
   AF.on_fight(90, ENEMY)                       -- a NEW fight → single-target opener (pack was reset)
@@ -867,10 +966,10 @@ end)
 
 test("a hostile mdeath below the count doesn't go negative; our minion's death doesn't count", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
+  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'rotting sphere' in flight (pack not yet set)
   state.name, state.group = "Vaelith", { { name = "A skeletal spider" } }
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- est 2 → AOE
-  AF.lightning()                               -- lands → frostflower
+  AF.rotting()                                 -- DoT prime lands → frostflower
   expect(AF.sent[#AF.sent]):eq("c frostflower")
   AF.mdeath("A skeletal spider")               -- our minion — NOT counted → still a pack
   AF.frostflower()                             -- lands → still AOE
@@ -883,7 +982,7 @@ end)
 
 test("aoe 'auto': a look showing multiple enemies fighting flips to AOE WITHOUT a kill", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- single-target: c tarrants → cast 'lightning bolt' in flight
+  AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()  -- single-target: c tarrants → DoT prime → cast 'lightning bolt' in flight
   AF.room_fighter("A dire ape")                -- look: ONE engaged hostile — not a pack
   AF.lightning()                               -- lands → single-target (one enemy isn't a pack)
   expect(AF.sent[#AF.sent]):eq("c fireball")
@@ -894,7 +993,7 @@ end)
 
 test("room crowd-count ignores our own minions/self — only hostiles count", function()
   AF.reset()
-  AF.on_fight(90, ENEMY); AF.tarrants()        -- c tarrants → cast 'lightning bolt' in flight
+  AF.on_fight(90, ENEMY); AF.tarrants(); AF.rotting()  -- c tarrants → DoT prime → cast 'lightning bolt' in flight
   state.name  = "Vaelith"
   state.group = { { name = "A skeletal spider" }, { name = "Vaelith" } }
   AF.room_fighter("A skeletal spider")         -- our minion fighting a mob — not an enemy
@@ -913,9 +1012,11 @@ end)
 test("AOE with a fireball winner keeps casting fireball (splash) instead of backing up to frostflower", function()
   AF.reset()
   AF.winners()["gnomian guard"] = "fireball"          -- known winner → skip probe, nuke fireball
-  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → "c fireball" in flight
-  expect(AF.sent[#AF.sent]):eq("c fireball")
+  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → "cast 'rotting sphere'" DoT prime in flight
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
   AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- pack forms mid-fight
+  AF.rotting()                                        -- DoT prime lands → known winner → "c fireball" in flight
+  expect(AF.sent[#AF.sent]):eq("c fireball")
   AF.fireball(); AF.on_fight(85, ENEMY)               -- landed → bar boundary → next nuke decision reads AOE
   expect(AF.sent[#AF.sent]):eq("c fireball")          -- keeps fireball (splash), NOT frostflower
   AF.on_fight_end()
@@ -924,11 +1025,11 @@ end)
 test("AOE with a lightning winner backs up to frostflower (only a fireball winner keeps its own cast)", function()
   AF.reset()
   AF.winners()["gnomian guard"] = "lightning"         -- known winner → skip probe, nuke lightning
-  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → "cast 'lightning bolt'" in flight
-  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
-  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- pack forms mid-fight
-  AF.lightning(); AF.on_fight(85, ENEMY)              -- landed → bar boundary → next nuke decision reads AOE
-  expect(AF.sent[#AF.sent]):eq("c frostflower")       -- backs up to the dedicated room AOE
+  AF.on_fight(90, ENEMY); AF.tarrants()               -- opener → known winner → "cast 'rotting sphere'" DoT prime in flight
+  expect(AF.sent[#AF.sent]):eq("cast 'rotting sphere'")
+  AF.room_fighter("A dire ape"); AF.room_fighter("A dire ape")   -- pack forms mid-fight, before the prime lands
+  AF.rotting()                                        -- DoT prime lands → known winner, but already packed → frostflower
+  expect(AF.sent[#AF.sent]):eq("c frostflower")       -- backs up to the dedicated room AOE (not lightning)
   AF.on_fight_end()
 end)
 
@@ -1007,7 +1108,8 @@ test("autofight.winner switches the CURRENT fight immediately (stops casting the
   AF.reset()
   AF.on_fight(90, "a wraith")                            -- fresh fight → opener, would normally probe
   autofight.winner("a wraith", "fireball")                 -- override mid-fight (before the probe)
-  AF.tarrants()                                          -- opener lands → nukes the override, never probes
+  AF.tarrants()                                          -- opener lands → DoT prime
+  AF.rotting()                                           -- DoT prime lands → nukes the override, never probes
   expect(AF.sent[#AF.sent]):eq("c fireball")
   for _, cmd in ipairs(seq()) do expect(cmd == CMD.lightning):eq(false) end   -- never probed
   AF.on_fight_end()
@@ -1019,7 +1121,7 @@ end)
 test("autofight.winner override during the PROBE stage redirects the very next cast", function()
   AF.reset()
   AF.on_fight(90, "a wraith")                            -- opener → probe starts
-  AF.tarrants()                                          -- opener lands → probe's first primary cast in flight
+  AF.tarrants(); AF.rotting()                            -- opener lands → DoT prime lands → probe's first primary cast in flight
   expect(AF.sent[#AF.sent]):eq(CMD.lightning)
   autofight.winner("a wraith", "icebolt")                  -- override WHILE the lightning probe is in flight
   AF.lightning()                                         -- in-flight lightning lands → probe bails on the override
@@ -1057,7 +1159,7 @@ test("a RETIRED spell left in the winners table is ignored → the target re-pro
   AF.reset()
   AF.winners()["gnomian guard"] = "shards"          -- a pre-swap entry the migration would drop / ignore
   AF.on_fight(90, ENEMY)                             -- fresh fight vs "a Gnomian guard"
-  AF.tarrants()                                      -- opener landed → 'shards' isn't current → PROBE, don't nuke
+  AF.tarrants(); AF.rotting()                        -- opener → DoT prime landed → 'shards' isn't current → PROBE, don't nuke
   expect(AF.sent[#AF.sent]):eq(CMD.lightning)
   AF.lightning()                                     -- probe continues → fireball (confirms probing, not nuking)
   expect(AF.sent[#AF.sent]):eq("c fireball")
@@ -1068,7 +1170,7 @@ test("a winner for a CURRENT probe spell (fireball) is trusted this session — 
   AF.reset()
   AF.winners()["gnomian guard"] = "fireball"          -- fireball is one of today's probe spells
   AF.on_fight(90, ENEMY)
-  AF.tarrants()                                      -- opener → straight to the known nuke, no probe
+  AF.tarrants(); AF.rotting()                        -- opener → DoT prime landed → straight to the known nuke, no probe
   expect(AF.sent[#AF.sent]):eq("c fireball")
   AF.fireball()                                        -- nuke repeats fireball (a probe would go lightning→fireball)
   expect(AF.sent[#AF.sent]):eq("c fireball")

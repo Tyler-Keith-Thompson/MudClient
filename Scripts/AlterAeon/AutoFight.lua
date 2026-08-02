@@ -53,6 +53,15 @@
 
 
 
+
+
+
+
+
+
+
+
+
 state = state or {}
 
 
@@ -73,6 +82,8 @@ local persist = __persist
 
 boot("Events")
 if not onSpellLanded then dofile("Scripts/AlterAeon/Events.lua") end
+
+
 
 
 
@@ -119,6 +130,12 @@ local cfg = {
    icebolt_cmd = "c icebolt",
    fireball_cmd = "c fireball",
    prism_cmd = "c prism",
+   rotting_cmd = "cast 'rotting sphere'",
+
+
+
+   rot_refresh = 3,
+
    probe_enough = 5,
 
 
@@ -208,6 +225,7 @@ local cfg = {
 
 
 
+
 _AUTOFIGHT = _AUTOFIGHT or { on = true }
 local F = _AUTOFIGHT
 
@@ -220,6 +238,7 @@ F.lightning_drop = F.lightning_drop or 0
 F.icebolt_drop = F.icebolt_drop or 0
 F.fireball_drop = F.fireball_drop or 0
 F.prism_drop = F.prism_drop or 0
+F.rot_since = F.rot_since or 0
 F.fallback_tried = F.fallback_tried or false
 F.finish_ready = F.finish_ready or false
 
@@ -430,6 +449,7 @@ local FIGHT_RESET = {
    icebolt_drop = 0,
    fireball_drop = 0,
    prism_drop = 0,
+   rot_since = 0,
    fallback_tried = false,
    last_damage_spell = NIL,
    soul_latched = false,
@@ -765,6 +785,27 @@ end
 
 
 
+
+
+
+
+
+
+
+local function rotStep()
+   F.last_damage_spell = "rotting"; F.phase = "rot"
+   return castStep(cfg.rotting_cmd, "rotting", nil)
+end
+
+
+
+
+local function finishing()
+   return F.finish_ready or (F.pct ~= nil and F.pct > 0 and F.pct <= cfg.soulsteal_pct)
+end
+
+
+
 opener = function()
    F.phase = "opener"
    if F.opener_primed or aoe_active() then return resolved(nil) end
@@ -864,11 +905,25 @@ fightLoop = function(winner)
             return step()
          end)
       end
+
+
+
+
+
+      if winner and not aoe_active() and not F.renuke_pending and not finishing() and
+         (F.rot_since or 0) >= cfg.rot_refresh then
+         F.rot_since = 0
+         return rotStep():andThen(function(o)
+            if o == "mana" then return never_p() end
+            return step()
+         end)
+      end
       F.renuke_pending = false
 
 
 
       local w = F.winner_spell or winner or "lightning"
+      F.rot_since = (F.rot_since or 0) + 1
       F.last_damage_spell = w; F.phase = "nuke"
       return castStep((cfg)[w .. "_cmd"], w, nil):andThen(function(o)
          if o == "mana" then return never_p() end
@@ -880,10 +935,15 @@ end
 
 
 
+
+
 afterOpener = function()
    if aoe_active() then return fightLoop(nil) end
-   if F.known_winner then return fightLoop(F.known_winner) end
-   return probe():andThen(function(winner) return fightLoop(winner) end)
+   local function proceed()
+      if F.known_winner then return fightLoop(F.known_winner) end
+      return probe():andThen(function(winner) return fightLoop(winner) end)
+   end
+   return rotStep():andThen(function(_) return proceed() end)
 end
 
 
@@ -1129,6 +1189,7 @@ local function hit_lightning() if landedS then landedS:onNext("lightning") end e
 local function hit_icebolt() if landedS then landedS:onNext("icebolt") end end
 local function hit_fireball() if landedS then landedS:onNext("fireball") end end
 local function hit_prism() if landedS then landedS:onNext("prism") end end
+local function hit_rotting() if landedS then landedS:onNext("rotting") end end
 local function hit_frostflower() if landedS then landedS:onNext("frostflower") end end
 
 
@@ -1544,7 +1605,7 @@ text = "When your TANK — a minion of yours that's tanking (kxwt group flags M+
 
 function autofight.on()
    F.on = true
-   say("armed — tarrants → lightning/fireball probe → nuke winner → soulsteal")
+   say("armed — opener → rotting sphere → lightning/fireball probe → nuke winner (rot refresh) → soulsteal")
 
    if F.fighting and combatStartS then combatStartS:onNext(true) end
 end
@@ -1732,10 +1793,11 @@ text = "Engage `target` (via autofight.engage) and return a promise that resolve
 example = "#attack('orc')", })
 
 doc(autofight.on, { name = "autofight.on", sig = "autofight.on()", group = "combat",
-text = "Arm the deterministic auto-fight routine: on combat start it casts tarrants (once), probes " ..
-"icebolt vs fireball and keeps the harder-hitting one, then soulsteals when the enemy is nearly " ..
-"dead (re-nuking on a resist). Paced (one cast per resolution) and OFF by default; any command " ..
-"YOU type suspends it briefly so you can intervene.", })
+text = "Arm the deterministic auto-fight routine: on combat start it casts the opener (bloodmist/tarrants), " ..
+"primes the rotting-sphere DoT, probes lightning vs fireball and keeps the harder-hitting one " ..
+"(re-applying rotting sphere every few nukes), then soulsteals when the enemy is nearly dead " ..
+"(one FAST re-nuke on a resist, never the slow DoT). Paced (one cast per resolution) and OFF by " ..
+"default; any command YOU type suspends it briefly so you can intervene.", })
 doc(autofight.off, { name = "autofight.off", sig = "autofight.off()", group = "combat",
 text = "Disarm the auto-fight routine and end any in-progress fight tracking.", })
 doc(autofight.status, { name = "autofight.status", sig = "autofight.status()", group = "combat",
@@ -1788,6 +1850,7 @@ _AF_TEST = {
    set_now = function(t) af_now = function() return t end end,
    on_input = observe_input,
    lightning = hit_lightning, icebolt = hit_icebolt, fireball = hit_fireball,
+   rotting = hit_rotting,
    tarrants = hit_tarrants,
    prism = hit_prism, bloodmist = hit_bloodmist, opener_cmd = opener_cmd,
    is_probe_spell = is_probe_spell, probe_spells = PROBE_SPELLS, save_winners = save_winners,
