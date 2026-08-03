@@ -801,7 +801,10 @@ end
 -- cast on a near-dead mob just delays the kill (and, on a soulsteal resist, the re-nuke must be a FAST
 -- winner nuke, never this). Mirrors fightLoop's soulsteal gate.
 local function finishing(): boolean
-  return F.finish_ready or (F.pct ~= nil and F.pct > 0 and F.pct <= cfg.soulsteal_pct)
+  -- pct 0 == mortally wounded (a LIVE target about to die), NOT "no enemy" — it MUST count as finish range.
+  -- The old `> 0` guard excluded it, so a mob whose HP dived straight through the window to 0% while a slow
+  -- nuke was in flight never triggered soulsteal (the "it didn't even try" bug). A nil pct still means unknown.
+  return F.finish_ready or (F.pct ~= nil and F.pct <= cfg.soulsteal_pct)
 end
 
 -- STAGE 1 — the OPENER. Resolves when it LANDS (or is given up after max_tries). Skipped (resolves at
@@ -867,13 +870,58 @@ probe = function(): FlowPromise
   return step()
 end
 
--- STAGE 3 — fightLoop(winner). Reactive: on each landed spell, cast the winner (or soulsteal once the
--- enemy is in finish range), until enemyDead ends it. AOE overrides the cast: fireball if it's the winner
--- (splash), else frostflower (see aoe_cast). Soulsteal
--- resist re-nukes exactly once then retries; a latch keeps nuking the winner and never re-casts soulsteal.
+-- STAGE 3 — fightLoop(winner). Reactive: on each landed spell, cast the winner until the enemy is in finish
+-- range, then hand to finishLoop (soulsteal; on any failure ONE winner nuke then retry). AOE overrides the
+-- cast: fireball if it's the winner (splash), else frostflower (see aoe_cast).
 fightLoop = function(winner: string): FlowPromise
   if winner then F.winner_spell, F.winner = winner, (cfg as {string:any})[winner .. "_cmd"] as string end
   local step: function(): FlowPromise
+  local finishNuke: function(): FlowPromise
+  local finishLoop: function(): FlowPromise
+  -- finishNuke: in the finish phase, throw the winner EXACTLY ONCE and move on — deliberately NOT via
+  -- castStep, because castStep RETRIES on a resist, and a "resists the spell" arriving here is usually the
+  -- SOULSTEAL's (it lands a beat after we've already sent the nuke) — retrying on it double-casts the nuke
+  -- (that was one of the extra fireballs). Resolves on the winner's own landed line OR any resist/fail (we
+  -- move on either way — the point is just one hit before retrying the steal); out-of-mana halts.
+  finishNuke = function(): FlowPromise
+    local w = F.winner_spell or winner or "lightning"
+    F.last_damage_spell = w; F.phase = "nuke"
+    F.rot_since = (F.rot_since or 0) + 1
+    return P(function(resolve: function(any), _: function(string), onCancel: function(function()))
+      local sub_: Subscription = nil
+      local function fin(v: any) if sub_ then sub_:unsubscribe(); sub_ = nil end; resolve(v) end
+      sub_ = (rx as RxExt).merge(
+        landedS:filter(function(s: any): boolean return s == w end):map(function(): any return "done" end),
+        resistS:map(function(): any return "done" end),
+        failedS:map(function(): any return "done" end),
+        manaS:map(function(): any return "mana" end)
+      ):takeUntil(deadS):subscribe(function(ev: any) fin(ev == "mana" and "mana" or "done") end)
+      onCancel(function() if sub_ then sub_:unsubscribe(); sub_ = nil end end)
+      af_send((cfg as {string:any})[w .. "_cmd"] as string)
+    end)
+  end
+  -- finishLoop: THE finish phase, and the whole of the "soulsteal failed → one fireball → try again" rule.
+  -- Cast soulsteal; if it fails to capture (resisted OR latched — both are "didn't land"), throw the winner
+  -- ONCE then re-cast soulsteal; repeat until the soul is PULLED or the enemy dies. Self-contained so it
+  -- never bounces back out to the finish GATE mid-loop — that gate was choosing 'nuke' and never returning
+  -- to soulsteal (the over-nuke). A pull ends it (nomelee keeps driving the pack); a fizzle re-casts the
+  -- steal at once with no nuke (your own cast whiffed, not the target resisting); soulless → nuke it down.
+  finishLoop = function(): FlowPromise
+    F.phase = "soulsteal"
+    return soulstealStep():andThen(function(r: any): any
+      if F.known_unstealable then return step() end            -- learned soulless mid-cast → just nuke it down
+      if r == "pulled" then
+        if is_nomelee and is_nomelee() then return step() end  -- nomelee: keep driving whoever's left in the pack
+        return resolved(nil)                                    -- soul taken → done; DEAD ends the fight
+      end
+      if r == "mana"    then return never_p() end
+      if r == "fizzled" then return finishLoop() end            -- YOUR cast fizzled (skill roll) → re-cast at once, no nuke
+      return finishNuke():andThen(function(o: any): any          -- resisted / latched → ONE nuke, then retry the steal
+        if o == "mana" then return never_p() end
+        return finishLoop()
+      end)
+    end)
+  end
   step = function(): FlowPromise
     if aoe_active() then
       local acmd, atag = aoe_cast()                   -- fireball winner keeps fireball (splash); else frostflower
@@ -883,34 +931,19 @@ fightLoop = function(winner: string): FlowPromise
         return step()
       end)
     end
-    -- finish range → soulsteal, UNLESS a dormant steal is latched or a post-resist re-nuke is owed, or the
-    -- target is KNOWN soulless (persisted from a prior "can only soulsteal from living things" — never cast
-    -- it at this name again). The near-death LATCH (F.finish_ready) is authoritative alongside the pct gate.
-    if winner and (F.finish_ready or (F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct))
-       and not F.soul_latched and not F.renuke_pending and not F.known_unstealable then
-      F.phase = "soulsteal"
-      return soulstealStep():andThen(function(r: any): any
-        -- NOMELEE: a soul-pull must NOT end the flow. Under melee the kill rolls us onto the next mob
-        -- (kxwt -1/rollover → start_fight restarts), but under nomelee we deliberately DON'T restart on the
-        -- attacker-rotation rollover, so completing here would leave autofight idle for the rest of the
-        -- pack. Keep looping — the untargeted casts fight whoever's left until the prompt says not-fighting.
-        if r == "pulled" and is_nomelee and is_nomelee() then return step() end
-        if r == "pulled"  then return resolved(nil) end          -- soul taken → stop; DEAD ends the fight
-        if r == "latched" then F.soul_latched = true; return step() end   -- keep nuking the winner
-        if r == "resisted" then F.renuke_pending = true; return step() end -- one nuke, then retry steal
-        if r == "fizzled" then return step() end   -- the CAST fizzled (skill roll) → re-cast soulsteal at
-                                                   -- once; no interleaved nuke (don't waste the round and
-                                                   -- risk a minion killing it before the soul is grabbed)
-        if r == "mana"    then return never_p() end
-        return step()
-      end)
+    -- finish range → the soulsteal finish loop (soulsteal; on any failure ONE winner nuke then retry, until
+    -- pulled or dead — see finishLoop). Skipped only when the target is KNOWN soulless (nuke it down instead).
+    -- The near-death LATCH (F.finish_ready) is authoritative alongside the pct gate. pct 0 == mortally
+    -- wounded (a live target) and MUST count as finish — do NOT guard it with `> 0` (see finishing()).
+    if winner and (F.finish_ready or (F.pct and F.pct <= cfg.soulsteal_pct))
+       and not F.known_unstealable then
+      return finishLoop()
     end
     -- Refresh the rotting-sphere DoT every cfg.rot_refresh winner-nukes — but ONLY in the normal nuke phase:
-    -- never during AOE (single-target debuff), never in finish range, and never on the post-resist re-nuke
-    -- (renuke_pending → that must be exactly ONE FAST winner nuke before retrying soulsteal). The DoT doesn't
-    -- advance the nuke count; on mana it HALTS like any cast (we're already committed mid-fight, unlike the
-    -- non-fatal prime in afterOpener).
-    if winner and not aoe_active() and not F.renuke_pending and not finishing()
+    -- never during AOE (single-target debuff) and never in finish range (finishLoop owns the finish nukes).
+    -- The DoT doesn't advance the nuke count; on mana it HALTS like any cast (we're already committed
+    -- mid-fight, unlike the non-fatal prime in afterOpener).
+    if winner and not aoe_active() and not finishing()
        and (F.rot_since or 0) >= cfg.rot_refresh then
       F.rot_since = 0
       return rotStep():andThen(function(o: any): any
@@ -918,7 +951,6 @@ fightLoop = function(winner: string): FlowPromise
         return step()
       end)
     end
-    F.renuke_pending = false
     -- Read the LIVE field first: a mid-fight autofight.winner() override sets F.winner_spell, and this
     -- re-read (mirroring the AOE override's re-read-every-cast pattern) picks it up on the very next nuke
     -- instead of continuing to cast the stale CAPTURED `winner` upvalue.
@@ -1235,9 +1267,9 @@ local function hit_soulsteal_ok()
 end
 
 local function hit_soul_latched()
-  -- DORMANT soulsteal: "You magically latch onto <x>'s soul and wait for <x> to weaken…". The soul is
-  -- NOT captured yet. The soulsteal stage resolves "latched"; fightLoop sets F.soul_latched (so it never
-  -- re-casts soulsteal) and keeps nuking the winner until the latch fires as the target drops.
+  -- DORMANT soulsteal: "You magically latch onto <x>'s soul and wait for <x> to weaken…". The soul is NOT
+  -- captured — same as a resist. The soulsteal stage resolves "latched"; finishLoop throws the winner ONCE
+  -- then re-casts soulsteal (it does NOT keep nuking), repeating until the soul is pulled or the mob dies.
   if soulLatchS then soulLatchS:onNext() end
 end
 
@@ -1249,20 +1281,20 @@ local function hit_soul_nolatch()
   -- against this name.
   say("target has no individual soul to steal — nuking it down instead")
   remember_unstealable(F.name)   -- persist: future fights vs this name skip the soulsteal stage entirely
-  F.known_unstealable = true     -- ...and don't re-cast for the rest of THIS fight (belt with soul_latched)
-  if soulLatchS then soulLatchS:onNext() end   -- same "latched" outcome → keep nuking, don't re-steal
+  F.known_unstealable = true     -- ...and don't re-cast for the rest of THIS fight (finishLoop reads this)
+  if soulLatchS then soulLatchS:onNext() end   -- resolve the in-flight steal; known_unstealable → nuke it down
 end
 
 local function hit_soul_unstealable()
   -- "You can only soulsteal from living things." — the target is undead / a construct / an already-dead
   -- body, so soulsteal can NEVER land on it (but it's usually still alive and fighting). Resolve the
-  -- in-flight steal so the flow doesn't DEADLOCK (this is the missing terminator that stalled autofight),
-  -- then behave exactly like a dormant latch: F.soul_latched stops us re-casting soulsteal and the loop
-  -- keeps nuking the winner until it dies normally. A visible note so it never just looks stuck.
+  -- in-flight steal so the flow doesn't DEADLOCK (this is the missing terminator that stalled autofight);
+  -- F.known_unstealable (set below) then makes finishLoop just nuke it down instead of re-casting the steal.
+  -- A visible note so it never just looks stuck.
   say("target can't be soul-stolen (not living) — nuking it down instead")
   remember_unstealable(F.name)   -- persist: future fights vs this name skip the soulsteal stage entirely
-  F.known_unstealable = true     -- ...and don't re-cast for the rest of THIS fight (belt with soul_latched)
-  if soulLatchS then soulLatchS:onNext() end   -- same "latched" outcome → keep nuking, don't re-steal
+  F.known_unstealable = true     -- ...and don't re-cast for the rest of THIS fight (finishLoop reads this)
+  if soulLatchS then soulLatchS:onNext() end   -- resolve the in-flight steal; known_unstealable → nuke it down
 end
 
 local function hit_dead()

@@ -859,7 +859,11 @@ final class TerminalService {
         let echo = lineBuffer
         lineBuffer = ""
         visibleStartColumn = 0
-        print("\n\(echo)".utf8)
+        // The local echo of what YOU typed is its own channel — it must NOT inherit the game's carried
+        // colour. Wrap it exactly like a script echo: a LEADING reset so the typed text shows in the default
+        // colour, and a TRAILING re-assert of `liveSGR` so the game's colour survives for the next line.
+        // (No-op when the game is at default.) Same self-contained treatment as the Lua `echo` path.
+        print(Self.echoBodyRestoringSGR("\n\(echo)", carried: liveSGR).utf8)
         cursor.moveToStartOfLine()
         ensureInputGeometry()   // the input collapsed back to one row → re-establish the layout
         // An empty buffer is still one (empty) visual line — `splitCommands("")` is `[""]` — so a bare

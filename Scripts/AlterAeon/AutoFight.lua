@@ -801,7 +801,10 @@ end
 
 
 local function finishing()
-   return F.finish_ready or (F.pct ~= nil and F.pct > 0 and F.pct <= cfg.soulsteal_pct)
+
+
+
+   return F.finish_ready or (F.pct ~= nil and F.pct <= cfg.soulsteal_pct)
 end
 
 
@@ -870,10 +873,55 @@ end
 
 
 
-
 fightLoop = function(winner)
    if winner then F.winner_spell, F.winner = winner, (cfg)[winner .. "_cmd"] end
    local step
+   local finishNuke
+   local finishLoop
+
+
+
+
+
+   finishNuke = function()
+      local w = F.winner_spell or winner or "lightning"
+      F.last_damage_spell = w; F.phase = "nuke"
+      F.rot_since = (F.rot_since or 0) + 1
+      return P(function(resolve, _, onCancel)
+         local sub_ = nil
+         local function fin(v) if sub_ then sub_:unsubscribe(); sub_ = nil end; resolve(v) end
+         sub_ = (rx).merge(
+         landedS:filter(function(s) return s == w end):map(function() return "done" end),
+         resistS:map(function() return "done" end),
+         failedS:map(function() return "done" end),
+         manaS:map(function() return "mana" end)):
+         takeUntil(deadS):subscribe(function(ev) fin(ev == "mana" and "mana" or "done") end)
+         onCancel(function() if sub_ then sub_:unsubscribe(); sub_ = nil end end)
+         af_send((cfg)[w .. "_cmd"])
+      end)
+   end
+
+
+
+
+
+
+   finishLoop = function()
+      F.phase = "soulsteal"
+      return soulstealStep():andThen(function(r)
+         if F.known_unstealable then return step() end
+         if r == "pulled" then
+            if is_nomelee and is_nomelee() then return step() end
+            return resolved(nil)
+         end
+         if r == "mana" then return never_p() end
+         if r == "fizzled" then return finishLoop() end
+         return finishNuke():andThen(function(o)
+            if o == "mana" then return never_p() end
+            return finishLoop()
+         end)
+      end)
+   end
    step = function()
       if aoe_active() then
          local acmd, atag = aoe_cast()
@@ -886,31 +934,16 @@ fightLoop = function(winner)
 
 
 
-      if winner and (F.finish_ready or (F.pct and F.pct > 0 and F.pct <= cfg.soulsteal_pct)) and
-         not F.soul_latched and not F.renuke_pending and not F.known_unstealable then
-         F.phase = "soulsteal"
-         return soulstealStep():andThen(function(r)
 
-
-
-
-            if r == "pulled" and is_nomelee and is_nomelee() then return step() end
-            if r == "pulled" then return resolved(nil) end
-            if r == "latched" then F.soul_latched = true; return step() end
-            if r == "resisted" then F.renuke_pending = true; return step() end
-            if r == "fizzled" then return step() end
-
-
-            if r == "mana" then return never_p() end
-            return step()
-         end)
+      if winner and (F.finish_ready or (F.pct and F.pct <= cfg.soulsteal_pct)) and
+         not F.known_unstealable then
+         return finishLoop()
       end
 
 
 
 
-
-      if winner and not aoe_active() and not F.renuke_pending and not finishing() and
+      if winner and not aoe_active() and not finishing() and
          (F.rot_since or 0) >= cfg.rot_refresh then
          F.rot_since = 0
          return rotStep():andThen(function(o)
@@ -918,7 +951,6 @@ fightLoop = function(winner)
             return step()
          end)
       end
-      F.renuke_pending = false
 
 
 

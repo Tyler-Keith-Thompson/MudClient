@@ -540,27 +540,80 @@ test("engage: a stray fight-end while still landing the opener does NOT resolve 
   expect(dead):eq(false)
 end)
 
--- ---- dormant soulsteal (latch) -------------------------------------------------------------------
--- Soulsteal can LATCH instead of stealing outright ("You magically latch onto <x>'s soul and wait for
--- <x> to weaken…") — the dread-portent/near-death dormant form. The soul isn't captured; if we stopped
--- casting we'd stall. So we keep nuking the winner (never re-casting soulsteal) until the latch fires.
+-- ---- soulsteal that fails to capture (resist / dormant latch) ------------------------------------
+-- A soulsteal can RESIST outright, or LATCH ("You magically latch onto <x>'s soul and wait for <x> to
+-- weaken…") — either way it did NOT capture. The rule (per the player) is identical for both: throw the
+-- winner EXACTLY ONCE, then re-cast soulsteal, repeating until the soul is pulled or the enemy dies. Never
+-- a burst of nukes (the reported "soulsteal failed, then 3 fireballs, soul lost" bug — see finishLoop).
 
-test("soulsteal latch: keep nuking the winner, don't re-cast soulsteal, until it fires", function()
+test("soulsteal latch: ONE winner nuke, then re-cast soulsteal — never keeps nuking", function()
   to_lightning()
   AF.on_fight(70, ENEMY); AF.lightning()    -- → "c fireball"
   AF.on_fight(60, ENEMY); AF.fireball()      -- winner lightning → nuke
   AF.lightning(); AF.on_fight(8, ENEMY)    -- landed → bar drops to ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
-  AF.soul_latched()                        -- LATCHED (not stolen) → resume nuking the winner
-  expect(AF.sent[#AF.sent]):eq(CMD.lightning) -- nuked again, NOT soulsteal
-  -- Still ≤15%, but the latch guard keeps us nuking — never flips back to soulsteal.
-  AF.lightning(); AF.on_fight(5, ENEMY)
+  AF.soul_latched()                        -- LATCHED (didn't capture) → exactly ONE winner nuke
   expect(AF.sent[#AF.sent]):eq(CMD.lightning)
-  -- The latch finally activates: the steal success line, then DEAD, ends the fight cleanly.
+  AF.lightning()                           -- that nuke lands → straight back to soulsteal (NOT another nuke)
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  -- Latches AGAIN → same bounded pattern: one nuke, then retry.
+  AF.soul_latched()
+  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+  AF.lightning()
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  -- Finally captured: the steal success line, then DEAD, ends the fight cleanly.
   AF.soulsteal_ok()
   local n = #AF.sent
   AF.dead()
   expect(#AF.sent):eq(n)                    -- nothing more sent after done
+end)
+
+-- The exact reported bug (dwarven-miner fight): a soulsteal LATCHED, then its resist line arrived a beat
+-- LATE — after the one winner nuke was already sent — so the nuke's cast-step read the soulsteal's resist
+-- as its OWN and RETRIED, and the latch kept nuking. Result: 3 fireballs, soulsteal never retried, soul
+-- lost. The finish nuke must NOT retry on that stray resist, and a latch must re-cast soulsteal.
+test("repro: a soulsteal's LATE resist does not turn the one finish-nuke into a burst", function()
+  AF.reset()
+  AF.remember("a Gnomian guard", "fireball")            -- known winner = fireball (skip the probe)
+  AF.on_fight(90, ENEMY); land_opener(); AF.rotting()   -- opener → DoT prime → known-winner nuke
+  AF.fireball(); AF.on_fight(12, ENEMY)                 -- nuke lands, ≤15% → finish loop → "c soulsteal"
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  AF.soul_latched()                                     -- soulsteal latched (no capture) → ONE fireball
+  expect(AF.sent[#AF.sent]):eq("c fireball")
+  local fbs = 0; for _, c in ipairs(seq()) do if c == "c fireball" then fbs = fbs + 1 end end
+  AF.resist()                                           -- the soulsteal's resist, arriving LATE → must NOT
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")           -- retry the fireball; straight back to soulsteal
+  local fbs2 = 0; for _, c in ipairs(seq()) do if c == "c fireball" then fbs2 = fbs2 + 1 end end
+  expect(fbs2):eq(fbs)                                  -- the stray resist added ZERO extra fireballs
+  -- Never more than one fireball between two soulsteal casts across the whole finish.
+  AF.soul_latched(); expect(AF.sent[#AF.sent]):eq("c fireball")
+  AF.fireball();     expect(AF.sent[#AF.sent]):eq("c soulsteal")
+  local worst, run = 0, 0
+  for _, c in ipairs(seq()) do
+    if c == "c soulsteal" then run = 0
+    elseif c == "c fireball" then run = run + 1; if run > worst then worst = run end end
+  end
+  expect(worst):eq(1)
+end)
+
+-- REPRO of "it didn't even try": under nomelee the mob's HP blew through the whole soulsteal window
+-- (18→15→12→0%) WHILE a slow fireball was in flight, so the routine's decision point only ran with HP at
+-- 0% (mortally wounded). "near death!" fired, but the finish did NOT trigger — it refreshed the DoT and the
+-- mob died with NO soulsteal attempted. The near-death latch must win here, and pct 0 (mortally wounded, a
+-- live target) must count as finish range.
+test("HP diving straight to 0% (mortally wounded) during a nuke still triggers soulsteal — it must TRY", function()
+  state.group_flags = { Vaelith = "XLN" }                 -- nomelee
+  AF.reset()
+  AF.remember("a Gnomian guard", "fireball")              -- known winner (skip probe)
+  AF.on_fight(90, ENEMY); land_opener(); AF.rotting()     -- opener → DoT prime → known-winner nuke
+  -- three nukes (staying above finish range) so a DoT refresh is DUE (rot_since hits cfg.rot_refresh)
+  AF.fireball(); AF.on_fight(60, ENEMY)
+  AF.fireball(); AF.on_fight(40, ENEMY)
+  -- third nuke is in flight; the mob dives past the whole 15% window to 0% before it lands. NO near-death
+  -- line yet (or it raced past) — HP 0 (mortally wounded, a LIVE target) must itself count as finish range.
+  AF.fireball(); AF.on_fight(0, ENEMY)                    -- nuke lands, fresh HP=0 → decide
+  expect(AF.sent[#AF.sent]):eq("c soulsteal")             -- MUST soulsteal, not refresh the DoT / nuke
+  state.group_flags = {}
 end)
 
 test("a fresh fight clears the soul_latched flag", function()
@@ -621,23 +674,24 @@ test("near-death from ANOTHER creature does not mis-latch (target-matched)", fun
   expect(AF.sent[#AF.sent]):eq(CMD.lightning)
 end)
 
-test("latched soulsteal → winner nuke only: never casts soulsteal again this fight, even if near-death re-fires", function()
+test("latched soulsteal KEEPS trying the steal: one nuke then soulsteal, repeatedly — never abandons it", function()
+  -- The whole point of the fix: a latch must NOT permanently switch to winner-nuke-only. It comes right
+  -- back to soulsteal after each single nuke, so the steal actually lands instead of the mob dying nuked.
   to_lightning()
   AF.on_fight(70, ENEMY); AF.lightning()
   AF.on_fight(60, ENEMY); AF.fireball()      -- winner lightning → nuke#1
   AF.lightning(); AF.on_fight(8, ENEMY)    -- landed → bar drops to ≤15% → "c soulsteal"
   expect(AF.sent[#AF.sent]):eq("c soulsteal")
-  AF.soul_latched()                         -- LATCH → from here on it's winner-nuke ONLY
-  expect(AF.sent[#AF.sent]):eq(CMD.lightning)
-  -- Re-asserting near death / finish-ready must NOT bring soulsteal back this fight.
+  -- Three latch→nuke→soulsteal cycles: each latch yields exactly one nuke, then soulsteal returns.
   for _ = 1, 3 do
-    AF.near_death(ENEMY)
-    AF.lightning(); AF.on_fight(5, ENEMY)
-    expect(AF.sent[#AF.sent]):eq(CMD.lightning)
+    AF.soul_latched()
+    expect(AF.sent[#AF.sent]):eq(CMD.lightning)   -- one nuke
+    AF.lightning()
+    expect(AF.sent[#AF.sent]):eq("c soulsteal")   -- …then straight back to the steal
   end
   local souls = 0
   for _, cmd in ipairs(seq()) do if cmd == "c soulsteal" then souls = souls + 1 end end
-  expect(souls):eq(1)                       -- exactly the one pre-latch attempt, never again
+  expect(souls > 1):eq(true)                 -- it kept re-casting soulsteal, never gave up on the steal
 end)
 
 test("soulsteal on a NON-LIVING target ('You can only soulsteal from living things') keeps nuking — no stall", function()
