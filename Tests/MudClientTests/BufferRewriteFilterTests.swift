@@ -189,6 +189,11 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
   @Test func fullScriptsUserRepro() async throws {
     try await withTestContainer {
       Container.terminalService.register { TerminalService() }
+      // The real HUD scripts (loaded via `load("Scripts")` below) call the panel/toppanel builtins, which
+      // resolve these — and TerminalService reads their heights when it repaints. withTestContainer starts
+      // empty, so they must be registered explicitly or resolution fatal-errors mid-run.
+      Container.panelHost.register { PanelHost() }
+      Container.topPanelHost.register { PanelHost() }
       Container.sessionLog.register { SessionLog() }   // idle-flush session-logs the held tail (no file opened)
       Container.lagMonitor.register { LagMonitor() }
       Container.transcriptStore.register { TranscriptStore() }
@@ -250,6 +255,11 @@ private func render(_ f: inout BufferRewriteFilter, _ texts: [String]) -> (text:
     #expect(chunks.count > 100)   // …and that it actually parsed (not an empty/garbled read masquerading as a pass)
     try await withTestContainer {
       Container.terminalService.register { TerminalService() }
+      // The real HUD scripts (loaded via `load("Scripts")` below) call the panel/toppanel builtins, which
+      // resolve these — and TerminalService reads their heights when it repaints. withTestContainer starts
+      // empty, so they must be registered explicitly or resolution fatal-errors mid-run.
+      Container.panelHost.register { PanelHost() }
+      Container.topPanelHost.register { PanelHost() }
       Container.sessionLog.register { SessionLog() }
       Container.lagMonitor.register { LagMonitor() }
       Container.transcriptStore.register { TranscriptStore() }

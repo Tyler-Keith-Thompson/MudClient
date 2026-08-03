@@ -575,9 +575,10 @@ final class TerminalService {
     func print(_ string: Any, terminator: String = "\n", isEcho: Bool = false) {
         guard let l = layout() else { return }
         var body = String(describing: string)
-        // A script echo ends in its own `ESC[0m`; re-assert the game's active colour after it so the
-        // carried colour survives — both live (what the next DECSC save records) and in the stored
-        // scrollback (what the next line's SGR carry inherits). No-op when the game is at default.
+        // Make a script echo self-contained against the game's carried colour: a LEADING reset so the echo
+        // renders at default instead of inheriting the game's active colour, and a TRAILING re-assert of that
+        // colour so it survives — both live (what the next DECSC save records) and in the stored scrollback
+        // (what the next line's SGR carry inherits). No-op when the game is at default.
         if isEcho { body = Self.echoBodyRestoringSGR(body, carried: liveSGR) }
         // An echo must never share a line with game text. The game often leaves a partial line with no
         // trailing newline (a prompt — especially over RPC), which lives in `pendingLine`; without this an
@@ -1073,12 +1074,17 @@ final class TerminalService {
     }
 
     /// Make a script echo's `body` self-contained against the game's carried colour (`carried` = the SGR
-    /// the game set and never reset). The echo ends in its own reset, which would clear the carry and leave
-    /// the following game output — and the rest of a multi-line coloured message — in the default colour;
-    /// re-asserting `carried` after it keeps the colour alive. No-op when the game is at default. Pure so
-    /// the invariant `activeSGRState(carried + result) == carried` is unit-tested directly.
+    /// the game set and never reset). Two problems to solve, both only when the game is mid-colour:
+    ///   * INHERIT — the terminal is sitting in `carried` (e.g. bright green) when the echo starts, so a
+    ///     plain (or partially-styled) echo body renders IN that colour. A LEADING reset makes the echo
+    ///     display at default, its own colour, exactly what it asked for — never the game's leftover.
+    ///   * STRIP — the echo ends in a reset (its own, or the leading one above), which would clear the carry
+    ///     and leave the following game output — and the rest of a multi-line coloured message — at default.
+    ///     Re-asserting `carried` AFTER the body keeps that colour alive for the next line.
+    /// No-op when the game is at default (nothing to inherit or restore). Pure so the invariant
+    /// `activeSGRState(carried + result) == carried` is unit-tested directly.
     static func echoBodyRestoringSGR(_ body: String, carried: String) -> String {
-        carried.isEmpty ? body : body + carried
+        carried.isEmpty ? body : "\u{1B}[0m" + body + carried
     }
 
     // MARK: - History-substring-search (zsh-history-substring-search style)

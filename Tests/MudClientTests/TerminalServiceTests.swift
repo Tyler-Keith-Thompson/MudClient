@@ -43,6 +43,26 @@ import Testing
   }
 }
 
+@Test func echoDoesNotInheritTheGameColourButRestoresItAfter() {
+  try withTestContainer {
+    // The game is mid-colour (bright green, never reset), then a PLAIN echo (no styling of its own) is
+    // printed. Without a leading reset the echo body would render IN bright green — inheriting the game's
+    // leftover colour. The wrap prepends a reset so the echo displays at DEFAULT, then re-asserts the
+    // green so the NEXT game line is still green.
+    let green = "\u{1B}[1;32m"                            // game set bright green, no reset
+    let plain = "[autofight] armed"                       // an uncoloured script echo
+    let wrapped = TerminalService.echoBodyRestoringSGR(plain, carried: green)
+    // Leading reset → the echo text is NOT preceded by the carried colour (renders at default).
+    #expect(wrapped.hasPrefix("\u{1B}[0m"))
+    #expect(!wrapped.hasPrefix(green))
+    // Trailing re-assert → the game's colour is preserved for whatever prints next.
+    #expect(wrapped.hasSuffix(green))
+    #expect(TerminalService.activeSGRState(green + wrapped) == green)
+    // At default there's nothing to avoid inheriting or to restore — leave the echo untouched (no reset spam).
+    #expect(TerminalService.echoBodyRestoringSGR(plain, carried: "") == plain)
+  }
+}
+
 @Test func scrolledBackMultiLineBlockCarriesColourPastTheFirstLine() {
   try withTestContainer {
     // The reported case: colour set on line one, reset only after line two (a coloured echo/server
