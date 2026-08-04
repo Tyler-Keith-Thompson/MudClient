@@ -72,6 +72,28 @@ test("minimap_grid places rooms on an integer grid by BFS over moves, gy growing
   expect(by_id["1,0"].color):eq("yellow")    -- waypoint room tints yellow
 end)
 
+test("minimap_grid carries terrain, relative elevation, and up/down exits for the iso renderer", function()
+  local minimap_grid = _AIP_TEST.minimap_grid
+  -- current room at z=4; the room east is one level higher (z=5) and has an UP exit; same plane (coord[4]).
+  local rooms = {
+    A = { exits = { east = true, up = true }, moves = { east = "B", up = "C" },
+          terrain = 3, coord = { -10, 0, 4, 0 } },                       -- field, z=4
+    B = { exits = { west = true }, moves = { west = "A" },
+          terrain = 10, coord = { -9, 0, 5, 0 } },                       -- mountain, one level UP
+    C = { exits = { down = true }, moves = { down = "A" }, terrain = 27 },-- reached by up (not grid-placed)
+  }
+  local cells = minimap_grid(rooms, "A", 5)
+  local by = {}
+  for _, c in ipairs(cells) do by[c.gx .. "," .. c.gy] = c end
+  expect(by["0,0"].terrain):eq(3)          -- current keeps its terrain code
+  expect(by["0,0"].z):eq(0)                -- current is the elevation reference
+  local up_seen = false
+  for _, e in ipairs(by["0,0"].exits) do if e == "u" then up_seen = true end end
+  expect(up_seen):truthy()                 -- "up" move → 'u' chevron exit
+  expect(by["1,0"].terrain):eq(10)         -- east neighbour's terrain
+  expect(by["1,0"].z):eq(1)                -- coord[3] 5 − 4 = +1 level
+end)
+
 test("minimap_grid keeps the first (closer) room on a grid-cell collision, skips the later one", function()
   local minimap_grid = _AIP_TEST.minimap_grid
   -- A -e-> B -n-> D, and A -n-> C -e-> D': both D and D' land on (1,1); D is closer (BFS order), so D'

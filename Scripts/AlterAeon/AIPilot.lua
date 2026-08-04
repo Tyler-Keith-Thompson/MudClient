@@ -1052,6 +1052,8 @@ local GRID_ABBR = {
 
 
 
+
+
 local function minimap_grid(rooms, start, depth)
    if not start or not rooms[start] then return {} end
    local pos = { [start] = { 0, 0 } }
@@ -1079,6 +1081,7 @@ local function minimap_grid(rooms, start, depth)
          end
       end
    end
+   local cur_coord = rooms[start] and rooms[start].coord
    local cells = {}
    for _, id in ipairs(order) do
       local r = rooms[id]
@@ -1086,12 +1089,21 @@ local function minimap_grid(rooms, start, depth)
       local exits = {}
       for dir in pairs(r.moves or {}) do
          local abbr = GRID_ABBR[dir]
-         if abbr then exits[#exits + 1] = abbr end
+         if abbr then exits[#exits + 1] = abbr
+         elseif dir == "up" then exits[#exits + 1] = "u"
+         elseif dir == "down" then exits[#exits + 1] = "d"
+         end
       end
       local color
       if r.waypoint then color = "yellow"
       elseif r.blocked and next(r.blocked) then color = "gray" end
-      cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start), color = color }
+
+      local z = 0
+      if cur_coord and r.coord and r.coord[4] == cur_coord[4] then
+         z = math.floor((r.coord[3] or 0) - (cur_coord[3] or 0) + 0.5)
+      end
+      cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start),
+color = color, terrain = r.terrain, z = z, }
    end
    return cells
 end

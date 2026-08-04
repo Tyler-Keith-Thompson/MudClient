@@ -17,6 +17,10 @@ import AppKit
 #endif
 
 final class LuaScriptEngine: @unchecked Sendable {
+    /// Shared terrain-tile cache for the graphical iso minimap (`map_image` → `IsoMapRenderer`). Lazily
+    /// loads `Assets/terrain/NN_name.png`; safe to keep process-wide (one tileset, immutable on disk).
+    static let terrainTiles = TerrainTiles()
+
     /// A registered line-trigger, alias, or gag. A reference type so `rule_enable`/`class_enable`
     /// can flip `enabled` in place. `handler` is nil for gags (they only decide whether a line is
     /// dropped); `oneshot` rules auto-remove after their first fire; `ruleClass` tags a rule so a
@@ -1311,7 +1315,7 @@ final class LuaScriptEngine: @unchecked Sendable {
                 Container.terminalService().refreshFurniture()
                 return []
             }
-            var rooms: [MapRenderer.Room] = []
+            var rooms: [IsoMapRenderer.Room] = []
             for rv in roomVals {
                 guard case .table(_, let f) = rv else { continue }
                 var exits: Set<String> = []
@@ -1321,10 +1325,17 @@ final class LuaScriptEngine: @unchecked Sendable {
                 var cur = false; if case .bool(let b)? = f["cur"] { cur = b }
                 var rgb: (Double, Double, Double)? = nil
                 if case .string(let cn)? = f["color"] { rgb = MapRenderer.namedRGB(cn) }
-                rooms.append(MapRenderer.Room(gx: num(f["gx"]) ?? 0, gy: num(f["gy"]) ?? 0,
-                                              exits: exits, current: cur, rgb: rgb))
+                rooms.append(IsoMapRenderer.Room(gx: num(f["gx"]) ?? 0, gy: num(f["gy"]) ?? 0,
+                                                 z: num(f["z"]) ?? 0, exits: exits,
+                                                 terrain: num(f["terrain"]), current: cur, rgb: rgb))
             }
-            if let png = MapRenderer.renderPNG(rooms: rooms, cell: num(optDict["cell"]) ?? 22) {
+            // Fixed grid window centred on the current room → constant per-room scale (no zoom wobble). winy
+            // matches the display rows; winx is wider so the iso diamonds read ~square in the panel cells.
+            let winy = num(optDict["winy"]) ?? max(1, (rowsN - 1) / 2)
+            let winx = num(optDict["winx"]) ?? (winy + 2)
+            if let png = IsoMapRenderer.renderPNG(rooms: rooms, halfX: winx, halfY: winy,
+                                                  scale: num(optDict["cell"]).map { max(1, $0 / 11) } ?? 2,
+                                                  tiles: LuaScriptEngine.terrainTiles) {
                 host.setImage(png, cols: cols, rows: rowsN)          // overlay the top-right cols×rows rectangle
             } else {
                 host.setImage(nil)

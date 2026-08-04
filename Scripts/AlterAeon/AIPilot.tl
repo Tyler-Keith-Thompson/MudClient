@@ -1041,11 +1041,13 @@ local GRID_ABBR: {string:string} = {
 }
 
 local record MinimapCell
-  gx:    integer
-  gy:    integer
-  exits: {string}
-  cur:   boolean
-  color: string
+  gx:      integer
+  gy:      integer
+  exits:   {string}
+  cur:     boolean
+  color:   string
+  terrain: integer   -- kxwt terrain code (0–39) → the iso tile texture
+  z:       integer   -- elevation level RELATIVE to the current room (coord[3] diff; 0 when unknown)
 end
 
 -- Pure BFS grid-placement over `rooms`/`moves`, from `start` out to `depth` hops. Collisions (two rooms
@@ -1079,6 +1081,7 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
       end
     end
   end
+  local cur_coord = rooms[start] and rooms[start].coord
   local cells: {MinimapCell} = {}
   for _, id in ipairs(order) do
     local r = rooms[id]
@@ -1086,12 +1089,21 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
     local exits: {string} = {}
     for dir in pairs(r.moves or {}) do
       local abbr = GRID_ABBR[dir]
-      if abbr then exits[#exits + 1] = abbr end
+      if abbr then exits[#exits + 1] = abbr             -- cardinal → grid edge stub
+      elseif dir == "up" then exits[#exits + 1] = "u"   -- vertical exits → the up/down depth chevrons
+      elseif dir == "down" then exits[#exits + 1] = "d"
+      end
     end
     local color: string
     if r.waypoint then color = "yellow"
     elseif r.blocked and next(r.blocked) then color = "gray" end
-    cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start), color = color }
+    -- Relative elevation: coord[3] IS a small integer level; only meaningful on the same plane (coord[4]).
+    local z = 0
+    if cur_coord and r.coord and r.coord[4] == cur_coord[4] then
+      z = math.floor((r.coord[3] or 0) - (cur_coord[3] or 0) + 0.5) as integer
+    end
+    cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start),
+                          color = color, terrain = r.terrain, z = z }
   end
   return cells
 end

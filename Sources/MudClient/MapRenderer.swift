@@ -45,10 +45,16 @@ enum MapRenderer {
 
     /// Render `rooms` to PNG data. `cell` = pixels per grid cell (render resolution — the terminal scales
     /// the result to the panel's cell area). Returns nil if there are no rooms or the context can't be made.
-    static func renderPNG(rooms: [Room], cell: Int = 22) -> Data? {
+    static func renderPNG(rooms: [Room], cell: Int = 22, halfX: Int = 0, halfY: Int = 0) -> Data? {
         guard !rooms.isEmpty, cell > 0 else { return nil }
-        let minX = rooms.map(\.gx).min()!, maxX = rooms.map(\.gx).max()!
-        let minY = rooms.map(\.gy).min()!, maxY = rooms.map(\.gy).max()!
+        // FIXED WINDOW (halfX,halfY > 0): the canvas is always a constant grid window centred on the current
+        // room (which the caller places at 0,0), so per-room scale never changes no matter how many rooms
+        // exist — fixes the "one room zooms way in / a sprawl zooms way out" wobble. Rooms outside the window
+        // are clipped. halfX/halfY == 0 → auto-fit to the actual extent (used by tests).
+        let fixed = halfX > 0 && halfY > 0
+        let minX = fixed ? -halfX : rooms.map(\.gx).min()!, maxX = fixed ? halfX : rooms.map(\.gx).max()!
+        let minY = fixed ? -halfY : rooms.map(\.gy).min()!, maxY = fixed ? halfY : rooms.map(\.gy).max()!
+        func inWindow(_ r: Room) -> Bool { !fixed || (r.gx >= minX && r.gx <= maxX && r.gy >= minY && r.gy <= maxY) }
         let cols = maxX - minX + 1, rowsN = maxY - minY + 1
         let width = cols * cell, height = rowsN * cell
         guard width > 0, height > 0,
@@ -70,7 +76,7 @@ enum MapRenderer {
         // Edges first, behind the rooms.
         ctx.setLineWidth(max(1, c / 11))
         ctx.setStrokeColor(red: 0.42, green: 0.5, blue: 0.5, alpha: 1)
-        for r in rooms {
+        for r in rooms where inWindow(r) {
             let from = centre(r.gx, r.gy)
             for d in r.exits {
                 guard let (dx, dy) = dirDelta[d] else { continue }
@@ -82,7 +88,7 @@ enum MapRenderer {
 
         // Rooms as rounded squares; the current room gets a bright ring.
         let box = c * 0.52
-        for r in rooms {
+        for r in rooms where inWindow(r) {
             let p = centre(r.gx, r.gy)
             let rect = CGRect(x: p.x - box / 2, y: p.y - box / 2, width: box, height: box)
             let (rr, gg, bb) = r.rgb ?? (0.60, 0.72, 0.85)

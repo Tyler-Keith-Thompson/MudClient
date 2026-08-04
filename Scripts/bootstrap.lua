@@ -437,7 +437,7 @@ doc("set_uservar", { sig = "set_uservar(name, value)", group = "terminal",
 doc("is_iterm", { sig = "is_iterm() -> bool", group = "terminal",
   text = "True when running under iTerm2 (TERM_PROGRAM / LC_TERMINAL). Gates iTerm2-only features (e.g. the graphical minimap defaults on there)." })
 doc("map_image", { sig = "map_image(rooms[, opts])", group = "terminal",
-  text = "Render the graphical minimap and paint it into a HUD panel as an inline image (iTerm2). rooms = array of { gx, gy, exits={'n','e',…}, cur=bool, color='green' } on an integer grid; opts = { location='top'|'bottom', rows=<cells tall>, cell=<render px> }. Pass nil/empty rooms to clear it back to a text panel. iTerm2-only.",
+  text = "Render the 2.5-D isometric minimap and paint it into a HUD panel as an inline image (iTerm2). rooms = array of { gx, gy, exits={'n','e',…,'u','d'}, cur=bool, color='green', terrain=<0–39 kxwt code>, z=<level vs current> } on an integer grid; each room is an iso block whose top face carries its terrain tile (Assets/terrain/) and whose z lifts it (up/down exits draw ▲/▼ chevrons). opts = { location='top'|'bottom', rows=<cells tall>, cols=<cells wide>, winx/winy=<half-window in cells>, cell=<render px> }. Pass nil/empty rooms to clear it back to a text panel. iTerm2-only.",
   example = "map_image({ {gx=0,gy=0,exits={'e'},cur=true}, {gx=1,gy=0,exits={'w'}} }, {rows=8})" })
 doc("image", { sig = "image(path[, width, height])", group = "terminal",
   text = "Show an image file FULL-SCREEN (iTerm2 inline-image protocol), dismissed by any keypress — a viewer overlay, since images can't live in the text band. width/height override the size (cell count, \"Npx\", \"N%\", or \"auto\"); width defaults to 100%. iTerm2-only; no-op if the file is unreadable.",
