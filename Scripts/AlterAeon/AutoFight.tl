@@ -274,9 +274,10 @@ F.fight_settle      = nil
 F.fight_promise     = nil
 
 -- Command capture, always on (cheap, cleared each fight) so the test harness can read the exact send
--- sequence without stubbing the host `send`. `_AF_TEST.sent` aliases this table.
-local sent: {string} = {}
-local function clear_sent() for i = #sent, 1, -1 do sent[i] = nil end end
+-- sequence without stubbing the host `send`. `_AF_TEST.sent` aliases this table. (Named `sent_log`, not
+-- `sent`, so it doesn't shadow the host `sent` builtin — the alias below keeps the test seam `.sent`.)
+local sent_log: {string} = {}
+local function clear_sent() for i = #sent_log, 1, -1 do sent_log[i] = nil end end
 
 local function say(s: string) if echo then echo("\27[1;35m[autofight]\27[0m " .. s) end end
 
@@ -474,7 +475,7 @@ end
 -- through the input observer, exactly like the pilot) doesn't mistake our own command for the user's.
 local function af_send(cmd: string)
   F.self_sent[cmd] = (F.self_sent[cmd] or 0) + 1
-  sent[#sent + 1] = cmd
+  sent_log[#sent_log + 1] = cmd
   if send then send(cmd) end
 end
 
@@ -1191,7 +1192,7 @@ local PROMPT_FRESH = 10   -- seconds; kxwt is ignored while the prompt fired wit
 -- Injectable clock (os.time by default) so the rescue-flip hold below is unit-testable — specs advance it
 -- via _AF_TEST.set_now to simulate seconds passing without a real wall clock.
 local af_now: function(): number = os.time
-local last_fighting_prompt = 0        -- af_now() of the last prompt that named a live target
+local last_fighting_prompt: number = 0   -- af_now() of the last prompt that named a live target
 local FLICKER_HOLD = 3                 -- s; a not-fighting nomelee prompt this soon after a fighting one is a rescue-flip
 function __autofight_prompt(pct: number, name: string)   -- pct+name when fighting; both nil when the prompt says not-fighting
   last_prompt = os.time()                               -- the machine prompt is live → authoritative
@@ -1342,8 +1343,8 @@ local function is_dead_line_our_target(name: string): boolean
   if not name then return false end
   if F.fighting and F.name and same_name(name, F.name) then return true end
   if active_opponents then
-    for _, o in ipairs(active_opponents(os.time()) as {{name: string}}) do
-      if same_name(o.name, name) then return true end
+    for _, o in ipairs(active_opponents(os.time()) as {{string:any}}) do
+      if same_name(o.name as string, name) then return true end
     end
   end
   return false
@@ -1506,8 +1507,8 @@ end
 -- whole line) so another player's say/tell — e.g. someone chatting "the guard resists the spell." — can
 -- never trip a resolution. None of these patterns overlap on a single line, so registration order among
 -- them is immaterial. Guarded on __rx (the dofile fallback at the top guarantees it here and in the
--- harness); fromTrigger no-ops cleanly when the host `trigger` builtin is absent.
-local rx = __rx
+-- harness); fromTrigger no-ops cleanly when the host `trigger` builtin is absent. `rx` is the file-level
+-- one from the flow block above (same __rx) — reused here rather than re-declared.
 if rx then
   local T = rx.fromTrigger
 
@@ -1737,8 +1738,8 @@ function autofight.unstealable(name: string)
     for _, k in ipairs(keys) do echo("  " .. k) end
     return
   end
-  local arg = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
-  if arg == "all" or arg == "clear" then
+  local a = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
+  if a == "all" or a == "clear" then
     _AUTOFIGHT.unstealable = {}; schedule_unstealable_save(); say("forgot ALL soulless targets"); return
   end
   local key = winner_key(name)
@@ -1746,7 +1747,7 @@ function autofight.unstealable(name: string)
     _AUTOFIGHT.unstealable[key] = nil; schedule_unstealable_save()
     say("forgot soulless '" .. key .. "' — will try soulsteal again")
   else
-    say("'" .. (key or arg) .. "' isn't marked soulless")
+    say("'" .. (key or a) .. "' isn't marked soulless")
   end
 end
 doc(autofight.unstealable, { name = "autofight.unstealable", sig = "autofight.unstealable([name])",
@@ -1852,22 +1853,22 @@ doc(autofight.status, { name = "autofight.status", sig = "autofight.status()", g
 -- Legacy typed `autofight on|off|status|winners|forget [name]` still works via the command bridge.
 setmetatable(autofight, { __call = function(_: AutoFight, rest: string)
   rest = (rest or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  local verb, arg = rest:match("^(%S*)%s*(.*)$")
+  local verb, rest_arg = rest:match("^(%S*)%s*(.*)$")
   verb = (verb or ""):lower()
   if verb == "on" then autofight.on()
   elseif verb == "off" then autofight.off()
-  elseif verb == "aoe" then autofight.aoe(arg)
+  elseif verb == "aoe" then autofight.aoe(rest_arg)
   elseif verb == "winners" then autofight.winners()
-  elseif verb == "forget" then autofight.forget(arg ~= "" and arg or nil)
+  elseif verb == "forget" then autofight.forget(rest_arg ~= "" and rest_arg or nil)
   elseif verb == "winner" then
     -- "winner <enemy name...> <spell>" — the enemy name can have spaces, so the SPELL is the last word.
     -- If the last word isn't a spell keyword, treat the whole thing as a name (report the current winner).
-    local last = arg:match("(%S+)%s*$")
+    local last = rest_arg:match("(%S+)%s*$")
     local lw = last and last:lower()
     if is_probe_spell(lw) or lw == "none" or lw == "clear" or lw == "forget" then
-      autofight.winner(arg:match("^(.-)%s+%S+%s*$"), last)
+      autofight.winner(rest_arg:match("^(.-)%s+%S+%s*$"), last)
     else
-      autofight.winner(arg ~= "" and arg or nil)
+      autofight.winner(rest_arg ~= "" and rest_arg or nil)
     end
   else autofight.status() end
 end } as metatable<AutoFight>)
@@ -1887,7 +1888,7 @@ end
 global _AF_TEST: {string:any}
 _AF_TEST = {
   cfg           = cfg,
-  sent          = sent,                                   -- captured send sequence (shared table)
+  sent          = sent_log,                               -- captured send sequence (shared table)
   state         = function(): AutoFightState return F end,
   on_fight      = on_fight,
   on_fight_end  = on_fight_end,

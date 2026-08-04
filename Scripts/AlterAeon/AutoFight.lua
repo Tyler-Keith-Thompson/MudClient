@@ -275,8 +275,9 @@ F.fight_promise = nil
 
 
 
-local sent = {}
-local function clear_sent() for i = #sent, 1, -1 do sent[i] = nil end end
+
+local sent_log = {}
+local function clear_sent() for i = #sent_log, 1, -1 do sent_log[i] = nil end end
 
 local function say(s) if echo then echo("\27[1;35m[autofight]\27[0m " .. s) end end
 
@@ -474,7 +475,7 @@ end
 
 local function af_send(cmd)
    F.self_sent[cmd] = (F.self_sent[cmd] or 0) + 1
-   sent[#sent + 1] = cmd
+   sent_log[#sent_log + 1] = cmd
    if send then send(cmd) end
 end
 
@@ -1507,7 +1508,7 @@ end
 
 
 
-local rx = __rx
+
 if rx then
    local T = rx.fromTrigger
 
@@ -1737,8 +1738,8 @@ function autofight.unstealable(name)
       for _, k in ipairs(keys) do echo("  " .. k) end
       return
    end
-   local arg = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
-   if arg == "all" or arg == "clear" then
+   local a = tostring(name):lower():gsub("^%s+", ""):gsub("%s+$", "")
+   if a == "all" or a == "clear" then
       _AUTOFIGHT.unstealable = {}; schedule_unstealable_save(); say("forgot ALL soulless targets"); return
    end
    local key = winner_key(name)
@@ -1746,7 +1747,7 @@ function autofight.unstealable(name)
       _AUTOFIGHT.unstealable[key] = nil; schedule_unstealable_save()
       say("forgot soulless '" .. key .. "' — will try soulsteal again")
    else
-      say("'" .. (key or arg) .. "' isn't marked soulless")
+      say("'" .. (key or a) .. "' isn't marked soulless")
    end
 end
 doc(autofight.unstealable, { name = "autofight.unstealable", sig = "autofight.unstealable([name])",
@@ -1852,22 +1853,22 @@ text = "Show whether auto-fight is armed, the current phase, the target/health%,
 
 setmetatable(autofight, { __call = function(_, rest)
    rest = (rest or ""):gsub("^%s+", ""):gsub("%s+$", "")
-   local verb, arg = rest:match("^(%S*)%s*(.*)$")
+   local verb, rest_arg = rest:match("^(%S*)%s*(.*)$")
    verb = (verb or ""):lower()
    if verb == "on" then autofight.on()
    elseif verb == "off" then autofight.off()
-   elseif verb == "aoe" then autofight.aoe(arg)
+   elseif verb == "aoe" then autofight.aoe(rest_arg)
    elseif verb == "winners" then autofight.winners()
-   elseif verb == "forget" then autofight.forget(arg ~= "" and arg or nil)
+   elseif verb == "forget" then autofight.forget(rest_arg ~= "" and rest_arg or nil)
    elseif verb == "winner" then
 
 
-      local last = arg:match("(%S+)%s*$")
+      local last = rest_arg:match("(%S+)%s*$")
       local lw = last and last:lower()
       if is_probe_spell(lw) or lw == "none" or lw == "clear" or lw == "forget" then
-         autofight.winner(arg:match("^(.-)%s+%S+%s*$"), last)
+         autofight.winner(rest_arg:match("^(.-)%s+%S+%s*$"), last)
       else
-         autofight.winner(arg ~= "" and arg or nil)
+         autofight.winner(rest_arg ~= "" and rest_arg or nil)
       end
    else autofight.status() end
 end, })
@@ -1887,7 +1888,7 @@ end
 
 _AF_TEST = {
    cfg = cfg,
-   sent = sent,
+   sent = sent_log,
    state = function() return F end,
    on_fight = on_fight,
    on_fight_end = on_fight_end,

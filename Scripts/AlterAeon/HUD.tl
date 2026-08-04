@@ -146,9 +146,9 @@ local OPP_CAP = 4
 local COND_WORD: {integer:string} = { [3] = "near death", [8] = "mortally wounded", [15] = "awful", [28] = "pretty hurt",
                     [42] = "nasty wounds", [55] = "many wounds", [68] = "small wounds",
                     [82] = "scratches", [95] = "healthy" }
-local function cond_word(pct: integer): string
-  if pct == nil then return "?" end
-  return COND_WORD[pct] or (tostring(pct) .. "%")
+local function cond_word(p: integer): string
+  if p == nil then return "?" end
+  return COND_WORD[p] or (tostring(p) .. "%")
 end
 -- A dim, hollow gauge to visually separate an ESTIMATE from the solid exact vital/target bars.
 local function est_gauge(p100: integer, width: integer): {Cell}
@@ -968,7 +968,7 @@ end
 -- its normal job (the output scrollback). This is why the wheel is offered to on_mouse in TerminalService.
 function on_mouse(event: string, _x: integer, y: integer, _button: integer): boolean
   if (event == "wheelup" or event == "wheeldown") and group_scrollable and y >= 1 and y <= group_view_rows then
-    hud.group_scroll(event == "wheelup" and -1 or 1)
+    (hud.group_scroll as function(integer))(event == "wheelup" and -1 or 1)
     return true
   end
   return false
@@ -976,6 +976,6 @@ end
 
 -- Keyboard fallback for the same scroll (rebind/unbind freely). The wheel above is the primary control.
 if bind then
-  bind("pageup",   function() hud.group_scroll(-1) end)
-  bind("pagedown", function() hud.group_scroll(1) end)
+  bind("pageup",   function() (hud.group_scroll as function(integer))(-1) end)
+  bind("pagedown", function() (hud.group_scroll as function(integer))(1) end)
 end

@@ -173,9 +173,9 @@ if rx then
   -- recovery target). Sampled on the same kxwt_prompt push source as the low-mana/HP events, so the same
   -- kxwq_hud KNOWN GAP (header) applies. e.g.
   --   onNextMana(100):andThen("stand;c metal construct")   -- when mana is next FULL (100%), stand+summon, once
-  local record Promisable<T>
-    first:     function(Promisable<T>, ? function(T): boolean): Promisable<T>
-    toPromise: function(Promisable<T>, ? string): Promise<T>
+  local record Promisable<E>
+    first:     function(Promisable<E>, ? function(E): boolean): Promisable<E>
+    toPromise: function(Promisable<E>, ? string): Promise<E>
   end
   onNextTick = function(pred: function(): boolean): Promise<{string}>
     return (tickS as Promisable<{string}>)

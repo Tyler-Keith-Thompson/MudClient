@@ -146,9 +146,9 @@ local OPP_CAP = 4
 local COND_WORD = { [3] = "near death", [8] = "mortally wounded", [15] = "awful", [28] = "pretty hurt",
 [42] = "nasty wounds", [55] = "many wounds", [68] = "small wounds",
 [82] = "scratches", [95] = "healthy", }
-local function cond_word(pct)
-   if pct == nil then return "?" end
-   return COND_WORD[pct] or (tostring(pct) .. "%")
+local function cond_word(p)
+   if p == nil then return "?" end
+   return COND_WORD[p] or (tostring(p) .. "%")
 end
 
 local function est_gauge(p100, width)
@@ -968,7 +968,7 @@ end
 
 function on_mouse(event, _x, y, _button)
    if (event == "wheelup" or event == "wheeldown") and group_scrollable and y >= 1 and y <= group_view_rows then
-      hud.group_scroll(event == "wheelup" and -1 or 1)
+      (hud.group_scroll)(event == "wheelup" and -1 or 1)
       return true
    end
    return false
@@ -976,6 +976,6 @@ end
 
 
 if bind then
-   bind("pageup", function() hud.group_scroll(-1) end)
-   bind("pagedown", function() hud.group_scroll(1) end)
+   bind("pageup", function() (hud.group_scroll)(-1) end)
+   bind("pagedown", function() (hud.group_scroll)(1) end)
 end
