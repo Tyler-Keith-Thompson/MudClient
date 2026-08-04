@@ -1118,15 +1118,22 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
 end
 
 local MINIMAP_DEPTH = 5
-local MINIMAP_ROWS = 9    -- top-right rectangle the image overlays (rows ≈ the text minimap's MAP_CLIP_H)
-local MINIMAP_COLS = 26
+-- Displayed box (terminal cells). The image is height-limited by the top panel, so a bigger map needs a
+-- TALLER panel — we pin the top panel to MINIMAP_ROWS while the map is on (costs a few rows of game text;
+-- toggle off to reclaim). COLS ≈ 2.9×ROWS matches the render's aspect so it fills without letterboxing.
+local MINIMAP_ROWS = 12
+local MINIMAP_COLS = 34
 
 -- Project the room graph around P.current_room into placement cells (minimap_grid) and hand them to the
 -- Lua renderer (Minimap.tl → the `canvas` painter). Called whenever the graphical minimap is ON
--- (pilot_room_change, and once on pilot.minimap('on')); empty cells clear the panel back to text.
+-- (pilot_room_change, and once on pilot.minimap('on')); empty cells clear the panel back to text. Pins the
+-- top panel tall enough for the map (unpins when there's nothing to draw, so the roster sizes it again).
 function update_minimap()
   local cur = P.current_room
-  if not cur or not P.rooms[cur] then minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return end
+  if not cur or not P.rooms[cur] then
+    panel_top_height(0); minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return
+  end
+  panel_top_height(MINIMAP_ROWS)
   local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
   minimap_render(cells as {any}, MINIMAP_COLS, MINIMAP_ROWS, MINIMAP_DEPTH)
 end
@@ -3386,7 +3393,7 @@ function ai_command(args: string)
   elseif verb == "minimap" then
     local m = rest:lower()
     if m == "on" then P.minimap_on = true; update_minimap()
-    elseif m == "off" then P.minimap_on = false; minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS)
+    elseif m == "off" then P.minimap_on = false; panel_top_height(0); minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS)
     else echo("[ai] usage: pilot.minimap('on'|'off'). Current: " .. (P.minimap_on and "on" or "off")); return end
     echo("[ai] graphical minimap (iTerm2, top panel): " .. (P.minimap_on and "on" or "off"))
   elseif verb == "tools" then

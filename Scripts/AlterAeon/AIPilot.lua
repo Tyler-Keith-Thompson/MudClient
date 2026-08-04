@@ -1118,15 +1118,22 @@ color = color, terrain = r.terrain, z = z, dim = (floor ~= 0), }
 end
 
 local MINIMAP_DEPTH = 5
-local MINIMAP_ROWS = 9
-local MINIMAP_COLS = 26
+
+
+
+local MINIMAP_ROWS = 12
+local MINIMAP_COLS = 34
+
 
 
 
 
 function update_minimap()
    local cur = P.current_room
-   if not cur or not P.rooms[cur] then minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return end
+   if not cur or not P.rooms[cur] then
+      panel_top_height(0); minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return
+   end
+   panel_top_height(MINIMAP_ROWS)
    local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
    minimap_render(cells, MINIMAP_COLS, MINIMAP_ROWS, MINIMAP_DEPTH)
 end
@@ -3386,7 +3393,7 @@ function ai_command(args)
    elseif verb == "minimap" then
       local m = rest:lower()
       if m == "on" then P.minimap_on = true; update_minimap()
-      elseif m == "off" then P.minimap_on = false; minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS)
+      elseif m == "off" then P.minimap_on = false; panel_top_height(0); minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS)
       else echo("[ai] usage: pilot.minimap('on'|'off'). Current: " .. (P.minimap_on and "on" or "off")); return end
       echo("[ai] graphical minimap (iTerm2, top panel): " .. (P.minimap_on and "on" or "off"))
    elseif verb == "tools" then
