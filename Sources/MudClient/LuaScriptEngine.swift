@@ -1323,11 +1323,12 @@ final class LuaScriptEngine: @unchecked Sendable {
                     for e in ex { if case .string(let s) = e { exits.insert(s) } }
                 }
                 var cur = false; if case .bool(let b)? = f["cur"] { cur = b }
+                var dim = false; if case .bool(let b)? = f["dim"] { dim = b }
                 var rgb: (Double, Double, Double)? = nil
                 if case .string(let cn)? = f["color"] { rgb = MapRenderer.namedRGB(cn) }
                 rooms.append(IsoMapRenderer.Room(gx: num(f["gx"]) ?? 0, gy: num(f["gy"]) ?? 0,
                                                  z: num(f["z"]) ?? 0, exits: exits,
-                                                 terrain: num(f["terrain"]), current: cur, rgb: rgb))
+                                                 terrain: num(f["terrain"]), current: cur, dim: dim, rgb: rgb))
             }
             // Fixed grid window centred on the current room → constant per-room scale (no zoom wobble). winy
             // matches the display rows; winx is wider so the iso diamonds read ~square in the panel cells.

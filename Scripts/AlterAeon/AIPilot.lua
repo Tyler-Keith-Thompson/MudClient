@@ -1054,10 +1054,12 @@ local GRID_ABBR = {
 
 
 
+
+
 local function minimap_grid(rooms, start, depth)
    if not start or not rooms[start] then return {} end
-   local pos = { [start] = { 0, 0 } }
-   local occ = { ["0,0"] = true }
+   local pos = { [start] = { 0, 0, 0 } }
+   local occ = { ["0,0,0"] = true }
    local order = { start }
    local dist = { [start] = 0 }
    local queue = { start }
@@ -1070,11 +1072,15 @@ local function minimap_grid(rooms, start, depth)
          local g = pos[id]
          for dir, nb in pairs(r.moves or {}) do
             local v = GRID_DELTA[dir]
-            if v and not pos[nb] and rooms[nb] then
-               local gx, gy = g[1] + v[1], g[2] + v[2]
-               local key = gx .. "," .. gy
+            local gx, gy, fl
+            if v then gx, gy, fl = g[1] + v[1], g[2] + v[2], g[3]
+            elseif dir == "up" then gx, gy, fl = g[1], g[2], g[3] + 1
+            elseif dir == "down" then gx, gy, fl = g[1], g[2], g[3] - 1
+            end
+            if gx and not pos[nb] and rooms[nb] then
+               local key = gx .. "," .. gy .. "," .. fl
                if not occ[key] then
-                  occ[key] = true; pos[nb] = { gx, gy }; dist[nb] = d0 + 1
+                  occ[key] = true; pos[nb] = { gx, gy, fl }; dist[nb] = d0 + 1
                   order[#order + 1] = nb; queue[#queue + 1] = nb
                end
             end
@@ -1086,6 +1092,7 @@ local function minimap_grid(rooms, start, depth)
    for _, id in ipairs(order) do
       local r = rooms[id]
       local g = pos[id]
+      local floor = g[3]
       local exits = {}
       for dir in pairs(r.moves or {}) do
          local abbr = GRID_ABBR[dir]
@@ -1098,12 +1105,13 @@ local function minimap_grid(rooms, start, depth)
       if r.waypoint then color = "yellow"
       elseif r.blocked and next(r.blocked) then color = "gray" end
 
-      local z = 0
+
+      local z = floor
       if cur_coord and r.coord and r.coord[4] == cur_coord[4] then
          z = math.floor((r.coord[3] or 0) - (cur_coord[3] or 0) + 0.5)
       end
       cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start),
-color = color, terrain = r.terrain, z = z, }
+color = color, terrain = r.terrain, z = z, dim = (floor ~= 0), }
    end
    return cells
 end

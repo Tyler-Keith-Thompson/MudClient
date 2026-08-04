@@ -84,14 +84,35 @@ test("minimap_grid carries terrain, relative elevation, and up/down exits for th
   }
   local cells = minimap_grid(rooms, "A", 5)
   local by = {}
-  for _, c in ipairs(cells) do by[c.gx .. "," .. c.gy] = c end
-  expect(by["0,0"].terrain):eq(3)          -- current keeps its terrain code
-  expect(by["0,0"].z):eq(0)                -- current is the elevation reference
+  for _, c in ipairs(cells) do by[c.gx .. "," .. c.gy .. "," .. c.z] = c end
+  expect(by["0,0,0"].terrain):eq(3)        -- current keeps its terrain code
+  expect(by["0,0,0"].z):eq(0)              -- current is the elevation reference
   local up_seen = false
-  for _, e in ipairs(by["0,0"].exits) do if e == "u" then up_seen = true end end
+  for _, e in ipairs(by["0,0,0"].exits) do if e == "u" then up_seen = true end end
   expect(up_seen):truthy()                 -- "up" move → 'u' chevron exit
-  expect(by["1,0"].terrain):eq(10)         -- east neighbour's terrain
-  expect(by["1,0"].z):eq(1)                -- coord[3] 5 − 4 = +1 level
+  expect(by["1,0,1"].terrain):eq(10)       -- east neighbour's terrain (coord[3] 5−4 = +1 → z key 1)
+  expect(by["1,0,1"].z):eq(1)              -- coord[3] 5 − 4 = +1 level
+  expect(by["1,0,1"].dim):falsy()          -- same floor (cardinal move) → not dimmed
+  expect(by["0,0,0"].dim):falsy()
+end)
+
+test("minimap_grid places other floors (up/down) at the same cell, dimmed, and stacks them by floor", function()
+  local minimap_grid = _AIP_TEST.minimap_grid
+  -- A tower: current A, up to B (floor +1), up again to C (floor +2); D is cardinally east of A (same floor).
+  local rooms = {
+    A = { exits = { up = true, east = true }, moves = { up = "B", east = "D" }, terrain = 1, coord = { 0, 0, 4, 0 } },
+    B = { exits = { down = true, up = true }, moves = { down = "A", up = "C" }, terrain = 1, coord = { 0, 0, 5, 0 } },
+    C = { exits = { down = true }, moves = { down = "B" }, terrain = 1, coord = { 0, 0, 6, 0 } },
+    D = { exits = { west = true }, moves = { west = "A" }, terrain = 3, coord = { 1, 0, 4, 0 } },
+  }
+  local cells = minimap_grid(rooms, "A", 5)
+  expect(#cells):eq(4)                      -- all four placed, floors don't collide at (0,0)
+  local by = {}
+  for _, c in ipairs(cells) do by[c.gx .. "," .. c.gy .. "," .. c.z] = c end
+  expect(by["0,0,0"].dim):falsy()           -- current floor room
+  expect(by["0,0,1"].dim):truthy()          -- one floor up → dimmed, z=+1
+  expect(by["0,0,2"].dim):truthy()          -- two floors up → dimmed, z=+2 (stacked)
+  expect(by["1,0,0"].dim):falsy()           -- east neighbour is same floor, not dimmed
 end)
 
 test("minimap_grid keeps the first (closer) room on a grid-cell collision, skips the later one", function()

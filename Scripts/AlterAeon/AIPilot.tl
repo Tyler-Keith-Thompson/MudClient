@@ -1048,16 +1048,18 @@ local record MinimapCell
   color:   string
   terrain: integer   -- kxwt terrain code (0–39) → the iso tile texture
   z:       integer   -- elevation level RELATIVE to the current room (coord[3] diff; 0 when unknown)
+  dim:     boolean   -- room is on ANOTHER floor (reached via up/down) → drawn faint as spatial context
 end
 
--- Pure BFS grid-placement over `rooms`/`moves`, from `start` out to `depth` hops. Collisions (two rooms
--- landing on the same cell) keep the FIRST claim — BFS order means that's always the closer room — and
--- simply never place the later one (its own further neighbours are then unreachable through it, which is
--- fine: we don't know where to draw it anyway). No globals touched, so it's directly unit-testable.
+-- Pure BFS grid-placement over `rooms`/`moves`, from `start` out to `depth` hops. Cardinal moves place the
+-- neighbour on the SAME floor at an offset cell; UP/DOWN moves keep the same (gx,gy) but change the floor
+-- level, so other floors of a multi-level structure get drawn too — dimmed, as spatial context. Cells are
+-- keyed by (gx,gy,floor) so floors stack without colliding; first (closest) claim wins on a collision. No
+-- globals touched, so it's directly unit-testable.
 local function minimap_grid(rooms: {integer:Room}, start: integer, depth: integer): {MinimapCell}
   if not start or not rooms[start] then return {} end
-  local pos: {integer:{integer}} = { [start] = { 0, 0 } }
-  local occ: {string:boolean} = { ["0,0"] = true }
+  local pos: {integer:{integer}} = { [start] = { 0, 0, 0 } }   -- {gx, gy, floor}
+  local occ: {string:boolean} = { ["0,0,0"] = true }
   local order: {integer} = { start }
   local dist: {integer:integer} = { [start] = 0 }
   local queue: {integer} = { start }
@@ -1070,11 +1072,15 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
       local g = pos[id]
       for dir, nb in pairs(r.moves or {}) do
         local v = GRID_DELTA[dir]
-        if v and not pos[nb] and rooms[nb] then
-          local gx, gy = g[1] + v[1], g[2] + v[2]
-          local key = gx .. "," .. gy
+        local gx, gy, fl: integer, integer, integer
+        if v then gx, gy, fl = g[1] + v[1], g[2] + v[2], g[3]                 -- cardinal: shift, same floor
+        elseif dir == "up" then gx, gy, fl = g[1], g[2], g[3] + 1            -- up/down: stay put, change floor
+        elseif dir == "down" then gx, gy, fl = g[1], g[2], g[3] - 1
+        end
+        if gx and not pos[nb] and rooms[nb] then
+          local key = gx .. "," .. gy .. "," .. fl
           if not occ[key] then
-            occ[key] = true; pos[nb] = { gx, gy }; dist[nb] = d0 + 1
+            occ[key] = true; pos[nb] = { gx, gy, fl }; dist[nb] = d0 + 1
             order[#order + 1] = nb; queue[#queue + 1] = nb
           end
         end
@@ -1086,6 +1092,7 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
   for _, id in ipairs(order) do
     local r = rooms[id]
     local g = pos[id]
+    local floor = g[3]
     local exits: {string} = {}
     for dir in pairs(r.moves or {}) do
       local abbr = GRID_ABBR[dir]
@@ -1097,13 +1104,14 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
     local color: string
     if r.waypoint then color = "yellow"
     elseif r.blocked and next(r.blocked) then color = "gray" end
-    -- Relative elevation: coord[3] IS a small integer level; only meaningful on the same plane (coord[4]).
-    local z = 0
+    -- Elevation: prefer coord[3] (a small integer level; same-plane only), else fall back to the BFS floor
+    -- count so other floors still stack when coords aren't known yet (right after a reload).
+    local z = floor
     if cur_coord and r.coord and r.coord[4] == cur_coord[4] then
       z = math.floor((r.coord[3] or 0) - (cur_coord[3] or 0) + 0.5) as integer
     end
     cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start),
-                          color = color, terrain = r.terrain, z = z }
+                          color = color, terrain = r.terrain, z = z, dim = (floor ~= 0) }
   end
   return cells
 end

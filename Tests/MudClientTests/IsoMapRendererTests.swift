@@ -7,8 +7,9 @@ import ImageIO
 // A sample scene exercising terrain variety, z-levels, up/down chevrons, and the current-room ring.
 // gy grows north; z is relative to the current room.
 private func sampleScene() -> [IsoMapRenderer.Room] {
-    func r(_ gx: Int, _ gy: Int, _ z: Int, _ terr: Int, _ exits: [String], cur: Bool = false) -> IsoMapRenderer.Room {
-        IsoMapRenderer.Room(gx: gx, gy: gy, z: z, exits: Set(exits), terrain: terr, current: cur, rgb: nil)
+    func r(_ gx: Int, _ gy: Int, _ z: Int, _ terr: Int, _ exits: [String],
+           cur: Bool = false, dim: Bool = false) -> IsoMapRenderer.Room {
+        IsoMapRenderer.Room(gx: gx, gy: gy, z: z, exits: Set(exits), terrain: terr, current: cur, dim: dim, rgb: nil)
     }
     return [
         r(0, 0, 0, 3, ["n", "s", "e", "w"], cur: true),   // current — grassy field

@@ -26,15 +26,17 @@ enum IsoMapRenderer {
         var exits: Set<String>          // cardinals for edge stubs + "u"/"d" for the vertical chevron
         var terrain: Int?
         var current: Bool
+        var dim: Bool                   // a room on ANOTHER floor (reached via up/down) → drawn faint, behind
         var rgb: (Double, Double, Double)?   // optional tint override (waypoint/blocked); nil → terrain colour
     }
 
     // Diamond geometry (2:1 iso). Kept small — the terminal upscales the PNG into the panel rectangle.
     private static let tileW = 40, tileH = 20         // top-face diamond bounding box
     private static let hw = 20.0, hh = 10.0           // half extents
-    private static let levelH = 15.0                  // vertical pixels per z-level
+    private static let spread = 1.42                  // cell-centre spacing / tile size → gaps between rooms
+    private static let levelH = 18.0                  // vertical pixels per z-level
     private static let skirt = 12.0                   // block wall thickness (volume under every tile)
-    private static let zHeadroom = 3                  // z-levels of vertical margin reserved (constant scale)
+    private static let zHeadroom = 4                  // z-levels of vertical margin reserved (constant scale)
 
     /// Render `rooms` to PNG. A FIXED grid window (`halfX,halfY`) centred on the current room (placed at
     /// 0,0) keeps per-room scale constant regardless of how many rooms exist; rooms outside are clipped.
@@ -44,6 +46,7 @@ enum IsoMapRenderer {
         guard !rooms.isEmpty, halfX > 0, halfY > 0, scale > 0 else { return nil }
         let s = CGFloat(scale)
         let hwx = hw * s, hhx = hh * s, lvl = levelH * s, sk = skirt * s
+        let stepX = hwx * spread, stepY = hhx * spread          // centre-to-centre spacing (tile stays hwx/hhx)
         let twx = CGFloat(tileW) * s, thx = CGFloat(tileH) * s
 
         func inWindow(_ r: Room) -> Bool { r.gx >= -halfX && r.gx <= halfX && r.gy >= -halfY && r.gy <= halfY }
@@ -53,7 +56,7 @@ enum IsoMapRenderer {
         var minSy = CGFloat.greatestFiniteMagnitude, maxSy = -CGFloat.greatestFiniteMagnitude
         for gx in [-halfX, halfX] {
             for gy in [-halfY, halfY] {
-                let sx = CGFloat(gx - gy) * hwx, sy = CGFloat(gx + gy) * hhx
+                let sx = CGFloat(gx - gy) * stepX, sy = CGFloat(gx + gy) * stepY
                 minSx = min(minSx, sx); maxSx = max(maxSx, sx)
                 minSy = min(minSy, sy); maxSy = max(maxSy, sy)
             }
@@ -73,8 +76,8 @@ enum IsoMapRenderer {
 
         // Top-face diamond centre (CG y-up: north/east and higher-z all move UP the screen).
         func centre(_ r: Room) -> CGPoint {
-            CGPoint(x: originX + CGFloat(r.gx - r.gy) * hwx,
-                    y: originY + CGFloat(r.gx + r.gy) * hhx + CGFloat(r.z) * lvl)
+            CGPoint(x: originX + CGFloat(r.gx - r.gy) * stepX,
+                    y: originY + CGFloat(r.gx + r.gy) * stepY + CGFloat(r.z) * lvl)
         }
         func diamond(_ c: CGPoint) -> CGPath {
             let p = CGMutablePath()
@@ -87,29 +90,22 @@ enum IsoMapRenderer {
         }
 
         let placed = rooms.filter(inWindow)
-        // Painter's order: far/back (large gx+gy) first, then lower z first so higher blocks overdraw.
+        // Painter's order: other-floor (dim) rooms first as faint context BEHIND, then the current floor on
+        // top so it always reads clearly. Within each group: far/back (large gx+gy) first, lower z first.
         let order = placed.sorted {
+            if $0.dim != $1.dim { return $0.dim && !$1.dim }        // dim group drawn first
             let a = $0.gx + $0.gy, b = $1.gx + $1.gy
             if a != b { return a > b }
             return $0.z < $1.z
         }
 
-        // Faint connective edges between adjacent placed rooms (read as corridors), drawn under the blocks.
-        let byCell = Dictionary(placed.map { ("\($0.gx),\($0.gy)", $0) }) { a, _ in a }
+        // Same-floor adjacency for the connector lines (drawn ON TOP after the tiles, so exits are obvious).
+        let byCell = Dictionary(placed.filter { !$0.dim }.map { ("\($0.gx),\($0.gy)", $0) }) { a, _ in a }
         let delta: [String: (Int, Int)] = ["n": (0, 1), "s": (0, -1), "e": (1, 0), "w": (-1, 0),
                                            "ne": (1, 1), "nw": (-1, 1), "se": (1, -1), "sw": (-1, -1)]
-        ctx.setLineWidth(max(1, 1.4 * s))
-        ctx.setStrokeColor(red: 0.30, green: 0.36, blue: 0.38, alpha: 0.9)
-        for r in order {
-            let from = centre(r)
-            for d in r.exits {
-                guard let (dx, dy) = delta[d], let nb = byCell["\(r.gx + dx),\(r.gy + dy)"] else { continue }
-                ctx.move(to: from); ctx.addLine(to: centre(nb))
-            }
-        }
-        ctx.strokePath()
 
         for r in order {
+            ctx.setAlpha(r.dim ? 0.4 : 1.0)                          // other floors: faint ghost context
             let c = centre(r)
             let top = diamond(c)
             let (fr, fg, fb) = r.rgb ?? terrainRGB(r.terrain)
@@ -155,6 +151,33 @@ enum IsoMapRenderer {
             }
         }
 
+        // Connector lines ON TOP of the current floor, so every exit reads as a link between rooms. Each is
+        // a short bright bar spanning just the GAP between two tile faces (not the whole diameter) — enough
+        // to show the link without painting a road across the tile tops. Same-floor pairs only.
+        ctx.setAlpha(1.0)
+        ctx.setLineCap(.round)
+        for r in placed where !r.dim {
+            let from = centre(r)
+            for d in r.exits {
+                guard let (dx, dy) = delta[d], let nb = byCell["\(r.gx + dx),\(r.gy + dy)"] else { continue }
+                let to = centre(nb)
+                // trim each end to the tile's half-extent so the bar sits in the gap between the two tiles
+                let mx = (from.x + to.x) / 2, my = (from.y + to.y) / 2
+                let vx = to.x - from.x, vy = to.y - from.y
+                let len = max(1, (vx * vx + vy * vy).squareRoot())
+                let ux = vx / len, uy = vy / len
+                let half = max(3 * s, (len - hwx) / 2)          // gap half-length (never negative)
+                ctx.setStrokeColor(red: 0.15, green: 0.17, blue: 0.18, alpha: 0.9)   // dark casing
+                ctx.setLineWidth(max(2.5, 4 * s))
+                ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half))
+                ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
+                ctx.setStrokeColor(red: 0.95, green: 0.88, blue: 0.55, alpha: 1)     // warm tan core
+                ctx.setLineWidth(max(1.5, 2 * s))
+                ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half))
+                ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
+            }
+        }
+
         guard let image = ctx.makeImage() else { return nil }
         return pngData(image)
     }
@@ -178,7 +201,8 @@ enum IsoMapRenderer {
         case 6, 36:            return (0.16, 0.20, 0.24)   // dark/shadow
         case 7, 29, 38:        return (0.40, 0.46, 0.28)   // swamp / marsh / mire
         case 2, 28:            return (0.62, 0.60, 0.55)   // town / city — cobbles
-        case 1, 33:            return (0.60, 0.52, 0.40)   // building / metal
+        case 1:                return (0.78, 0.66, 0.48)   // building — light wood interior
+        case 33:               return (0.60, 0.62, 0.66)   // metal — steel plate
         case 8, 10, 11:        return (0.55, 0.52, 0.50)   // plateau / mountain / rock
         case 9, 12, 16:        return (0.85, 0.75, 0.45)   // sandy / desert / dunes
         case 13, 24:           return (0.80, 0.86, 0.92)   // tundra / ice
