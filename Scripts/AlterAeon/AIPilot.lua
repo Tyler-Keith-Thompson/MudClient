@@ -1102,7 +1102,6 @@ local function minimap_grid(rooms, start, depth)
          end
       end
    end
-   local cur_coord = rooms[start] and rooms[start].coord
    local cells = {}
    for _, id in ipairs(order) do
       local r = rooms[id]
@@ -1121,12 +1120,9 @@ local function minimap_grid(rooms, start, depth)
       elseif r.blocked and next(r.blocked) then color = "gray" end
 
 
-      local z = floor
-      if cur_coord and r.coord and r.coord[4] == cur_coord[4] then
-         z = math.floor((r.coord[3] or 0) - (cur_coord[3] or 0) + 0.5)
-      end
+
       cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start),
-color = color, terrain = r.terrain, z = z, dim = (floor ~= 0), }
+color = color, terrain = r.terrain, z = floor, dim = (floor ~= 0), }
    end
    return cells
 end

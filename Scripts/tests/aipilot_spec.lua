@@ -72,28 +72,29 @@ test("minimap_grid places rooms on the axis-aligned grid (N→(0,1) up, E→(1,0
   expect(by_id["1,0"].color):eq("yellow")    -- waypoint room tints yellow
 end)
 
-test("minimap_grid carries terrain, relative elevation, and up/down exits for the iso renderer", function()
+test("minimap_grid: elevation follows up/down MOVES, not coord[3] drift; carries terrain + chevrons", function()
   local minimap_grid = _AIP_TEST.minimap_grid
-  -- current room at z=4; the room east is one level higher (z=5) and has an UP exit; same plane (coord[4]).
+  -- B is EAST of A (a cardinal move) but its world coord[3] drifts +1 — that must NOT lift it (flat terrain).
+  -- C is reached via an UP move → a real floor change → lifted + dimmed.
   local rooms = {
     A = { exits = { east = true, up = true }, moves = { east = "B", up = "C" },
-          terrain = 3, coord = { -10, 0, 4, 0 } },                       -- field, z=4
+          terrain = 3, coord = { -10, 0, 4, 0 } },                       -- field
     B = { exits = { west = true }, moves = { west = "A" },
-          terrain = 10, coord = { -9, 0, 5, 0 } },                       -- mountain, one level UP
-    C = { exits = { down = true }, moves = { down = "A" }, terrain = 27 },-- reached by up (not grid-placed)
+          terrain = 10, coord = { -9, 0, 5, 0 } },                       -- coord z-drift +1, but same floor
+    C = { exits = { down = true }, moves = { down = "A" }, terrain = 27 },-- via UP
   }
   local cells = minimap_grid(rooms, "A", 5)
   local by = {}
   for _, c in ipairs(cells) do by[c.gx .. "," .. c.gy .. "," .. c.z] = c end
   expect(by["0,0,0"].terrain):eq(3)        -- current keeps its terrain code
-  expect(by["0,0,0"].z):eq(0)              -- current is the elevation reference
   local up_seen = false
   for _, e in ipairs(by["0,0,0"].exits) do if e == "u" then up_seen = true end end
   expect(up_seen):truthy()                 -- "up" move → 'u' chevron exit
-  expect(by["1,0,1"].terrain):eq(10)       -- east neighbour → (1,0); coord[3] 5−4 = +1 → z key 1
-  expect(by["1,0,1"].z):eq(1)              -- coord[3] 5 − 4 = +1 level
-  expect(by["1,0,1"].dim):falsy()          -- same floor (cardinal move) → not dimmed
-  expect(by["0,0,0"].dim):falsy()
+  expect(by["1,0,0"].terrain):eq(10)       -- east neighbour at (1,0) …
+  expect(by["1,0,0"].z):eq(0)              -- … NOT lifted despite coord[3] drift (cardinal move = flat)
+  expect(by["1,0,0"].dim):falsy()          -- same floor
+  expect(by["0,0,1"].z):eq(1)              -- C via UP → one floor up
+  expect(by["0,0,1"].dim):truthy()         -- other floor → dimmed/ghost
 end)
 
 test("minimap_grid is UNDIRECTED: a just-arrived room with no outgoing moves still shows its neighbourhood", function()

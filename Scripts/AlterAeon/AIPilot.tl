@@ -1102,7 +1102,6 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
       end
     end
   end
-  local cur_coord = rooms[start] and rooms[start].coord
   local cells: {MinimapCell} = {}
   for _, id in ipairs(order) do
     local r = rooms[id]
@@ -1119,14 +1118,11 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
     local color: string
     if r.waypoint then color = "yellow"
     elseif r.blocked and next(r.blocked) then color = "gray" end
-    -- Elevation: prefer coord[3] (a small integer level; same-plane only), else fall back to the BFS floor
-    -- count so other floors still stack when coords aren't known yet (right after a reload).
-    local z = floor
-    if cur_coord and r.coord and r.coord[4] == cur_coord[4] then
-      z = math.floor((r.coord[3] or 0) - (cur_coord[3] or 0) + 0.5) as integer
-    end
+    -- Elevation = the BFS FLOOR count (net up/down MOVES from you), NOT coord[3]. World z-coords drift on
+    -- flat terrain even when you never take an up/down exit, which flung same-plane rooms to wild heights
+    -- (spaghetti connectors). A room only lifts when you actually climbed/descended to reach it.
     cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start),
-                          color = color, terrain = r.terrain, z = z, dim = (floor ~= 0) }
+                          color = color, terrain = r.terrain, z = floor, dim = (floor ~= 0) }
   end
   return cells
 end
