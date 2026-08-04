@@ -231,6 +231,9 @@ global notify:          function(string)                     -- post a desktop/t
 global badge:           function(string)                     -- iTerm2 badge watermark ("" clears)
 global attention:       function(? string)                   -- iTerm2 request-attention (dock bounce)
 global set_uservar:     function(string, string)             -- iTerm2 user variable → native status bar
+global image:           function(string, ? any, ? any)       -- show an image full-screen (iTerm2), any key dismisses
+global map_image:       function(? {any}, ? {string:any})     -- paint the graphical minimap into a HUD panel (iTerm2)
+global is_iterm:        function(): boolean                   -- running under iTerm2?
 global copy:            function(? integer)
 global spellcheck:      function(string): string
 global input_get:       function(): string

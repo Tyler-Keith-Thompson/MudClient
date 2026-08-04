@@ -1289,6 +1289,72 @@ final class LuaScriptEngine: @unchecked Sendable {
             Container.terminalService().setUserVar(name, value)
             return []
         }
+        // map_image(rooms[, opts]): render the graphical minimap and paint it into a HUD panel as an image.
+        // rooms = array of { gx, gy, exits={"n","e",…}, cur=bool, color="green" }. opts = { location="top"|
+        // "bottom", rows=<cells>, cell=<render px> }. No rooms (nil/empty) clears the panel image → text.
+        lua.register("map_image") { args in
+            func num(_ v: LuaValue?) -> Int? {
+                switch v {
+                case .int(let n): return Int(n); case .number(let d): return Int(d)
+                case .string(let s): return Int(s); default: return nil
+                }
+            }
+            var optDict: [String: LuaValue] = [:]
+            if args.count > 1, case .table(_, let d) = args[1] { optDict = d }
+            let location: String = { if case .string(let s)? = optDict["location"] { return s } else { return "top" } }()
+            let host = (location == "bottom") ? Container.panelHost() : Container.topPanelHost()
+
+            let cols = num(optDict["cols"]) ?? 26                    // top-right rectangle the map overlays
+            let rowsN = num(optDict["rows"]) ?? 9
+            guard case .table(let roomVals, _)? = args.first, !roomVals.isEmpty else {
+                host.setImage(nil)                                   // clear → restore the panel text
+                Container.terminalService().refreshFurniture()
+                return []
+            }
+            var rooms: [MapRenderer.Room] = []
+            for rv in roomVals {
+                guard case .table(_, let f) = rv else { continue }
+                var exits: Set<String> = []
+                if case .table(let ex, _)? = f["exits"] {
+                    for e in ex { if case .string(let s) = e { exits.insert(s) } }
+                }
+                var cur = false; if case .bool(let b)? = f["cur"] { cur = b }
+                var rgb: (Double, Double, Double)? = nil
+                if case .string(let cn)? = f["color"] { rgb = MapRenderer.namedRGB(cn) }
+                rooms.append(MapRenderer.Room(gx: num(f["gx"]) ?? 0, gy: num(f["gy"]) ?? 0,
+                                              exits: exits, current: cur, rgb: rgb))
+            }
+            if let png = MapRenderer.renderPNG(rooms: rooms, cell: num(optDict["cell"]) ?? 22) {
+                host.setImage(png, cols: cols, rows: rowsN)          // overlay the top-right cols×rows rectangle
+            } else {
+                host.setImage(nil)
+            }
+            Container.terminalService().refreshFurniture()
+            return []
+        }
+        // is_iterm() -> bool: are we running under iTerm2? (Gates iTerm2-only features like the graphical
+        // minimap defaulting on.) TERM_PROGRAM locally; LC_TERMINAL is set by iTerm2 and survives ssh.
+        lua.register("is_iterm") { _ in
+            let env = ProcessInfo.processInfo.environment
+            return [.bool(env["TERM_PROGRAM"] == "iTerm.app" || env["LC_TERMINAL"] == "iTerm2")]
+        }
+        // image(path[, width, height]): show an image full-screen (iTerm2), dismissed by any keypress.
+        lua.register("image") { args in
+            guard case .string(let path)? = args.first else { return [] }
+            func dim(_ v: LuaValue?) -> String? {
+                switch v {
+                case .string(let s): return s
+                case .int(let n):    return String(n)
+                case .number(let d): return String(Int(d))
+                default:             return nil
+                }
+            }
+            Container.terminalService().displayImage(
+                path: path,
+                width:  dim(args.count > 1 ? args[1] : nil),
+                height: dim(args.count > 2 ? args[2] : nil))
+            return []
+        }
         // timestamps([on]) -> bool. Toggle (no arg) or set (bool / "on"/"off") the dim per-line arrival-
         // time gutter shown at the start of every scrollback line. Bound to ctrl-T by default. Returns the
         // new state so a bind can echo it.

@@ -56,6 +56,14 @@ final class PanelHost: @unchecked Sendable {
     private let lock = NSLock()
     private var parsedRows: [Row] = []
     private var pinnedHeight: Int?
+    // The graphical minimap: a PNG drawn as an OVERLAY in the panel's top-right `imageCols`×`imageRows`
+    // cell rectangle (the text still renders in the rest of the panel). `imageVersion` bumps on every set
+    // so the screen owner re-emits the (expensive) image ONLY when it actually changes — not every frame,
+    // which was the flicker. imageCols == 0 means no image.
+    private var image: Data?
+    private var imageVersion = 0
+    private var imageCols = 0
+    private var imageRows = 0
 
     /// The number of terminal rows the panel occupies: the pinned height if set, else the row count of
     /// the last render (0 when nothing has been rendered — so an unloaded HUD reserves no space).
@@ -82,6 +90,23 @@ final class PanelHost: @unchecked Sendable {
         lock.lock()
         pinnedHeight = n > 0 ? n : nil
         lock.unlock()
+    }
+
+    /// Set (or clear, with nil) the minimap PNG and the top-right cell rectangle it overlays (`cols`×`rows`).
+    /// The screen owner (drawFurniture) draws it over that rectangle and truncates the panel text around it.
+    /// Bumps the version so it's re-emitted only on change.
+    func setImage(_ data: Data?, cols: Int = 0, rows: Int = 0) {
+        lock.lock()
+        image = data; imageCols = data == nil ? 0 : cols; imageRows = data == nil ? 0 : rows
+        imageVersion += 1
+        lock.unlock()
+    }
+    /// The panel's minimap image + its top-right rectangle + a version that changes only when the image is
+    /// re-set (so the renderer can skip re-emitting an unchanged image). nil when there's no image.
+    func currentImage() -> (data: Data, cols: Int, rows: Int, version: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let d = image, imageCols > 0 else { return nil }
+        return (d, imageCols, imageRows, imageVersion)
     }
 
     // MARK: - Rendering (called by the screen owner)

@@ -235,6 +235,7 @@ os.execute("mkdir -p '" .. cfg.dir .. "' 2>/dev/null")
 
 
 
+
 _AIP = _AIP or {};
 (_AIP).epoch = ((_AIP).epoch or 0) + 1
 local EPOCH = (_AIP).epoch
@@ -250,6 +251,7 @@ local P = {
    manual = "", nav = nil,
    rooms = {}, current_room = nil, dir_deltas = {}, trace = true, memories = {},
    demo_count = 0,
+   minimap_on = (is_iterm and is_iterm()) or false,
 }
 
 
@@ -331,7 +333,7 @@ local function repair_smap_coords(rooms)
    for _, r in pairs(rooms) do
       local c = r.coord
       if c and (c[3] or 0) == 0 and (c[4] or 0) == 0 and
-         math.abs(c[1] or 0) < 40 and math.abs(c[2] or 0) < 40 then
+         math.abs((c[1] or 0)) < 40 and math.abs((c[2] or 0)) < 40 then
          r.coord = nil; cleared = cleared + 1
       end
    end
@@ -430,6 +432,7 @@ local function coord_key(c) return c[1] .. "," .. c[2] .. "," .. c[3] .. "," .. 
 
 
 
+
 if rx then
    rx.fromTrigger([[^kxw[tq]_rvnum (-?\d+) -?\d+ -?\d+ (-?\d+) (-?\d+) (-?\d+) (\d+)]]):subscribe(function(c)
 
@@ -451,12 +454,12 @@ if rx then
       end
    end)
 
-   rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function(c)
+   rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function(_)
       local id = P.current_room
       if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
    end)
 
-   rx.fromTrigger([[^You have been KILLED]]):subscribe(function(c) mark_death() end)
+   rx.fromTrigger([[^You have been KILLED]]):subscribe(function(_) mark_death() end)
 
 
    rx.fromTrigger([[.*]]):subscribe(function(c) pilot_observe((c).line) end)
@@ -554,6 +557,7 @@ function pilot_room_change(id, coord)
       after(0.4, function() if P.goto_bridge then goto_bridge_advance() end end)
    end
    if P.nav then nav_step() end
+   if P.minimap_on then update_minimap() end
 end
 
 function pilot_room_name(n)
@@ -1027,6 +1031,91 @@ end
 
 
 
+local GRID_DELTA = {
+   north = { 0, 1 }, south = { 0, -1 }, east = { 1, 0 }, west = { -1, 0 },
+   northeast = { 1, 1 }, northwest = { -1, 1 }, southeast = { 1, -1 }, southwest = { -1, -1 },
+}
+local GRID_ABBR = {
+   north = "n", south = "s", east = "e", west = "w",
+   northeast = "ne", northwest = "nw", southeast = "se", southwest = "sw",
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+local function minimap_grid(rooms, start, depth)
+   if not start or not rooms[start] then return {} end
+   local pos = { [start] = { 0, 0 } }
+   local occ = { ["0,0"] = true }
+   local order = { start }
+   local dist = { [start] = 0 }
+   local queue = { start }
+   local head = 1
+   while head <= #queue do
+      local id = queue[head]; head = head + 1
+      local d0 = dist[id]
+      if d0 < depth then
+         local r = rooms[id]
+         local g = pos[id]
+         for dir, nb in pairs(r.moves or {}) do
+            local v = GRID_DELTA[dir]
+            if v and not pos[nb] and rooms[nb] then
+               local gx, gy = g[1] + v[1], g[2] + v[2]
+               local key = gx .. "," .. gy
+               if not occ[key] then
+                  occ[key] = true; pos[nb] = { gx, gy }; dist[nb] = d0 + 1
+                  order[#order + 1] = nb; queue[#queue + 1] = nb
+               end
+            end
+         end
+      end
+   end
+   local cells = {}
+   for _, id in ipairs(order) do
+      local r = rooms[id]
+      local g = pos[id]
+      local exits = {}
+      for dir in pairs(r.moves or {}) do
+         local abbr = GRID_ABBR[dir]
+         if abbr then exits[#exits + 1] = abbr end
+      end
+      local color
+      if r.waypoint then color = "yellow"
+      elseif r.blocked and next(r.blocked) then color = "gray" end
+      cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start), color = color }
+   end
+   return cells
+end
+
+local MINIMAP_DEPTH = 5
+local MINIMAP_ROWS = 9
+local MINIMAP_COLS = 26
+
+
+
+
+function update_minimap()
+   local cur = P.current_room
+   if not cur or not P.rooms[cur] then map_image(nil); return end
+   local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
+   if #cells == 0 then map_image(nil); return end
+   map_image(cells, { location = "top", cols = MINIMAP_COLS, rows = MINIMAP_ROWS })
+end
+
+
+
+
+
+
 
 
 
@@ -1042,7 +1131,7 @@ local function nearest_unexplored()
    while head <= #queue do
       local n = queue[head]; head = head + 1
       if has_frontier(n.id) then return n.dir, n.dist end
-      for d, nb in pairs(P.rooms[n.id] and P.rooms[n.id].moves or {}) do
+      for _, nb in pairs(P.rooms[n.id] and P.rooms[n.id].moves or {}) do
          if not seen[nb] then seen[nb] = true; queue[#queue + 1] = { id = nb, dir = n.dir, dist = n.dist + 1 } end
       end
    end
@@ -1157,8 +1246,7 @@ end
 
 
 
-
-local function learn_waypoint(num, id)
+local function learn_waypoint_impl(num, id)
    if not num or not id or not P.rooms[id] then return end
    P.wp_room = P.wp_room or {}
    P.room_wp = P.room_wp or {}
@@ -1856,17 +1944,17 @@ required = { "method" },
 build = function(a) return a.method end, },
    { name = "stand",
 desc = "Stand up after resting/sleeping, once your state shows you are recovered.",
-props = {}, build = function(a) return "stand" end, },
+props = {}, build = function(_) return "stand" end, },
    { name = "look",
 desc = "Look at the current room, or at a specific thing.",
 props = { at = { type = "string", description = "optional thing to look at" } },
 build = function(a) return "look" .. opt(a.at) end, },
    { name = "inventory",
 desc = "List what you are carrying.",
-props = {}, build = function(a) return "inventory" end, },
+props = {}, build = function(_) return "inventory" end, },
    { name = "flee", ends_turn = true,
 desc = "Flee from combat.",
-props = {}, build = function(a) return "flee" end, },
+props = {}, build = function(_) return "flee" end, },
    { name = "command",
 desc = "Run any other game command verbatim (spells, skills, help, train, buy, list, etc.). Use ONLY when no specific tool fits.",
 props = { text = { type = "string", description = "the exact command line to send" } },
@@ -1874,7 +1962,7 @@ required = { "text" },
 build = function(a) return a.text end, },
    { name = "wait",
 desc = "Do nothing this turn (e.g. while recovering). No command is sent.",
-props = {}, build = function(a) return nil end, },
+props = {}, build = function(_) return nil end, },
    { name = "remember", note = true,
 desc = "Save a durable fact worth keeping all session (trainer/vendor location, which spell hits hardest, a good xp spot + level, a danger).",
 props = { fact = { type = "string" } }, required = { "fact" }, },
@@ -3275,6 +3363,12 @@ function ai_command(args)
    elseif verb == "trace" then
       if rest:lower() == "off" then P.trace = false elseif rest:lower() == "on" then P.trace = true end
       echo("[ai] trace: " .. (P.trace and cfg.trace_file or "off"))
+   elseif verb == "minimap" then
+      local m = rest:lower()
+      if m == "on" then P.minimap_on = true; update_minimap()
+      elseif m == "off" then P.minimap_on = false; map_image(nil)
+      else echo("[ai] usage: pilot.minimap('on'|'off'). Current: " .. (P.minimap_on and "on" or "off")); return end
+      echo("[ai] graphical minimap (iTerm2, top panel): " .. (P.minimap_on and "on" or "off"))
    elseif verb == "tools" then
       echo(tools_json())
    elseif verb == "demo" then
@@ -3323,6 +3417,7 @@ local PILOT_CMDS = {
    budget = { sig = "pilot.budget([dollars])", text = "Set a session $ cap that auto-disarms the pilot when crossed (0 = off)." },
    rag = { sig = "pilot.rag(on_off)", text = "Toggle RAG manual retrieval ('on'/'off')." },
    trace = { sig = "pilot.trace(on_off)", text = "Toggle turn tracing to the trace file ('on'/'off')." },
+   minimap = { sig = "pilot.minimap(on_off)", text = "Toggle the GRAPHICAL minimap ('on'/'off'; iTerm2-only, defaults ON under iTerm2). Overlays a rendered room-graph image on the top-right of the group panel (where the text minimap sits) around your current room; the roster and widgets stay. 'off' restores the text minimap." },
    tools = { sig = "pilot.tools()", text = "Print the exact tool definitions sent to the model each turn." },
    demo = { sig = "pilot.demo(command)", text = "Preview the training example a command maps to." },
    remember = { sig = "pilot.remember(fact)", text = "Add a memory the pilot will carry." },
@@ -3331,7 +3426,7 @@ local PILOT_CMDS = {
 }
 local pilot_tbl = pilot
 for verb, info in pairs(PILOT_CMDS) do
-   pilot_tbl[verb] = function(arg) return ai_command(trim(verb .. " " .. (arg == nil and "" or tostring(arg)))) end
+   pilot_tbl[verb] = function(a) return ai_command(trim(verb .. " " .. (a == nil and "" or tostring(a)))) end
    doc(pilot_tbl[verb], { name = "pilot." .. verb, sig = info.sig, text = info.text, group = "pilot" })
 end
 pilot_tbl.reload = function() return reload() end
@@ -3400,8 +3495,9 @@ _AIP_TEST = {
    find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
    smap_coord_grid = smap_coord_grid, smap_apply = smap_apply, smap_on_map_update = smap_on_map_update,
    SM = SM,
+   minimap_grid = minimap_grid, update_minimap = update_minimap,
    parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
-   learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
+   learn_waypoint = learn_waypoint_impl, nearest_waypoint_for = nearest_waypoint_for,
    waypoint_num_for_room = waypoint_num_for_room, waypoint_cmd_num = waypoint_cmd_num,
    parse_exits = parse_exits, cmd_ends_turn = cmd_ends_turn, untaken_exit = untaken_exit,
    path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,

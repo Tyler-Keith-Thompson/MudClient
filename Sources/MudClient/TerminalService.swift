@@ -150,6 +150,11 @@ final class TerminalService {
     /// bare `\n`; popped (`ESC[<u`) on teardown. Guarded so a resize re-setup doesn't stack pushes.
     private var kittyPushed = false
     private var atexitArmed = false   // one-time guard for the alt-buffer restore hook (see setup())
+    private var viewingImage = false  // true while an image() overlay is up; the next keypress dismisses it
+    // Minimap image re-emit tracking: the (expensive) inline image is written only when its version or the
+    // panel geometry changes — not every furniture repaint (that was the flicker). Reset by setupScreen.
+    private var lastTopImageVersion = -1, lastBottomImageVersion = -1
+    private var lastTopImageGeom = "", lastBottomImageGeom = ""
 
     // MARK: - Scrollback state
     //
@@ -231,6 +236,11 @@ final class TerminalService {
     /// engine's bindings (TinTin++ #macro); if unbound it drives the built-in editor (arrows) or is
     /// dropped (any other recognised-but-unbound special key).
     private func apply(_ event: InputEvent) {
+        if viewingImage {
+            if case .focus = event { return }   // tabbing away must not dismiss the image
+            dismissImage()                       // any real key/text/enter returns to the UI (key consumed)
+            return
+        }
         switch event {
         case .text(let s):
             insertText(s)
@@ -624,6 +634,8 @@ final class TerminalService {
         guard let l = layout() else { return }
         lastSignature = signature(l)
         scrollOffset = 0   // any (re)establishment of the region snaps back to the live tail
+        // A full rebuild clears the screen, so the minimap image must be re-emitted next drawFurniture.
+        lastTopImageVersion = -1; lastBottomImageVersion = -1; lastTopImageGeom = ""; lastBottomImageGeom = ""
 
         var out = ""
         // Clear rows that were frozen furniture in the PREVIOUS geometry but now fall inside the scroll
@@ -775,25 +787,82 @@ final class TerminalService {
 
     /// Paint the top panel, the scroll-frame dividers, the bottom status panel, and the input line —
     /// all absolute, none touching the saved output cursor — leaving the physical cursor on the input.
+    /// Build an iTerm2 inline-image escape that renders `png` FILLING a `cols`×`rows` CELL box (aspect
+    /// preserved, so a non-matching image letterboxes rather than distorts). Used to paint the graphical
+    /// minimap into its top-right rectangle within a panel.
+    private static func panelImageEscape(_ png: Data, cols: Int, rows: Int) -> String {
+        let args = "inline=1;size=\(png.count);width=\(cols);height=\(rows);preserveAspectRatio=1"
+        return "\u{1B}]1337;File=\(args):\(png.base64EncodedString())\u{07}"
+    }
+
+    /// Truncate an ANSI string to at most `cols` VISIBLE characters, copying escape sequences verbatim (they
+    /// have no width). Used to draw a panel row's text only in the LEFT segment so it never overwrites the
+    /// minimap image sitting in the right cells.
+    static func truncateVisible(_ s: String, to cols: Int) -> String {
+        if cols <= 0 { return "" }
+        var out = ""; var visible = 0
+        let chars = Array(s); var i = 0
+        while i < chars.count {
+            if chars[i] == "\u{1B}" {                         // copy the whole escape (CSI/OSC) verbatim
+                var j = i + 1
+                if j < chars.count, chars[j] == "[" {
+                    j += 1
+                    while j < chars.count, !((chars[j].asciiValue.map { (0x40...0x7E).contains($0) }) ?? false) { j += 1 }
+                    if j < chars.count { j += 1 }
+                } else if j < chars.count { j += 1 }
+                out += String(chars[i..<j]); i = j
+            } else {
+                if visible >= cols { break }
+                out.append(chars[i]); visible += 1; i += 1
+            }
+        }
+        return out
+    }
+
+    /// Draw one furniture panel's rows starting at absolute `topRow`, overlaying its minimap image (if any)
+    /// in the top-right `imgCols`×`imgRows` rectangle: the top rows render text only in the left segment
+    /// (so they never erase the image), lower rows render full width, and the image itself is emitted ONLY
+    /// when it changed (version/geometry) — leaving the on-screen image untouched otherwise (no flicker).
+    private func drawPanel(rows: [String], topRow: Int, height: Int, width: Int,
+                           image: (data: Data, cols: Int, rows: Int, version: Int)?,
+                           lastVersion: inout Int, lastGeom: inout String) -> String {
+        var out = ""
+        let imgCols = image.map { min($0.cols, width) } ?? 0
+        let imgRows = image.map { min($0.rows, height) } ?? 0
+        let leftW = imgCols > 0 ? max(0, width - imgCols) : width
+        for i in 0..<height {
+            let text = i < rows.count ? rows[i] : ""
+            if imgCols > 0, i < imgRows {                     // left text only; right cells belong to the image
+                out += "\u{1B}[\(topRow + i);1H" + Self.truncateVisible(text, to: leftW) + "\u{1B}[0m"
+            } else {
+                out += "\u{1B}[\(topRow + i);1H\u{1B}[2K" + text
+            }
+        }
+        if let image = image, imgCols > 0, imgRows > 0 {
+            let geom = "\(topRow)x\(width)x\(imgCols)x\(imgRows)"
+            if image.version != lastVersion || geom != lastGeom {   // re-emit only on change
+                out += "\u{1B}[\(topRow);\(leftW + 1)H" + Self.panelImageEscape(image.data, cols: imgCols, rows: imgRows)
+                lastVersion = image.version; lastGeom = geom
+            }
+        } else { lastVersion = -1; lastGeom = "" }
+        return out
+    }
+
     private func drawFurniture(_ l: Layout) {
         var out = ""
-        if l.topHeight > 0 {                                 // top panel (group), rows 1..topHeight
-            let rows = Container.topPanelHost().rows(width: l.width)
-            for i in 0..<l.topHeight {
-                out += "\u{1B}[\(1 + i);1H\u{1B}[2K"
-                if i < rows.count { out += rows[i] }
-            }
+        if l.topHeight > 0 {                                 // top panel (group + minimap), rows 1..topHeight
+            out += drawPanel(rows: Container.topPanelHost().rows(width: l.width), topRow: 1, height: l.topHeight,
+                             width: l.width, image: Container.topPanelHost().currentImage(),
+                             lastVersion: &lastTopImageVersion, lastGeom: &lastTopImageGeom)
         }
         // subtle divider framing the top of the scroll region
         out += "\u{1B}[\(l.topDividerRow);1H\u{1B}[2K" + dividerLine(width: l.width)
         // subtle divider framing the bottom of the scroll region
         out += "\u{1B}[\(l.scrollDividerRow);1H\u{1B}[2K" + dividerLine(width: l.width)
         if l.bottomHeight > 0 {                              // status panel, below the scroll frame
-            let rows = Container.panelHost().rows(width: l.width)
-            for i in 0..<l.bottomHeight {
-                out += "\u{1B}[\(l.bottomPanelTop + i);1H\u{1B}[2K"
-                if i < rows.count { out += rows[i] }
-            }
+            out += drawPanel(rows: Container.panelHost().rows(width: l.width), topRow: l.bottomPanelTop,
+                             height: l.bottomHeight, width: l.width, image: Container.panelHost().currentImage(),
+                             lastVersion: &lastBottomImageVersion, lastGeom: &lastBottomImageGeom)
         }
         // subtle divider directly above the input line
         out += "\u{1B}[\(l.inputDividerRow);1H\u{1B}[2K" + dividerLine(width: l.width)
@@ -885,6 +954,33 @@ final class TerminalService {
     func setUserVar(_ name: String, _ value: String) {
         let b64 = Data(value.utf8).base64EncodedString()
         writeToStandardOut(data: Data("\u{1B}]1337;SetUserVar=\(name)=\(b64)\u{07}".utf8))
+    }
+
+    /// Display an image FULL-SCREEN as a dismiss-on-keypress overlay (iTerm2 inline-image protocol). We
+    /// can't put images in the text band — our scrollback/wrap model measures cells and an image OSC has no
+    /// cell width (visibleLength would count the base64 and wrap it into thousands of rows). So `image()`
+    /// takes over the screen instead: drop the scroll region, clear, render the image scaled to fit, show a
+    /// hint; the next keypress restores the UI (see the viewingImage check in apply). iTerm2-only; no-op if
+    /// the file is unreadable. `width`/`height` override the size spec (cells / "Npx" / "N%" / "auto");
+    /// width defaults to 100% (fit the window, preserving aspect).
+    func displayImage(path: String, width: String?, height: String?) {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: (path as NSString).expandingTildeInPath)) else { return }
+        var args = "inline=1;size=\(data.count);preserveAspectRatio=1;width=\(width ?? "100%")"
+        if let h = height { args += ";height=\(h)" }
+        let esc = "\u{1B}]1337;File=\(args):\(data.base64EncodedString())\u{07}"
+        var out = "\u{1B}[?25l"                              // hide cursor
+        out += "\u{1B}[r\u{1B}[2J\u{1B}[1;1H"               // full screen: drop scroll region, clear, home
+        out += esc
+        out += "\u{1B}[\(getTerminalHeight() ?? 24);1H\u{1B}[90m  press any key to return\u{1B}[0m"
+        writeToStandardOut(data: Data(out.utf8))
+        viewingImage = true
+    }
+
+    private func dismissImage() {
+        viewingImage = false
+        lastSignature = ""      // force a full rebuild
+        setupScreen()           // re-establish the scroll region + repaint band/furniture/input
+        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
     }
     
     private func getTerminalHeight() -> Int? {

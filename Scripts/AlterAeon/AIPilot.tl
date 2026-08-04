@@ -230,6 +230,7 @@ local record PState
   nav_cooldown:    number
   goto_bridge:     GotoBridge
   _recall_await:   any
+  minimap_on:      boolean   -- graphical (iTerm2 image) minimap toggle; OFF by default, see pilot.minimap()
 end
 
 -- Runtime state that should survive pilot.reload() (globals persist in the lua state across the
@@ -250,6 +251,7 @@ local P: PState = {
   manual = "", nav = nil,
   rooms = {}, current_room = nil, dir_deltas = {}, trace = true, memories = {},
   demo_count = 0,   -- human demonstrations captured this session
+  minimap_on = (is_iterm and is_iterm()) or false,   -- graphical minimap: default ON under iTerm2, else off
 } as PState
 
 -- The parsed `waypoint` list (P.waypoints) and the learned number<->room maps (P.wp_room/P.room_wp) are
@@ -331,7 +333,7 @@ local function repair_smap_coords(rooms: {integer:Room}): integer
   for _, r in pairs(rooms) do
     local c = r.coord
     if c and (c[3] or 0) == 0 and (c[4] or 0) == 0
-       and math.abs(c[1] or 0) < 40 and math.abs(c[2] or 0) < 40 then
+       and math.abs((c[1] or 0) as number) < 40 and math.abs((c[2] or 0) as number) < 40 then
       r.coord = nil; cleared = cleared + 1
     end
   end
@@ -392,6 +394,7 @@ global start_navigation:    function(string)
 global take_turn_decide:    function()
 global log_human_demo:      function(string)
 global fire_if_ready:       function(integer)
+global update_minimap:      function()
 -- (every other bare global this file defines also needs its type known before the `function name(...)`
 -- statement — Teal, unlike Lua, doesn't implicitly treat a top-level `function name()` as declaring a
 -- new global unless it's already known via mud.d.tl or an explicit `global` here.)
@@ -451,12 +454,12 @@ if rx then
     end
   end)
   -- kxwt_waypoint marks the current room as a travel waypoint; remember it so the minimap can flag it.
-  rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function(c: {string})
+  rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function(_: {string})
     local id = P.current_room
     if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
   end)
   -- Your own death (only ever printed for YOU) teleports you to recall — mark the corpse room first.
-  rx.fromTrigger([[^You have been KILLED]]):subscribe(function(c: {string}) mark_death() end)
+  rx.fromTrigger([[^You have been KILLED]]):subscribe(function(_: {string}) mark_death() end)
   -- The broad observer (least specific → fires LAST on any line): feeds the transcript, exits parse, the
   -- waypoint-listing learner, the recall fizzle, and the turn arm.
   rx.fromTrigger([[.*]]):subscribe(function(c: {string}) pilot_observe((c as Cap).line) end)
@@ -554,6 +557,7 @@ function pilot_room_change(id: integer, coord: {number})
     after(0.4, function() if P.goto_bridge then goto_bridge_advance() end end)
   end
   if P.nav then nav_step() end   -- a route is in progress: take the next step
+  if P.minimap_on then update_minimap() end   -- graphical minimap opt-in: refresh on every room change
 end
 
 function pilot_room_name(n: string)
@@ -1022,6 +1026,91 @@ function minimap(hw: integer, hh: integer): any
   return { w = W, h = H, cells = cells }
 end
 
+-- ---- graphical minimap (iTerm2 image, via the map_image host builtin) ----------------------------
+-- Opt-in (pilot.minimap('on'/'off')): OFF by default. Unlike the text minimap() above (geometric, uses
+-- kxwt coords when known), this walks the pure move-GRAPH: coords aren't needed, so it also works right
+-- after a reload/relaunch before kxwt re-supplies them. gy grows NORTH (screen-up), matching map_image's
+-- documented grid convention; up/down/in/out/other non-2D directions are ignored for placement.
+local GRID_DELTA: {string:{integer}} = {
+  north = { 0, 1 }, south = { 0, -1 }, east = { 1, 0 }, west = { -1, 0 },
+  northeast = { 1, 1 }, northwest = { -1, 1 }, southeast = { 1, -1 }, southwest = { -1, -1 },
+}
+local GRID_ABBR: {string:string} = {
+  north = "n", south = "s", east = "e", west = "w",
+  northeast = "ne", northwest = "nw", southeast = "se", southwest = "sw",
+}
+
+local record MinimapCell
+  gx:    integer
+  gy:    integer
+  exits: {string}
+  cur:   boolean
+  color: string
+end
+
+-- Pure BFS grid-placement over `rooms`/`moves`, from `start` out to `depth` hops. Collisions (two rooms
+-- landing on the same cell) keep the FIRST claim — BFS order means that's always the closer room — and
+-- simply never place the later one (its own further neighbours are then unreachable through it, which is
+-- fine: we don't know where to draw it anyway). No globals touched, so it's directly unit-testable.
+local function minimap_grid(rooms: {integer:Room}, start: integer, depth: integer): {MinimapCell}
+  if not start or not rooms[start] then return {} end
+  local pos: {integer:{integer}} = { [start] = { 0, 0 } }
+  local occ: {string:boolean} = { ["0,0"] = true }
+  local order: {integer} = { start }
+  local dist: {integer:integer} = { [start] = 0 }
+  local queue: {integer} = { start }
+  local head = 1
+  while head <= #queue do
+    local id = queue[head]; head = head + 1
+    local d0 = dist[id]
+    if d0 < depth then
+      local r = rooms[id]
+      local g = pos[id]
+      for dir, nb in pairs(r.moves or {}) do
+        local v = GRID_DELTA[dir]
+        if v and not pos[nb] and rooms[nb] then
+          local gx, gy = g[1] + v[1], g[2] + v[2]
+          local key = gx .. "," .. gy
+          if not occ[key] then
+            occ[key] = true; pos[nb] = { gx, gy }; dist[nb] = d0 + 1
+            order[#order + 1] = nb; queue[#queue + 1] = nb
+          end
+        end
+      end
+    end
+  end
+  local cells: {MinimapCell} = {}
+  for _, id in ipairs(order) do
+    local r = rooms[id]
+    local g = pos[id]
+    local exits: {string} = {}
+    for dir in pairs(r.moves or {}) do
+      local abbr = GRID_ABBR[dir]
+      if abbr then exits[#exits + 1] = abbr end
+    end
+    local color: string
+    if r.waypoint then color = "yellow"
+    elseif r.blocked and next(r.blocked) then color = "gray" end
+    cells[#cells + 1] = { gx = g[1], gy = g[2], exits = exits, cur = (id == start), color = color }
+  end
+  return cells
+end
+
+local MINIMAP_DEPTH = 5
+local MINIMAP_ROWS = 9    -- top-right rectangle the image overlays (rows ≈ the text minimap's MAP_CLIP_H)
+local MINIMAP_COLS = 26
+
+-- Project the room graph around P.current_room and paint it into the top HUD panel. Called whenever the
+-- graphical minimap is ON (pilot_room_change, and once immediately on pilot.minimap('on')); a no-op
+-- clear (map_image(nil)) when there's nothing to draw, so it never leaves a stale image up.
+function update_minimap()
+  local cur = P.current_room
+  if not cur or not P.rooms[cur] then map_image(nil); return end
+  local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
+  if #cells == 0 then map_image(nil); return end
+  map_image(cells as {any}, { location = "top", cols = MINIMAP_COLS, rows = MINIMAP_ROWS } as {string:any})
+end
+
 local record FrontierHit
   id:   integer
   dir:  string
@@ -1042,7 +1131,7 @@ local function nearest_unexplored(): string, integer
   while head <= #queue do
     local n = queue[head]; head = head + 1
     if has_frontier(n.id) then return n.dir, n.dist end
-    for d, nb in pairs(P.rooms[n.id] and P.rooms[n.id].moves or {}) do
+    for _, nb in pairs(P.rooms[n.id] and P.rooms[n.id].moves or {}) do
       if not seen[nb] then seen[nb] = true; queue[#queue + 1] = { id = nb, dir = n.dir, dist = n.dist + 1 } end
     end
   end
@@ -1154,11 +1243,10 @@ end
 -- move (see on_user_input + pilot_room_change). Writes into the _AIP-backed maps, so it survives a hot
 -- pilot.reload(); a full relaunch forgets it (numbers shift with decay/reorder anyway), and the live-list
 -- name match carries goto across relaunches. Also confirms the destination is a waypoint room.
--- NOTE: this LOCAL shadows the `global learn_waypoint` declared near pilot_room_change (see the
--- preserved-quirk note there): from THIS point in the file onward, `learn_waypoint` resolves to this
--- local; pilot_room_change's earlier reference was already bound (at closure-creation time) to the
--- global above, so it can never see this one — exactly the original .lua's lexical-scope quirk.
-local function learn_waypoint(num: integer, id: integer)
+-- NOTE: named `learn_waypoint_impl`, NOT `learn_waypoint`, so it doesn't shadow the `global learn_waypoint`
+-- forward-declared near pilot_room_change (whose earlier reference binds to that global — a distinct symbol).
+-- The test seam below exposes THIS implementation as `.learn_waypoint`.
+local function learn_waypoint_impl(num: integer, id: integer)
   if not num or not id or not P.rooms[id] then return end
   P.wp_room = P.wp_room or {}          -- number -> room id (aliased to _AIP.wp_room)
   P.room_wp = P.room_wp or {}          -- room id -> number
@@ -1856,17 +1944,17 @@ local TOOLS: {ToolSpec} = {
     build = function(a: {string:any}): string return a.method as string end },
   { name = "stand",
     desc = "Stand up after resting/sleeping, once your state shows you are recovered.",
-    props = {}, build = function(a: {string:any}): string return "stand" end },
+    props = {}, build = function(_: {string:any}): string return "stand" end },
   { name = "look",
     desc = "Look at the current room, or at a specific thing.",
     props = { at = { type = "string", description = "optional thing to look at" } },
     build = function(a: {string:any}): string return "look" .. opt(a.at) end },
   { name = "inventory",
     desc = "List what you are carrying.",
-    props = {}, build = function(a: {string:any}): string return "inventory" end },
+    props = {}, build = function(_: {string:any}): string return "inventory" end },
   { name = "flee", ends_turn = true,
     desc = "Flee from combat.",
-    props = {}, build = function(a: {string:any}): string return "flee" end },
+    props = {}, build = function(_: {string:any}): string return "flee" end },
   { name = "command",
     desc = "Run any other game command verbatim (spells, skills, help, train, buy, list, etc.). Use ONLY when no specific tool fits.",
     props = { text = { type = "string", description = "the exact command line to send" } },
@@ -1874,7 +1962,7 @@ local TOOLS: {ToolSpec} = {
     build = function(a: {string:any}): string return a.text as string end },
   { name = "wait",
     desc = "Do nothing this turn (e.g. while recovering). No command is sent.",
-    props = {}, build = function(a: {string:any}): string return nil end },
+    props = {}, build = function(_: {string:any}): string return nil end },
   { name = "remember", note = true,
     desc = "Save a durable fact worth keeping all session (trainer/vendor location, which spell hits hardest, a good xp spot + level, a danger).",
     props = { fact = { type = "string" } }, required = { "fact" } },
@@ -3275,6 +3363,12 @@ function ai_command(args: string)
   elseif verb == "trace" then
     if rest:lower() == "off" then P.trace = false elseif rest:lower() == "on" then P.trace = true end
     echo("[ai] trace: " .. (P.trace and cfg.trace_file or "off"))
+  elseif verb == "minimap" then
+    local m = rest:lower()
+    if m == "on" then P.minimap_on = true; update_minimap()
+    elseif m == "off" then P.minimap_on = false; map_image(nil)
+    else echo("[ai] usage: pilot.minimap('on'|'off'). Current: " .. (P.minimap_on and "on" or "off")); return end
+    echo("[ai] graphical minimap (iTerm2, top panel): " .. (P.minimap_on and "on" or "off"))
   elseif verb == "tools" then
     echo(tools_json())   -- the exact OpenAI tool definitions sent to the model each turn
   elseif verb == "demo" then
@@ -3323,6 +3417,7 @@ local PILOT_CMDS: {string:PilotCmdInfo} = {
   budget     = { sig = "pilot.budget([dollars])", text = "Set a session $ cap that auto-disarms the pilot when crossed (0 = off)." },
   rag        = { sig = "pilot.rag(on_off)",       text = "Toggle RAG manual retrieval ('on'/'off')." },
   trace      = { sig = "pilot.trace(on_off)",     text = "Toggle turn tracing to the trace file ('on'/'off')." },
+  minimap    = { sig = "pilot.minimap(on_off)",   text = "Toggle the GRAPHICAL minimap ('on'/'off'; iTerm2-only, defaults ON under iTerm2). Overlays a rendered room-graph image on the top-right of the group panel (where the text minimap sits) around your current room; the roster and widgets stay. 'off' restores the text minimap." },
   tools      = { sig = "pilot.tools()",           text = "Print the exact tool definitions sent to the model each turn." },
   demo       = { sig = "pilot.demo(command)",     text = "Preview the training example a command maps to." },
   remember   = { sig = "pilot.remember(fact)",    text = "Add a memory the pilot will carry." },
@@ -3331,7 +3426,7 @@ local PILOT_CMDS: {string:PilotCmdInfo} = {
 }
 local pilot_tbl = pilot as {string:any}
 for verb, info in pairs(PILOT_CMDS) do
-  pilot_tbl[verb] = function(arg: any): any return ai_command(trim(verb .. " " .. (arg == nil and "" or tostring(arg)))) end
+  pilot_tbl[verb] = function(a: any): any return ai_command(trim(verb .. " " .. (a == nil and "" or tostring(a)))) end
   doc(pilot_tbl[verb], { name = "pilot." .. verb, sig = info.sig, text = info.text, group = "pilot" })
 end
 pilot_tbl.reload = function(): any return reload() end
@@ -3400,8 +3495,9 @@ _AIP_TEST = {
   find_path_from = find_path_from, has_frontier = has_frontier, coord_key = coord_key, P = P,
   smap_coord_grid = smap_coord_grid, smap_apply = smap_apply, smap_on_map_update = smap_on_map_update,
   SM = SM,
+  minimap_grid = minimap_grid, update_minimap = update_minimap,
   parse_waypoint_list = parse_waypoint_list, recall_failed = recall_failed,
-  learn_waypoint = learn_waypoint, nearest_waypoint_for = nearest_waypoint_for,
+  learn_waypoint = learn_waypoint_impl, nearest_waypoint_for = nearest_waypoint_for,
   waypoint_num_for_room = waypoint_num_for_room, waypoint_cmd_num = waypoint_cmd_num,
   parse_exits = parse_exits, cmd_ends_turn = cmd_ends_turn, untaken_exit = untaken_exit,
   path_to_unexplored = path_to_unexplored, resolve_nav = resolve_nav,

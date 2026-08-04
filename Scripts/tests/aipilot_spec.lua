@@ -55,6 +55,41 @@ test("minimap shows a stub for every exit, even walked ones whose neighbor is of
   P.rooms, P.current_room = saved.rooms, saved.cur
 end)
 
+test("minimap_grid places rooms on an integer grid by BFS over moves, gy growing north", function()
+  local minimap_grid = _AIP_TEST.minimap_grid
+  local rooms = {
+    A = { exits = { north = true, east = true }, moves = { north = "B", east = "C" } },
+    B = { exits = { south = true }, moves = { south = "A" } },
+    C = { exits = { west = true }, moves = { west = "A" }, waypoint = true },
+  }
+  local cells = minimap_grid(rooms, "A", 5)
+  expect(#cells):eq(3)
+  local by_id = {}
+  for _, c in ipairs(cells) do by_id[c.gx .. "," .. c.gy] = c end
+  expect(by_id["0,0"].cur):truthy()          -- A stays at the origin
+  expect(by_id["0,1"]):truthy()              -- B is north -> +y (screen-up)
+  expect(by_id["1,0"]):truthy()              -- C is east -> +x
+  expect(by_id["1,0"].color):eq("yellow")    -- waypoint room tints yellow
+end)
+
+test("minimap_grid keeps the first (closer) room on a grid-cell collision, skips the later one", function()
+  local minimap_grid = _AIP_TEST.minimap_grid
+  -- A -e-> B -n-> D, and A -n-> C -e-> D': both D and D' land on (1,1); D is closer (BFS order), so D'
+  -- is dropped rather than overwriting it.
+  local rooms = {
+    A = { exits = { east = true, north = true }, moves = { east = "B", north = "C" } },
+    B = { exits = { north = true }, moves = { north = "D" } },
+    C = { exits = { east = true }, moves = { east = "Dprime" } },
+    D = { exits = {}, moves = {} },
+    Dprime = { exits = {}, moves = {} },
+  }
+  local cells = minimap_grid(rooms, "A", 5)
+  local ids = {}
+  for _, c in ipairs(cells) do ids[#ids + 1] = c.gx .. "," .. c.gy end
+  table.sort(ids)
+  expect(#cells):eq(4)   -- A, B, C, and whichever of D/Dprime claimed (1,1) first — not both
+end)
+
 test("minimap gathers spatial neighbours by coordinate, not move-graph reachability", function()
   -- Repro of the teleport-onto-isolated-waypoint / zone-renumber bug: the current room has a valid
   -- coord but its `moves` reach NOTHING on this floor (or only a far, off-window node). Several rooms

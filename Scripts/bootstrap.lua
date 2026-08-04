@@ -434,6 +434,14 @@ doc("attention", { sig = "attention(['yes'|'once'|'fireworks'|'no'])", group = "
 doc("set_uservar", { sig = "set_uservar(name, value)", group = "terminal",
   text = "Set an iTerm2 user variable, surfaceable in the native status bar via an Interpolated String component. iTerm2-only.",
   example = 'set_uservar("hp", "84%")' })
+doc("is_iterm", { sig = "is_iterm() -> bool", group = "terminal",
+  text = "True when running under iTerm2 (TERM_PROGRAM / LC_TERMINAL). Gates iTerm2-only features (e.g. the graphical minimap defaults on there)." })
+doc("map_image", { sig = "map_image(rooms[, opts])", group = "terminal",
+  text = "Render the graphical minimap and paint it into a HUD panel as an inline image (iTerm2). rooms = array of { gx, gy, exits={'n','e',…}, cur=bool, color='green' } on an integer grid; opts = { location='top'|'bottom', rows=<cells tall>, cell=<render px> }. Pass nil/empty rooms to clear it back to a text panel. iTerm2-only.",
+  example = "map_image({ {gx=0,gy=0,exits={'e'},cur=true}, {gx=1,gy=0,exits={'w'}} }, {rows=8})" })
+doc("image", { sig = "image(path[, width, height])", group = "terminal",
+  text = "Show an image file FULL-SCREEN (iTerm2 inline-image protocol), dismissed by any keypress — a viewer overlay, since images can't live in the text band. width/height override the size (cell count, \"Npx\", \"N%\", or \"auto\"); width defaults to 100%. iTerm2-only; no-op if the file is unreadable.",
+  example = 'image("~/Documents/MudClient/maps/dream-realm.png")' })
 doc("copy",  { sig = "copy([n])", group = "terminal",
   text = "Copy the last n scrollback lines (ANSI stripped) to the macOS clipboard; n defaults to 20. Echoes a confirmation with the number of lines copied.",
   example = "copy(50)" })
