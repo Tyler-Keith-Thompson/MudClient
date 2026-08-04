@@ -50,16 +50,20 @@ test("minimap_render clears the panel (empty commands) when there are no cells",
   expect(#seen.cmds):eq(0)             -- empty command list → canvas clears back to text
 end)
 
-test("minimap_render dims other-floor (up/down) rooms below full alpha", function()
+test("minimap_render draws a floor-ABOVE room as an outline-only wireframe (no filled tile veiling below)", function()
   local seen = capture()
   minimap_render({
     { gx = 0, gy = 0, z = 0, terrain = 2, exits = { "u" }, cur = true },
     { gx = 0, gy = 0, z = 1, terrain = 1, exits = { "d" }, dim = true },   -- a floor above (ghost)
   }, 26, 9)
-  -- the dim room's tile op carries a < 1
-  local dim_tile = false
+  -- only the current room gets a filled terrain tile; the floor-above room must NOT (else it veils below)
+  local tiles = 0
+  for _, c in ipairs(seen.cmds) do if c.op == "tile" then tiles = tiles + 1 end end
+  expect(tiles):eq(1)
+  -- the ghost is an outline: a poly with a cool line colour and NO fill
+  local wire = false
   for _, c in ipairs(seen.cmds) do
-    if c.op == "tile" and c.a and c.a < 0.5 then dim_tile = true end
+    if c.op == "poly" and not c.fill and c.line and c.line[3] > c.line[1] and c.line[3] > 0.9 then wire = true end
   end
-  expect(dim_tile):truthy()
+  expect(wire):truthy()
 end)

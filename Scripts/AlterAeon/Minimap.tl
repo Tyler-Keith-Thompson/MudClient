@@ -151,6 +151,24 @@ function minimap_render(cells: {any}, cols: integer, rows: integer, depth: integ
     end
   end
 
+  -- a room on a floor ABOVE you: drawn as an OUTLINE-ONLY wireframe cube (cool tint), never a filled tile —
+  -- so it signals "there's a room overhead here" without veiling your own floor's rooms/exits underneath.
+  local function draw_ghost(cell: {string:any})
+    local x, y = cx(cell), cy(cell)
+    local swx, swy = x - hexx - hnyx, y - hexy - hnyy
+    local sex, sey = x + hexx - hnyx, y + hexy - hnyy
+    local nex, ney = x + hexx + hnyx, y + hexy + hnyy
+    local nwx, nwy = x - hexx + hnyx, y - hexy + hnyy
+    local dn = ch
+    local wire = {0.62,0.80,1.0,0.7}   -- cool, translucent
+    push({ op="poly", pts={ swx,swy, sex,sey, nex,ney, nwx,nwy }, line=wire, w=math.max(1,1.2*s) })  -- top rim
+    -- the two front vertical edges + their bottom, so it still reads as a raised cube (silhouette only)
+    push({ op="path", pts={ swx,swy-dn, swx,swy }, line=wire, w=math.max(1,1.2*s) })
+    push({ op="path", pts={ sex,sey-dn, sex,sey }, line=wire, w=math.max(1,1.2*s) })
+    push({ op="path", pts={ nex,ney-dn, nex,ney }, line=wire, w=math.max(1,1.2*s) })
+    push({ op="path", pts={ swx,swy-dn, sex,sey-dn, nex,ney-dn }, line={wire[1],wire[2],wire[3],0.45}, w=math.max(1,1*s) })
+  end
+
   -- back-to-front within a group: far (large gx+gy) first, then lower z first
   local function ordered(list: {any}): {any}
     table.sort(list, function(a: any, b: any): boolean
@@ -217,7 +235,7 @@ function minimap_render(cells: {any}, cols: integer, rows: integer, depth: integ
     end
   end
 
-  for _, c in ipairs(ordered(above)) do draw_room(c as {string:any}, 0.26) end
+  for _, c in ipairs(ordered(above)) do draw_ghost(c as {string:any}) end
 
   -- corner compass: an arrow toward screen-north (the +north basis vector) with an "N" glyph
   do

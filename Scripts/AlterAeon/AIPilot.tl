@@ -1059,6 +1059,25 @@ end
 -- globals touched, so it's directly unit-testable.
 local function minimap_grid(rooms: {integer:Room}, start: integer, depth: integer): {MinimapCell}
   if not start or not rooms[start] then return {} end
+  -- UNDIRECTED adjacency (with placement deltas). A room the current one hasn't linked outgoing yet — e.g.
+  -- right after a move, before its exits/reverse edge are parsed — is still reachable via the rooms that
+  -- point AT it. Without this the map collapses to a single tile on arrival until you `look`. Placement is
+  -- geometric (reverse of a north edge = south), which is always valid for DISPLAY even for asymmetric exits.
+  local adj: {integer:{{integer}}} = {}          -- adj[id] = list of {nb, dx, dy, dfloor}
+  local function link(a: integer, b: integer, dx: integer, dy: integer, df: integer)
+    adj[a] = adj[a] or {}; adj[a][#adj[a] + 1] = { b, dx, dy, df }
+  end
+  for rid, r in pairs(rooms) do
+    for dir, nb in pairs(r.moves or {}) do
+      if rooms[nb] then
+        local v = GRID_DELTA[dir]
+        if v then link(rid, nb, v[1], v[2], 0); link(nb, rid, -v[1], -v[2], 0)
+        elseif dir == "up" then link(rid, nb, 0, 0, 1); link(nb, rid, 0, 0, -1)
+        elseif dir == "down" then link(rid, nb, 0, 0, -1); link(nb, rid, 0, 0, 1)
+        end
+      end
+    end
+  end
   local pos: {integer:{integer}} = { [start] = { 0, 0, 0 } }   -- {gx, gy, floor}
   local occ: {string:boolean} = { ["0,0,0"] = true }
   local order: {integer} = { start }
@@ -1069,16 +1088,11 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
     local id = queue[head]; head = head + 1
     local d0 = dist[id]
     if d0 < depth then
-      local r = rooms[id]
       local g = pos[id]
-      for dir, nb in pairs(r.moves or {}) do
-        local v = GRID_DELTA[dir]
-        local gx, gy, fl: integer, integer, integer
-        if v then gx, gy, fl = g[1] + v[1], g[2] + v[2], g[3]                 -- cardinal: shift, same floor
-        elseif dir == "up" then gx, gy, fl = g[1], g[2], g[3] + 1            -- up/down: stay put, change floor
-        elseif dir == "down" then gx, gy, fl = g[1], g[2], g[3] - 1
-        end
-        if gx and not pos[nb] and rooms[nb] then
+      for _, e in ipairs(adj[id] or {}) do
+        local nb = e[1]
+        if not pos[nb] then
+          local gx, gy, fl = g[1] + e[2], g[2] + e[3], g[3] + e[4]
           local key = gx .. "," .. gy .. "," .. fl
           if not occ[key] then
             occ[key] = true; pos[nb] = { gx, gy, fl }; dist[nb] = d0 + 1

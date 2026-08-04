@@ -152,6 +152,24 @@ line = { TOP_STROKE[1], TOP_STROKE[2], TOP_STROKE[3], TOP_STROKE[4] * a }, w = m
    end
 
 
+
+   local function draw_ghost(cell)
+      local x, y = cx(cell), cy(cell)
+      local swx, swy = x - hexx - hnyx, y - hexy - hnyy
+      local sex, sey = x + hexx - hnyx, y + hexy - hnyy
+      local nex, ney = x + hexx + hnyx, y + hexy + hnyy
+      local nwx, nwy = x - hexx + hnyx, y - hexy + hnyy
+      local dn = ch
+      local wire = { 0.62, 0.80, 1.0, 0.7 }
+      push({ op = "poly", pts = { swx, swy, sex, sey, nex, ney, nwx, nwy }, line = wire, w = math.max(1, 1.2 * s) })
+
+      push({ op = "path", pts = { swx, swy - dn, swx, swy }, line = wire, w = math.max(1, 1.2 * s) })
+      push({ op = "path", pts = { sex, sey - dn, sex, sey }, line = wire, w = math.max(1, 1.2 * s) })
+      push({ op = "path", pts = { nex, ney - dn, nex, ney }, line = wire, w = math.max(1, 1.2 * s) })
+      push({ op = "path", pts = { swx, swy - dn, sex, sey - dn, nex, ney - dn }, line = { wire[1], wire[2], wire[3], 0.45 }, w = math.max(1, 1 * s) })
+   end
+
+
    local function ordered(list)
       table.sort(list, function(a, b)
          local ca, cb = a, b
@@ -217,7 +235,7 @@ line = { TOP_STROKE[1], TOP_STROKE[2], TOP_STROKE[3], TOP_STROKE[4] * a }, w = m
       end
    end
 
-   for _, c in ipairs(ordered(above)) do draw_room(c, 0.26) end
+   for _, c in ipairs(ordered(above)) do draw_ghost(c) end
 
 
    do

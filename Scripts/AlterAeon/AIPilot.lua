@@ -1059,6 +1059,25 @@ local GRID_ABBR = {
 
 local function minimap_grid(rooms, start, depth)
    if not start or not rooms[start] then return {} end
+
+
+
+
+   local adj = {}
+   local function link(a, b, dx, dy, df)
+      adj[a] = adj[a] or {}; adj[a][#adj[a] + 1] = { b, dx, dy, df }
+   end
+   for rid, r in pairs(rooms) do
+      for dir, nb in pairs(r.moves or {}) do
+         if rooms[nb] then
+            local v = GRID_DELTA[dir]
+            if v then link(rid, nb, v[1], v[2], 0); link(nb, rid, -v[1], -v[2], 0)
+            elseif dir == "up" then link(rid, nb, 0, 0, 1); link(nb, rid, 0, 0, -1)
+            elseif dir == "down" then link(rid, nb, 0, 0, -1); link(nb, rid, 0, 0, 1)
+            end
+         end
+      end
+   end
    local pos = { [start] = { 0, 0, 0 } }
    local occ = { ["0,0,0"] = true }
    local order = { start }
@@ -1069,16 +1088,11 @@ local function minimap_grid(rooms, start, depth)
       local id = queue[head]; head = head + 1
       local d0 = dist[id]
       if d0 < depth then
-         local r = rooms[id]
          local g = pos[id]
-         for dir, nb in pairs(r.moves or {}) do
-            local v = GRID_DELTA[dir]
-            local gx, gy, fl
-            if v then gx, gy, fl = g[1] + v[1], g[2] + v[2], g[3]
-            elseif dir == "up" then gx, gy, fl = g[1], g[2], g[3] + 1
-            elseif dir == "down" then gx, gy, fl = g[1], g[2], g[3] - 1
-            end
-            if gx and not pos[nb] and rooms[nb] then
+         for _, e in ipairs(adj[id] or {}) do
+            local nb = e[1]
+            if not pos[nb] then
+               local gx, gy, fl = g[1] + e[2], g[2] + e[3], g[3] + e[4]
                local key = gx .. "," .. gy .. "," .. fl
                if not occ[key] then
                   occ[key] = true; pos[nb] = { gx, gy, fl }; dist[nb] = d0 + 1

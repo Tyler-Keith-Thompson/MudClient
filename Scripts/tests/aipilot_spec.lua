@@ -96,6 +96,24 @@ test("minimap_grid carries terrain, relative elevation, and up/down exits for th
   expect(by["0,0,0"].dim):falsy()
 end)
 
+test("minimap_grid is UNDIRECTED: a just-arrived room with no outgoing moves still shows its neighbourhood", function()
+  local minimap_grid = _AIP_TEST.minimap_grid
+  -- A is the current room, freshly entered: its reverse edge isn't parsed yet, so moves = {}. But B points
+  -- at A (B -e-> A) and C -e-> B. The map must still place B and C (via incoming edges), not collapse to A.
+  local rooms = {
+    A = { exits = {}, moves = {} },
+    B = { exits = { east = true }, moves = { east = "A" } },
+    C = { exits = { east = true }, moves = { east = "B" } },
+  }
+  local cells = minimap_grid(rooms, "A", 5)
+  expect(#cells):eq(3)                     -- A + B + C, not just A
+  local by = {}
+  for _, c in ipairs(cells) do by[c.gx .. "," .. c.gy] = c end
+  expect(by["0,0"].cur):truthy()           -- A at origin
+  expect(by["-1,0"]):truthy()              -- B is WEST of A (A is east of B ⇒ B west of A)
+  expect(by["-2,0"]):truthy()              -- C west of B
+end)
+
 test("minimap_grid places other floors (up/down) at the same cell, dimmed, and stacks them by floor", function()
   local minimap_grid = _AIP_TEST.minimap_grid
   -- A tower: current A, up to B (floor +1), up again to C (floor +2); D is cardinally east of A (same floor).
