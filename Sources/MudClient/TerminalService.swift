@@ -134,6 +134,7 @@ final class TerminalService {
     /// Pushed once at first setup so Shift+Enter is reported distinctly (`ESC[13;2u`) rather than as a
     /// bare `\n`; popped (`ESC[<u`) on teardown. Guarded so a resize re-setup doesn't stack pushes.
     private var kittyPushed = false
+    private var atexitArmed = false   // one-time guard for the alt-buffer restore hook (see setup())
 
     // MARK: - Scrollback state
     //
@@ -410,13 +411,32 @@ final class TerminalService {
     }
     
     func setup() {
-        // Take firm control of a clean, full screen from a known state before we start managing bands:
+        // Belt-and-suspenders: restore the terminal on ANY exit() — even paths that never route through
+        // teardownScreen() — so we can never strand the user in a blank alternate-screen buffer. Registered
+        // once; runs at process exit. (The LagMonitor watchdog uses _exit and deliberately skips atexit,
+        // since a hung stdout could block this write — a watchdog-kill of a frozen app may leave the alt
+        // buffer, same as SIGKILL'ing vim; recover with `reset`.)
+        if !atexitArmed {
+            atexitArmed = true
+            atexit {
+                // leave alt buffer, reset scroll region, show cursor, disable mouse/paste/kitty — raw, since
+                // Swift state may be torn down by now. ESC[<u popping an unpushed kitty level is a safe no-op.
+                let restore = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\u{1B}[?1049l"
+                _ = restore.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
+            }
+        }
+        // Enter the ALTERNATE screen buffer FIRST (ESC[?1049h). We're a full-screen TUI (frozen HUD bands +
+        // our own scrollback), so like vim/htop/less we run off the terminal's main buffer. This restores the
+        // user's pre-launch screen + shell scrollback verbatim on exit, keeps our output out of the terminal's
+        // scrollback and iTerm2's shell-integration marks/timeline (our scroll-region repaints were disturbing
+        // them), and means the ESC[2J below clears the ALT buffer — never the user's real screen.
+        // Then take firm control of a clean, full screen from a known state before we start managing bands:
         //   ESC[?6l  origin mode OFF, so absolute cursor moves address the whole screen rather than
         //            being confined to an inherited scroll region (that offset was leaving the shell
         //            prompt visible up top and lopping a row off our panel);
         //   ESC[r    drop any inherited scroll region;
-        //   ESC[2J   clear leftover shell-prompt / build clutter so none lingers in a frozen band.
-        writeToStandardOut(data: Data("\u{1B}[?6l\u{1B}[r\u{1B}[2J".utf8))
+        //   ESC[2J   clear leftover clutter so none lingers in a frozen band (in the alt buffer now).
+        writeToStandardOut(data: Data("\u{1B}[?1049h\u{1B}[?6l\u{1B}[r\u{1B}[2J".utf8))
         // Enable SGR mouse reporting so the wheel drives our in-app scrollback instead of the
         // terminal's native scrollback (which would drag the frozen panels up/down):
         //   ESC[?1000h  report button press/release (wheel notches arrive as buttons 64/65);
@@ -729,15 +749,15 @@ final class TerminalService {
         engine.notifyResize(cols: getTerminalWidth() ?? 80, rows: getTerminalHeight() ?? 24)
     }
 
-    /// Reset the scroll region and drop to the bottom of the screen so we don't leave the terminal in
-    /// a weird state on exit.
+    /// Restore the terminal to the state we found it in on exit: undo our modes, reset the scroll region,
+    /// and LEAVE the alternate screen buffer so the user's pre-launch screen + shell scrollback come back.
     func teardownScreen() {
         var out = "\u{1B}[?1000l\u{1B}[?1006l"              // disable mouse reporting (restore native wheel/selection)
         out += "\u{1B}[?2004l"                              // disable bracketed paste
         if kittyPushed { out += "\u{1B}[<u"; kittyPushed = false }   // pop kitty keyboard protocol flag
         out += "\u{1B}[r"                                   // reset scroll region to the full screen
         out += "\u{1B}[?25h"                                // make sure the cursor is visible again
-        out += "\u{1B}[\(getTerminalHeight() ?? 24);1H"
+        out += "\u{1B}[?1049l"                              // leave the alt buffer → the user's real screen returns
         writeToStandardOut(data: Data(out.utf8))
     }
     
