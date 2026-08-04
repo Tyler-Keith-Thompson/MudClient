@@ -225,6 +225,8 @@ global every: function(number, function(): any...): integer
 
 -- ---- I/O / terminal ----
 global bell:            function()
+global title:           function(string)                     -- set the terminal tab/window title (OSC 0)
+global hyperlink:       function(string, ? string): string   -- wrap text as an OSC 8 clickable link → string
 global copy:            function(? integer)
 global spellcheck:      function(string): string
 global input_get:       function(): string

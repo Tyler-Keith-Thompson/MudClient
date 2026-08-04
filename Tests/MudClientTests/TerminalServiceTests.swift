@@ -169,16 +169,26 @@ private typealias E = TerminalService.InputEvent
 
 @Test func tokenizeUnknownEscapeSequencesAreDroppedWhole() {
   try withTestContainer {
-    // A focus event (ESC[I) — none of the line-editor keys, and the OLD code printed a parse error for
-    // it. It must vanish entirely: no events, no leftover, no text.
-    let focusIn = TerminalService.tokenize("\u{1B}[I")
-    #expect(focusIn.events.isEmpty)
-    #expect(focusIn.remaining == "")
-    // Dropped whole even when wedged between real input, without shredding into stray characters:
-    // the focus-event CSI has its own final byte ('I'), so the following 'b' survives as text.
-    #expect(TerminalService.tokenize("a\u{1B}[Ib").events == [E.text("a"), E.text("b")])
-    // A truly foreign CSI (device-attribute-style) is consumed silently, leaving no residue.
-    #expect(TerminalService.tokenize("\u{1B}[>1;2c").events.isEmpty)
+    // A truly foreign CSI (device-attribute-style, final 'c') — none of the line-editor keys, and the OLD
+    // code printed a parse error for it. It must vanish entirely: no events, no leftover, no text.
+    let unknown = TerminalService.tokenize("\u{1B}[>1;2c")
+    #expect(unknown.events.isEmpty)
+    #expect(unknown.remaining == "")
+    // Dropped whole even when wedged between real input, without shredding into stray characters: the CSI
+    // has its own final byte ('c'), so the following 'b' survives as text.
+    #expect(TerminalService.tokenize("a\u{1B}[>1;2cb").events == [E.text("a"), E.text("b")])
+  }
+}
+
+@Test func tokenizeFocusReportsBecomeFocusEvents() {
+  try withTestContainer {
+    // DECSET 1004 focus reports: bare CSI I (gained) / CSI O (lost) → InputEvent.focus, not dropped.
+    #expect(TerminalService.tokenize("\u{1B}[I").events == [E.focus(true)])
+    #expect(TerminalService.tokenize("\u{1B}[O").events == [E.focus(false)])
+    // Their own final byte means surrounding real input is untouched.
+    #expect(TerminalService.tokenize("a\u{1B}[Ib").events == [E.text("a"), E.focus(true), E.text("b")])
+    // ESC O <final> is SS3 (a key), NOT a focus report — only the CSI form (ESC [ O) is focus-lost.
+    #expect(TerminalService.tokenize("\u{1B}[O").events == [E.focus(false)])
   }
 }
 

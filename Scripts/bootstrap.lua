@@ -1120,6 +1120,7 @@ doc("on_telnet", { sig = "on_telnet(option, payload)", group = "hooks", text = "
 doc("on_telnet_negotiate", { sig = "on_telnet_negotiate(verb, option)", group = "hooks", text = "hooks: define a global with this name. Consulted for a WILL/WONT/DO/DONT option; return \"accept\" or \"reject\" to decide the reply." })
 doc("on_send", { sig = "on_send(cmd)", group = "hooks", text = "hooks: define a global with this name. Filter an outbound command: return nil (unchanged), false (suppress), or a string (replace). send() inside is transmitted directly." })
 doc("on_resize", { sig = "on_resize(cols, rows)", group = "hooks", text = "hooks: define a global with this name. Fired after the terminal is resized." })
+doc("on_focus", { sig = "on_focus(focused)", group = "hooks", text = "hooks: define a global with this name. Fired when the terminal window gains (true) or loses (false) focus — e.g. mute sound / pause chatter when away, or flag combat that happened while AFK." })
 doc("on_mouse", { sig = "on_mouse(event, x, y, button)", group = "hooks", text = "hooks: define a global with this name. Return truthy to consume a mouse event." })
 doc("on_user_input", { sig = "on_user_input(cmd)", group = "hooks", text = "hooks: define a global with this name. Observe a typed command (non-swallowing)." })
 doc("on_update", { sig = "on_update()", group = "hooks", text = "hooks: define a global with this name. Fired after a batch of server output so the script can refresh panels." })

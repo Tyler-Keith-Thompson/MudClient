@@ -54,7 +54,7 @@ final class TerminalService {
         }
         tcflow(STDOUT_FILENO, TCOON)   // undo a possible XOFF that flow-stopped output
 
-        let reset = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\u{1B}[?1049l\r\n"
+        let reset = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[?1004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\u{1B}[?1049l\r\n"
         let bytes = Array(reset.utf8)
         // Best-effort, non-blocking: if the tty output is genuinely stuck this write is dropped (EAGAIN)
         // rather than blocking the watchdog on the way to exit. Cooked mode above is what actually makes
@@ -112,6 +112,7 @@ final class TerminalService {
         case cursorStart       // ctrl-A
         case cursorEnd         // ctrl-E
         case interrupt         // ctrl-C — normally a SIGINT, but the kitty protocol reports it as a key
+        case focus(Bool)       // DECSET 1004 focus report: ESC[I (gained) / ESC[O (lost)
     }
 
     /// How far a marker (bracketed-paste start/end) matches at a position.
@@ -249,6 +250,8 @@ final class TerminalService {
             // ctrl-C: with the kitty keyboard protocol active the terminal delivers this as a key instead
             // of raising SIGINT, so drive the same clear-then-quit path the SIGINT handler uses.
             handleSigInt()
+        case .focus(let focused):
+            engine.notifyFocus(focused)   // → the optional Lua on_focus(focused) hook
         case .key(let name):
             if engine.handleKey(name) { return }         // a bound macro consumed the key
             switch name {
@@ -325,7 +328,12 @@ final class TerminalService {
                 Prefix { $0.asciiValue.map { (0x20...0x2F).contains($0) } ?? false }   // intermediate bytes
                 First()                                                                // final byte
             }.map { (params: Substring, inter: Substring, final: Character) -> InputEvent? in
-                Self.decodeKey("\u{1B}[" + params + inter + String(final)).map { Self.event(forKey: $0.name) }
+                // DECSET 1004 focus reports arrive as a bare CSI I / CSI O (no params/intermediates).
+                if params.isEmpty, inter.isEmpty {
+                    if final == "I" { return InputEvent.focus(true) }    // window gained focus
+                    if final == "O" { return InputEvent.focus(false) }   // window lost focus
+                }
+                return Self.decodeKey("\u{1B}[" + params + inter + String(final)).map { Self.event(forKey: $0.name) }
             }
             Parse {                                   // SS3: ESC O <final>
                 "\u{1B}O"
@@ -435,7 +443,7 @@ final class TerminalService {
             atexit {
                 // leave alt buffer, reset scroll region, show cursor, disable mouse/paste/kitty — raw, since
                 // Swift state may be torn down by now. ESC[<u popping an unpushed kitty level is a safe no-op.
-                let restore = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\u{1B}[?1049l"
+                let restore = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[?1004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\u{1B}[?1049l"
                 _ = restore.withCString { write(STDOUT_FILENO, $0, strlen($0)) }
             }
         }
@@ -462,6 +470,10 @@ final class TerminalService {
         // so we can insert it as literal, editable characters instead of having every pasted line
         // interpreted as typed keystrokes (and multi-line pastes fire off as commands). See extractPaste.
         writeToStandardOut(data: Data("\u{1B}[?2004h".utf8))
+        // Enable FOCUS REPORTING (ESC[?1004h): the terminal now sends ESC[I on focus-in / ESC[O on focus-out
+        // as input, decoded to InputEvent.focus and dispatched to the optional Lua `on_focus(focused)` hook
+        // (mute sound / pause when away, flag AFK combat). Terminals that ignore it simply send nothing.
+        writeToStandardOut(data: Data("\u{1B}[?1004h".utf8))
         // Push the kitty keyboard protocol's "disambiguate escape codes" flag so Shift+Enter arrives as a
         // distinct CSI-u sequence (ESC[13;2u) instead of a bare newline. Modified/special keys (ctrl-A/E,
         // backspace, …) now also arrive as CSI-u; `decodeCSI`/`event(forKey:)` fold them back to their
@@ -772,6 +784,7 @@ final class TerminalService {
     func teardownScreen() {
         var out = "\u{1B}[?1000l\u{1B}[?1006l"              // disable mouse reporting (restore native wheel/selection)
         out += "\u{1B}[?2004l"                              // disable bracketed paste
+        out += "\u{1B}[?1004l"                              // disable focus reporting
         if kittyPushed { out += "\u{1B}[<u"; kittyPushed = false }   // pop kitty keyboard protocol flag
         out += "\u{1B}[r"                                   // reset scroll region to the full screen
         out += "\u{1B}[?25h"                                // make sure the cursor is visible again

@@ -49,12 +49,26 @@ end
 local update_top: function()
 local update_bottom: function()
 
--- ══ WHAT HUD DOES: on each server batch, render the panels ══
+-- Keep the terminal tab/window title in sync with the character: "name — area — HP%". Deduped so the OSC
+-- only goes out when the string actually changes (on_update fires every server batch). `title` is a host
+-- builtin; guarded so the HUD still loads if it's ever absent.
+local last_title: string = nil
+local function update_title()
+  if not title then return end
+  local t = (state.name as string) or "?"
+  if state.area then t = t .. " — " .. (state.area as string) end
+  local hp, mhp = state.hp as number, state.maxhp as number
+  if hp and mhp and mhp > 0 then t = t .. " — " .. tostring(math.floor(hp / mhp * 100 + 0.5)) .. "%" end
+  if t ~= last_title then last_title = t; title(t) end
+end
+
+-- ══ WHAT HUD DOES: on each server batch, render the panels + sync the terminal title ══
 -- Called by the host once per server batch, after triggers have refreshed `state`.
 function on_update()
   if not state or not state.hp then return end   -- nothing worth showing until the first prompt
   update_top()
   update_bottom()
+  update_title()
 end
 -- ═══════════════════════════════════════════════════════════
 

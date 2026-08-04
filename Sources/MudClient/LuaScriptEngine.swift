@@ -331,6 +331,13 @@ final class LuaScriptEngine: @unchecked Sendable {
         try? lua.callGlobal("on_resize", [.int(Int64(cols)), .int(Int64(rows))])
     }
 
+    /// The terminal window gained (true) or lost (false) focus — DECSET 1004. No-op unless the script
+    /// defines a global `on_focus(focused)` (e.g. mute sound / pause chatter when away, flag AFK combat).
+    func notifyFocus(_ focused: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        try? lua.callGlobal("on_focus", [.bool(focused)])
+    }
+
     /// Offer a mouse event to the script's optional global `on_mouse(event, x, y, button)`. Returns
     /// true iff the handler returned a truthy value (i.e. it consumed the event). No handler → false,
     /// so the host falls through to its default behaviour.

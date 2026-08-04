@@ -51,10 +51,24 @@ local update_bottom
 
 
 
+
+local last_title = nil
+local function update_title()
+   if not title then return end
+   local t = (state.name) or "?"
+   if state.area then t = t .. " — " .. (state.area) end
+   local hp, mhp = state.hp, state.maxhp
+   if hp and mhp and mhp > 0 then t = t .. " — " .. tostring(math.floor(hp / mhp * 100 + 0.5)) .. "%" end
+   if t ~= last_title then last_title = t; title(t) end
+end
+
+
+
 function on_update()
    if not state or not state.hp then return end
    update_top()
    update_bottom()
+   update_title()
 end
 
 
