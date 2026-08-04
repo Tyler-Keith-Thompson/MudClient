@@ -54,7 +54,7 @@ final class TerminalService {
         }
         tcflow(STDOUT_FILENO, TCOON)   // undo a possible XOFF that flow-stopped output
 
-        let reset = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\r\n"
+        let reset = "\u{1B}[?1000l\u{1B}[?1006l\u{1B}[?2004l\u{1B}[<u\u{1B}[r\u{1B}[?25h\u{1B}[?1049l\r\n"
         let bytes = Array(reset.utf8)
         // Best-effort, non-blocking: if the tty output is genuinely stuck this write is dropped (EAGAIN)
         // rather than blocking the watchdog on the way to exit. Cooked mode above is what actually makes
@@ -63,6 +63,20 @@ final class TerminalService {
         if flags != -1 { _ = fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK) }
         bytes.withUnsafeBytes { _ = write(STDOUT_FILENO, $0.baseAddress, $0.count) }
         if flags != -1 { _ = fcntl(STDOUT_FILENO, F_SETFL, flags) }
+    }
+
+    /// Put the tty back into the cooked mode the shell expects (used by the suspend/terminate handlers so
+    /// the shell prompt is usable). Prefers the exact saved attrs; falls back to re-enabling what raw mode
+    /// cleared (incl. ISIG, so Ctrl-C works at the shell again).
+    static func restoreCookedMode() {
+        originalTermiosLock.lock(); let saved = originalTermios; originalTermiosLock.unlock()
+        if var t = saved {
+            tcsetattr(STDIN_FILENO, TCSANOW, &t)
+        } else {
+            var t = termios(); tcgetattr(STDIN_FILENO, &t)
+            t.c_lflag |= tcflag_t(ECHO | ICANON | IEXTEN | ISIG)
+            tcsetattr(STDIN_FILENO, TCSANOW, &t)
+        }
     }
     
     // MARK: - Input decoding model
@@ -759,6 +773,29 @@ final class TerminalService {
         out += "\u{1B}[?25h"                                // make sure the cursor is visible again
         out += "\u{1B}[?1049l"                              // leave the alt buffer → the user's real screen returns
         writeToStandardOut(data: Data(out.utf8))
+    }
+
+    /// Ctrl-Z / SIGTSTP: restore the terminal (leave the alt buffer + cooked mode) so the shell is usable
+    /// while we're stopped, then actually stop; on resume, re-enter raw mode + the alt buffer and repaint.
+    /// Without this, suspending a full-screen (alt-buffer) app leaves the shell staring at our frozen
+    /// screen. Runs on the main queue via a DispatchSource, so raise(SIGSTOP) stops the whole process HERE
+    /// and returns when `fg` (SIGCONT) resumes us — no separate SIGCONT handler needed.
+    func handleSuspend() {
+        teardownScreen()                              // leave alt buffer; reset region/cursor/mouse/paste/kitty
+        TerminalService.restoreCookedMode()           // cooked mode so the shell prompt works while we're stopped
+        raise(SIGSTOP)                                // stop here; blocks until continued (fg / SIGCONT)
+        // ── resumed ──
+        TerminalService.setRawTerminal()              // raw mode back
+        setup()                                       // re-enter alt buffer + modes + full repaint (band, panels, input)
+    }
+
+    /// SIGTERM / SIGHUP (`kill`, terminal window closed): restore the terminal, then exit cleanly. exit()
+    /// also runs the atexit restore belt; default SIGTERM would terminate WITHOUT ever leaving the alt
+    /// buffer, stranding the shell on a blank screen.
+    func handleTerminate() {
+        teardownScreen()
+        TerminalService.restoreCookedMode()
+        exit(0)
     }
     
     private func getTerminalHeight() -> Int? {

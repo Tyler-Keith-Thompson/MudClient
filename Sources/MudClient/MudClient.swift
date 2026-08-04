@@ -29,6 +29,25 @@ struct Connect: ParsableCommand {
         sigWinchSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleResize)
         sigWinchSource.resume()
 
+        // Ctrl-Z (SIGTSTP): a full-screen (alt-buffer) app MUST restore the terminal before it stops and
+        // re-enter on resume, or the shell is left staring at our frozen screen. Ignore the default (stop)
+        // so our handler runs instead — it cleans up, then raises SIGSTOP itself and re-inits on resume.
+        signal(SIGTSTP, SIG_IGN)
+        let sigTstpSource = DispatchSource.makeSignalSource(signal: SIGTSTP, queue: .main)
+        sigTstpSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleSuspend)
+        sigTstpSource.resume()
+
+        // SIGTERM / SIGHUP (`kill`, terminal window closed): restore the terminal and exit, instead of the
+        // default terminate that would strand the shell in our alt buffer.
+        signal(SIGTERM, SIG_IGN)
+        let sigTermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        sigTermSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleTerminate)
+        sigTermSource.resume()
+        signal(SIGHUP, SIG_IGN)
+        let sigHupSource = DispatchSource.makeSignalSource(signal: SIGHUP, queue: .main)
+        sigHupSource.setEventHandler(qos: .default, flags: [], handler: Container.terminalService().handleTerminate)
+        sigHupSource.resume()
+
         Container.terminalService().setup()
 
         // Start the main-queue heartbeat that detects UI hitches (see LagMonitor). Must run on `.main`,
