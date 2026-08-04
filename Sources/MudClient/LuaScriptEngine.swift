@@ -17,8 +17,8 @@ import AppKit
 #endif
 
 final class LuaScriptEngine: @unchecked Sendable {
-    /// Shared terrain-tile cache for the graphical iso minimap (`map_image` → `IsoMapRenderer`). Lazily
-    /// loads `Assets/terrain/NN_name.png`; safe to keep process-wide (one tileset, immutable on disk).
+    /// Shared terrain-tile cache for the graphical minimap (the `canvas` builtin's `tile` op; geometry lives
+    /// in Lua/Minimap.tl). Lazily loads `Assets/terrain/NN_name.png`; safe process-wide (one immutable set).
     static let terrainTiles = TerrainTiles()
 
     /// A registered line-trigger, alias, or gag. A reference type so `rule_enable`/`class_enable`
@@ -1293,54 +1293,76 @@ final class LuaScriptEngine: @unchecked Sendable {
             Container.terminalService().setUserVar(name, value)
             return []
         }
-        // map_image(rooms[, opts]): render the graphical minimap and paint it into a HUD panel as an image.
-        // rooms = array of { gx, gy, exits={"n","e",…}, cur=bool, color="green" }. opts = { location="top"|
-        // "bottom", rows=<cells>, cell=<render px> }. No rooms (nil/empty) clears the panel image → text.
-        lua.register("map_image") { args in
+        // canvas(commands[, opts]): a GENERIC 2-D painter. All the minimap projection/geometry lives in Lua
+        // (Scripts/AlterAeon/Minimap.tl) and reaches here as a flat draw-command list; this just paints it to
+        // a PNG and overlays it on a HUD panel. Coordinates are y-UP (origin bottom-left, matching the map's
+        // north-up convention). commands = array of tables, each:
+        //   { op="poly", pts={x1,y1,…}, fill={r,g,b,a?}, line={r,g,b,a?}, w=<px> }   -- closed polygon
+        //   { op="path", pts={x1,y1,…}, line={r,g,b,a?}, w=<px> }                    -- open polyline
+        //   { op="tile", code=<0-39>, pts={x1,y1,…x4,y4 = SW,SE,NE,NW}, fill={…}, a=<alpha> } -- texture on a quad
+        // opts = { w, h, location="top"|"bottom", cols, rows }. Empty commands / no size → clears to text.
+        lua.register("canvas") { args in
             func num(_ v: LuaValue?) -> Int? {
-                switch v {
-                case .int(let n): return Int(n); case .number(let d): return Int(d)
-                case .string(let s): return Int(s); default: return nil
-                }
+                switch v { case .int(let n): return Int(n); case .number(let d): return Int(d)
+                case .string(let s): return Int(s); default: return nil }
+            }
+            func dbl(_ v: LuaValue?) -> CGFloat? {
+                switch v { case .int(let n): return CGFloat(n); case .number(let d): return CGFloat(d); default: return nil }
             }
             var optDict: [String: LuaValue] = [:]
             if args.count > 1, case .table(_, let d) = args[1] { optDict = d }
             let location: String = { if case .string(let s)? = optDict["location"] { return s } else { return "top" } }()
             let host = (location == "bottom") ? Container.panelHost() : Container.topPanelHost()
+            let cols = num(optDict["cols"]) ?? 26, rowsN = num(optDict["rows"]) ?? 9
+            let w = num(optDict["w"]) ?? 0, h = num(optDict["h"]) ?? 0
+            func clear() { host.setImage(nil); Container.terminalService().refreshFurniture() }
+            guard case .table(let cmds, _)? = args.first, !cmds.isEmpty, w > 0, h > 0,
+                  let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { clear(); return [] }
+            ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.interpolationQuality = .high; ctx.setLineJoin(.round); ctx.setLineCap(.round)
 
-            let cols = num(optDict["cols"]) ?? 26                    // top-right rectangle the map overlays
-            let rowsN = num(optDict["rows"]) ?? 9
-            guard case .table(let roomVals, _)? = args.first, !roomVals.isEmpty else {
-                host.setImage(nil)                                   // clear → restore the panel text
-                Container.terminalService().refreshFurniture()
-                return []
+            func rgba(_ v: LuaValue?) -> (CGFloat, CGFloat, CGFloat, CGFloat)? {
+                guard case .table(let a, _)? = v, a.count >= 3 else { return nil }
+                return (dbl(a[0]) ?? 0, dbl(a[1]) ?? 0, dbl(a[2]) ?? 0, a.count >= 4 ? (dbl(a[3]) ?? 1) : 1)
             }
-            var rooms: [IsoMapRenderer.Room] = []
-            for rv in roomVals {
-                guard case .table(_, let f) = rv else { continue }
-                var exits: Set<String> = []
-                if case .table(let ex, _)? = f["exits"] {
-                    for e in ex { if case .string(let s) = e { exits.insert(s) } }
+            func pts(_ v: LuaValue?) -> [CGPoint] {
+                guard case .table(let a, _)? = v else { return [] }
+                var out: [CGPoint] = []; var i = 0
+                while i + 1 < a.count { out.append(CGPoint(x: dbl(a[i]) ?? 0, y: dbl(a[i + 1]) ?? 0)); i += 2 }
+                return out
+            }
+            func makePath(_ p: [CGPoint], closed: Bool) -> CGPath? {
+                guard p.count >= 2 else { return nil }
+                let path = CGMutablePath(); path.move(to: p[0])
+                for q in p.dropFirst() { path.addLine(to: q) }
+                if closed { path.closeSubpath() }
+                return path
+            }
+            for cmd in cmds {
+                guard case .table(_, let f) = cmd, case .string(let op)? = f["op"] else { continue }
+                switch op {
+                case "poly", "path":
+                    guard let path = makePath(pts(f["pts"]), closed: op == "poly") else { continue }
+                    if let (r, g, b, a) = rgba(f["fill"]) { ctx.addPath(path); ctx.setFillColor(red: r, green: g, blue: b, alpha: a); ctx.fillPath() }
+                    if let (r, g, b, a) = rgba(f["line"]) { ctx.addPath(path); ctx.setStrokeColor(red: r, green: g, blue: b, alpha: a); ctx.setLineWidth(dbl(f["w"]) ?? 1); ctx.strokePath() }
+                case "tile":
+                    let p = pts(f["pts"]); guard p.count >= 4, let path = makePath(p, closed: true) else { continue }
+                    let a = dbl(f["a"]) ?? 1
+                    if let img = LuaScriptEngine.terrainTiles.image(num(f["code"])) {
+                        ctx.saveGState(); ctx.addPath(path); ctx.clip(); ctx.setAlpha(a)
+                        ctx.concatenate(CGAffineTransform(a: p[1].x - p[0].x, b: p[1].y - p[0].y,
+                                                          c: p[3].x - p[0].x, d: p[3].y - p[0].y, tx: p[0].x, ty: p[0].y))
+                        ctx.draw(img, in: CGRect(x: 0, y: 0, width: 1, height: 1)); ctx.restoreGState()
+                    } else if let (r, g, b, fa) = rgba(f["fill"]) {
+                        ctx.addPath(path); ctx.setFillColor(red: r, green: g, blue: b, alpha: fa * a); ctx.fillPath()
+                    }
+                default: break
                 }
-                var cur = false; if case .bool(let b)? = f["cur"] { cur = b }
-                var dim = false; if case .bool(let b)? = f["dim"] { dim = b }
-                var rgb: (Double, Double, Double)? = nil
-                if case .string(let cn)? = f["color"] { rgb = MapRenderer.namedRGB(cn) }
-                rooms.append(IsoMapRenderer.Room(gx: num(f["gx"]) ?? 0, gy: num(f["gy"]) ?? 0,
-                                                 z: num(f["z"]) ?? 0, exits: exits,
-                                                 terrain: num(f["terrain"]), current: cur, dim: dim, rgb: rgb))
             }
-            // Fixed grid window centred on the current room → constant per-room scale (no zoom wobble). The
-            // axis-aligned box grid maps gx→cols, gy→rows; wider than tall to match the panel rectangle.
-            let winx = num(optDict["winx"]) ?? 7
-            let winy = num(optDict["winy"]) ?? 5
-            if let png = IsoMapRenderer.renderPNG(rooms: rooms, halfX: winx, halfY: winy,
-                                                  scale: num(optDict["cell"]).map { max(1, $0 / 11) } ?? 2,
-                                                  tiles: LuaScriptEngine.terrainTiles) {
-                host.setImage(png, cols: cols, rows: rowsN)          // overlay the top-right cols×rows rectangle
-            } else {
-                host.setImage(nil)
-            }
+            guard let image = ctx.makeImage(), let png = TerrainTiles.png(image) else { clear(); return [] }
+            host.setImage(png, cols: cols, rows: rowsN)
             Container.terminalService().refreshFurniture()
             return []
         }

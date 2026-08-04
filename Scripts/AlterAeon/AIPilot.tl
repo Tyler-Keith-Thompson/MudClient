@@ -1026,14 +1026,12 @@ function minimap(hw: integer, hh: integer): any
   return { w = W, h = H, cells = cells }
 end
 
--- ---- graphical minimap (iTerm2 image, via the map_image host builtin) ----------------------------
+-- ---- graphical minimap: room-graph → placement cells (Minimap.tl renders them via `canvas`) -------
 -- Opt-in (pilot.minimap('on'/'off')): OFF by default. Unlike the text minimap() above (geometric, uses
 -- kxwt coords when known), this walks the pure move-GRAPH: coords aren't needed, so it also works right
--- after a reload/relaunch before kxwt re-supplies them. gy grows NORTH (screen-up), matching map_image's
--- documented grid convention; up/down/in/out/other non-2D directions are ignored for placement.
--- Axis-aligned grid: gx grows EAST, gy grows NORTH. IsoMapRenderer draws each cell as an angled 3-D box
--- with north straight up / east straight right, so the grid maps directly to the screen compass. Must match
--- IsoMapRenderer's connector `delta` map.
+-- after a reload/relaunch before kxwt re-supplies them. gy grows NORTH (screen-up).
+-- Axis-aligned grid: gx grows EAST, gy grows NORTH; Minimap.tl's shallow-dimetric projection maps it to
+-- the screen compass (north up-and-slightly-left). GRID_DELTA must match Minimap.tl's connector `DELTA`.
 local GRID_DELTA: {string:{integer}} = {
   north = { 0, 1 }, south = { 0, -1 }, east = { 1, 0 }, west = { -1, 0 },
   northeast = { 1, 1 }, northwest = { -1, 1 }, southeast = { 1, -1 }, southwest = { -1, -1 },
@@ -1123,15 +1121,14 @@ local MINIMAP_DEPTH = 5
 local MINIMAP_ROWS = 9    -- top-right rectangle the image overlays (rows ≈ the text minimap's MAP_CLIP_H)
 local MINIMAP_COLS = 26
 
--- Project the room graph around P.current_room and paint it into the top HUD panel. Called whenever the
--- graphical minimap is ON (pilot_room_change, and once immediately on pilot.minimap('on')); a no-op
--- clear (map_image(nil)) when there's nothing to draw, so it never leaves a stale image up.
+-- Project the room graph around P.current_room into placement cells (minimap_grid) and hand them to the
+-- Lua renderer (Minimap.tl → the `canvas` painter). Called whenever the graphical minimap is ON
+-- (pilot_room_change, and once on pilot.minimap('on')); empty cells clear the panel back to text.
 function update_minimap()
   local cur = P.current_room
-  if not cur or not P.rooms[cur] then map_image(nil); return end
+  if not cur or not P.rooms[cur] then minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return end
   local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
-  if #cells == 0 then map_image(nil); return end
-  map_image(cells as {any}, { location = "top", cols = MINIMAP_COLS, rows = MINIMAP_ROWS } as {string:any})
+  minimap_render(cells as {any}, MINIMAP_COLS, MINIMAP_ROWS)
 end
 
 local record FrontierHit
@@ -3389,7 +3386,7 @@ function ai_command(args: string)
   elseif verb == "minimap" then
     local m = rest:lower()
     if m == "on" then P.minimap_on = true; update_minimap()
-    elseif m == "off" then P.minimap_on = false; map_image(nil)
+    elseif m == "off" then P.minimap_on = false; minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS)
     else echo("[ai] usage: pilot.minimap('on'|'off'). Current: " .. (P.minimap_on and "on" or "off")); return end
     echo("[ai] graphical minimap (iTerm2, top panel): " .. (P.minimap_on and "on" or "off"))
   elseif verb == "tools" then

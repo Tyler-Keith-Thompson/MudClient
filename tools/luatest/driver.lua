@@ -25,7 +25,7 @@ for _, n in ipairs({
   "ai_memory_request", "ai_retrieve", "ai_rag_load",
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
-  "unbind", "input_set", "bell", "title", "notify", "badge", "attention", "set_uservar", "image", "map_image", "copy", "timestamps", "disconnect", "is_connected", "connect", "telnet_send", "on_stream",
+  "unbind", "input_set", "bell", "title", "notify", "badge", "attention", "set_uservar", "image", "canvas", "copy", "timestamps", "disconnect", "is_connected", "connect", "telnet_send", "on_stream",
   "net_connect", "net_send", "net_disconnect", "net_is_connected", "feed_server",
   "log_start", "log_stop", "log_active", "replay",
   "grep", "sent", "received", "claude", "chat",
@@ -97,7 +97,8 @@ for _, f in ipairs({ "Scripts/AlterAeon/AIPilot.lua", "Scripts/AlterAeon/AlterAe
                      "Scripts/AlterAeon/AutoFight.lua", "Scripts/AlterAeon/BookDump.lua", "Scripts/AlterAeon/ChatDecode.lua",
                      "Scripts/AlterAeon/Combat.lua", "Scripts/AlterAeon/Corpse.lua", "Scripts/AlterAeon/DCast.lua",
                      "Scripts/AlterAeon/DClientProbe.lua",
-                     "Scripts/AlterAeon/Equipment.lua", "Scripts/AlterAeon/HUD.lua", "Scripts/Foundation/Promise.lua",
+                     "Scripts/AlterAeon/Equipment.lua", "Scripts/AlterAeon/HUD.lua", "Scripts/AlterAeon/Minimap.lua",
+                     "Scripts/Foundation/Promise.lua",
                      "Scripts/AlterAeon/Prompt.lua", "Scripts/AlterAeon/Recovery.lua", "Scripts/AlterAeon/RPC.lua",
                      "Scripts/AlterAeon/Soulforge.lua", "Scripts/AlterAeon/Speech.lua", "Scripts/AlterAeon/Trivia.lua" }) do
   local ok, err = pcall(dofile, f)

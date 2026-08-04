@@ -1032,8 +1032,6 @@ end
 
 
 
-
-
 local GRID_DELTA = {
    north = { 0, 1 }, south = { 0, -1 }, east = { 1, 0 }, west = { -1, 0 },
    northeast = { 1, 1 }, northwest = { -1, 1 }, southeast = { 1, -1 }, southwest = { -1, -1 },
@@ -1128,10 +1126,9 @@ local MINIMAP_COLS = 26
 
 function update_minimap()
    local cur = P.current_room
-   if not cur or not P.rooms[cur] then map_image(nil); return end
+   if not cur or not P.rooms[cur] then minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return end
    local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
-   if #cells == 0 then map_image(nil); return end
-   map_image(cells, { location = "top", cols = MINIMAP_COLS, rows = MINIMAP_ROWS })
+   minimap_render(cells, MINIMAP_COLS, MINIMAP_ROWS)
 end
 
 
@@ -3389,7 +3386,7 @@ function ai_command(args)
    elseif verb == "minimap" then
       local m = rest:lower()
       if m == "on" then P.minimap_on = true; update_minimap()
-      elseif m == "off" then P.minimap_on = false; map_image(nil)
+      elseif m == "off" then P.minimap_on = false; minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS)
       else echo("[ai] usage: pilot.minimap('on'|'off'). Current: " .. (P.minimap_on and "on" or "off")); return end
       echo("[ai] graphical minimap (iTerm2, top panel): " .. (P.minimap_on and "on" or "off"))
    elseif verb == "tools" then

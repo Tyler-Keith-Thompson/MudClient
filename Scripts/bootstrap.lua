@@ -436,9 +436,9 @@ doc("set_uservar", { sig = "set_uservar(name, value)", group = "terminal",
   example = 'set_uservar("hp", "84%")' })
 doc("is_iterm", { sig = "is_iterm() -> bool", group = "terminal",
   text = "True when running under iTerm2 (TERM_PROGRAM / LC_TERMINAL). Gates iTerm2-only features (e.g. the graphical minimap defaults on there)." })
-doc("map_image", { sig = "map_image(rooms[, opts])", group = "terminal",
-  text = "Render the 2.5-D isometric minimap and paint it into a HUD panel as an inline image (iTerm2). rooms = array of { gx, gy, exits={'n','e',…,'u','d'}, cur=bool, color='green', terrain=<0–39 kxwt code>, z=<level vs current> } on an integer grid; each room is an iso block whose top face carries its terrain tile (Assets/terrain/) and whose z lifts it (up/down exits draw ▲/▼ chevrons). opts = { location='top'|'bottom', rows=<cells tall>, cols=<cells wide>, winx/winy=<half-window in cells>, cell=<render px> }. Pass nil/empty rooms to clear it back to a text panel. iTerm2-only.",
-  example = "map_image({ {gx=0,gy=0,exits={'e'},cur=true}, {gx=1,gy=0,exits={'w'}} }, {rows=8})" })
+doc("canvas", { sig = "canvas(commands[, opts])", group = "terminal",
+  text = "Generic 2-D painter: render a flat draw-command list to a PNG and overlay it on a HUD panel (iTerm2). Coordinates are y-UP (origin bottom-left). commands = array of { op='poly'|'path'|'tile', pts={x1,y1,…}, fill={r,g,b,a?}, line={r,g,b,a?}, w=<px>, code=<terrain 0–39>, a=<alpha> }: 'poly' = closed polygon (fill and/or stroke), 'path' = open polyline (stroke), 'tile' = terrain texture (Assets/terrain/) mapped onto the quad pts=SW,SE,NE,NW (falls back to fill if the tile is missing). opts = { w, h, location='top'|'bottom', cols, rows }. Empty commands / no size clears the panel back to text. This is the drawing PRIMITIVE — the minimap geometry lives in Scripts/AlterAeon/Minimap.tl. iTerm2-only.",
+  example = "canvas({ {op='poly', pts={0,0, 20,0, 10,20}, fill={0.2,0.8,0.3,1}} }, {w=40,h=40,rows=8})" })
 doc("image", { sig = "image(path[, width, height])", group = "terminal",
   text = "Show an image file FULL-SCREEN (iTerm2 inline-image protocol), dismissed by any keypress — a viewer overlay, since images can't live in the text band. width/height override the size (cell count, \"Npx\", \"N%\", or \"auto\"); width defaults to 100%. iTerm2-only; no-op if the file is unreadable.",
   example = 'image("~/Documents/MudClient/maps/dream-realm.png")' })

@@ -1,10 +1,10 @@
 //
 //  TerrainTiles.swift
-//  Loads + caches the ComfyUI-generated terrain textures (`Assets/terrain/NN_name.png`) that
-//  `IsoMapRenderer` clips onto each iso tile's top face. Resolves relative to the launch CWD (same as
-//  `load("Scripts")`), with a fallback search so it works from Bazel/Xcode/`just run`. Missing tiles are
-//  fine — the renderer falls back to `IsoMapRenderer.terrainRGB` — so the map degrades gracefully before
-//  the tileset is baked and never blocks on I/O twice for the same code.
+//  Loads + caches the ComfyUI-generated terrain textures (`Assets/terrain/NN_name.png`) that the `canvas`
+//  builtin's `tile` op clips onto each minimap cube's top face (geometry lives in Lua/Minimap.tl). Resolves
+//  relative to the launch CWD (same as `load("Scripts")`), with a fallback search so it works from
+//  Bazel/Xcode/`just run`. Missing tiles are fine — Lua supplies a flat fallback colour — so the map
+//  degrades gracefully before the tileset is baked, and this never blocks on I/O twice for the same code.
 //
 
 import CoreGraphics
@@ -49,6 +49,16 @@ final class TerrainTiles: @unchecked Sendable {
         let img = TerrainTiles.load(dir: dir, code: code)
         cache[code] = img
         return img
+    }
+
+    /// Encode a rendered image to PNG data (used by the `canvas` builtin — kept here since this file already
+    /// owns ImageIO and is the surviving "image primitive" after the minimap renderer moved to Lua).
+    static func png(_ image: CGImage) -> Data? {
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, "public.png" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return out as Data
     }
 
     private static func load(dir: URL, code: Int) -> CGImage? {
