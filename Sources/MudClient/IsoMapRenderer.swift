@@ -35,12 +35,18 @@ enum IsoMapRenderer {
     // 45 = full isometric) and foreshortened by `squish` (the "looking-down" tilt): north goes up-and-a-bit-
     // left, east right-and-a-bit-up. 25° keeps north nearly up while still exposing the SE/SW side walls that
     // make elevation read. Elevation (z) always lifts STRAIGHT up, distinct from the north lean.
-    private static let leanDeg = 25.0                 // grid rotation off vertical (25 = gentle, 45 = full iso)
-    private static let squish = 0.80                  // vertical foreshorten (1 = none, 0.5 = full 2:1 iso)
+    // Two independent camera angles:
+    //   pitchDeg    — camera elevation. 90 = straight-down (top-down); LOWER = farther from top-down / more
+    //                 edge-on, which foreshortens the tops and lifts floors-above clearly apart.
+    //   northLeanDeg — how far screen-north tilts left of straight-up (the gentle "which way is north" lean).
+    // These are decoupled here (a yaw is derived so northLean stays put as pitch changes), so tuning one
+    // doesn't disturb the other.
+    private static let pitchDeg = 34.0                // camera elevation (lower = more edge-on 3-D)
+    private static let northLeanDeg = 25.0            // screen-north lean off vertical
     private static let cellMag = 34.0                 // centre-to-centre cell step (before scale)
     private static let tileScale = 0.82               // drawn top face vs cell step → gaps between cubes
     private static let cubeH = 12.0                   // side-wall height (block volume)
-    private static let levelH = 17.0                  // vertical LIFT per z-level (elevation → straight up)
+    private static let levelH = 22.0                  // vertical LIFT per z-level (elevation → straight up)
     private static let zHeadroom = 2                  // z-levels of vertical margin reserved (constant scale)
 
     /// Render `rooms` to PNG. A FIXED grid window (`halfX,halfY`) centred on the current room (placed at
@@ -51,10 +57,12 @@ enum IsoMapRenderer {
         guard !rooms.isEmpty, halfX > 0, halfY > 0, scale > 0 else { return nil }
         let s = CGFloat(scale)
         let ch = cubeH * s, lvl = levelH * s
-        // Screen basis: rotate the ground axes by leanDeg, foreshorten y by `squish`, scale to cell size.
-        let th = leanDeg * .pi / 180.0, m = cellMag * s
-        let ex = CGVector(dx: cos(th) * m, dy: sin(th) * squish * m)     // one EAST step (right, slight up)
-        let ny = CGVector(dx: -sin(th) * m, dy: cos(th) * squish * m)    // one NORTH step (up, slight left)
+        // Screen basis from pitch + north-lean. Pitch foreshortens the ground's depth axis by sin(pitch); a
+        // yaw ψ is derived so the visible north-lean stays at northLeanDeg regardless of pitch.
+        let phi = pitchDeg * .pi / 180.0, sinp = sin(phi), m = cellMag * s
+        let psi = atan(tan(northLeanDeg * .pi / 180.0) * sinp)
+        let ex = CGVector(dx: cos(psi) * m, dy: sin(psi) * sinp * m)     // one EAST step (right, slight up)
+        let ny = CGVector(dx: -sin(psi) * m, dy: cos(psi) * sinp * m)    // one NORTH step (up, slight left)
         let hex = CGVector(dx: ex.dx * tileScale / 2, dy: ex.dy * tileScale / 2)   // half drawn top-face edges
         let hny = CGVector(dx: ny.dx * tileScale / 2, dy: ny.dy * tileScale / 2)
         let halfSpanX = abs(hex.dx) + abs(hny.dx), halfSpanY = abs(hex.dy) + abs(hny.dy)
@@ -128,9 +136,11 @@ enum IsoMapRenderer {
             ctx.addPath(top); ctx.setStrokeColor(red: 0.10, green: 0.12, blue: 0.13, alpha: 0.85)
             ctx.setLineWidth(max(1, 1.2 * s)); ctx.strokePath()
 
-            let topMid = CGPoint(x: (nw.x + ne.x) / 2, y: (nw.y + ne.y) / 2)
+            // Up chevron sits ON the top face (upper third, centred over the tile). Down chevron stays at the
+            // front/bottom edge of the block where it reads well.
+            let vr = abs(hny.dy) + abs(hex.dy)      // vertical half-extent of the top face
             let botMid = CGPoint(x: (sw.x + se.x) / 2, y: (sw.y + se.y) / 2 - dn)
-            if r.exits.contains("u") { chevron(ctx, at: CGPoint(x: topMid.x, y: topMid.y + 4 * s), up: true, s: s, bright: true) }
+            if r.exits.contains("u") { chevron(ctx, at: CGPoint(x: c.x, y: c.y + vr * 0.32), up: true, s: s, bright: true) }
             if r.exits.contains("d") { chevron(ctx, at: CGPoint(x: botMid.x, y: botMid.y - 2 * s), up: false, s: s, bright: false) }
 
             if r.current {
