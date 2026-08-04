@@ -18,10 +18,11 @@ local CELL_MAG = 34.0
 local TILE_SCALE = 0.82
 local CUBE_H = 12.0
 local LEVEL_H = 22.0
-local Z_HEADROOM = 2
-local HALF_X = 7
-local HALF_Y = 5
+local Z_HEADROOM = 1
 local SCALE = 3
+
+
+
 
 
 local TERR = {}
@@ -57,10 +58,11 @@ local function shade(rgb, mul, a)
 end
 
 
-function minimap_render(cells, cols, rows)
+function minimap_render(cells, cols, rows, depth)
    if not cells or #cells == 0 then
       canvas({}, { location = "top", cols = cols, rows = rows }); return
    end
+   local half = depth or 5
 
    local s = SCALE
    local ch, lvl = CUBE_H * s, LEVEL_H * s
@@ -78,8 +80,8 @@ function minimap_render(cells, cols, rows)
 
 
    local minSx, maxSx, minSy, maxSy = 0.0, 0.0, 0.0, 0.0
-   for _, gx in ipairs({ -HALF_X, HALF_X }) do
-      for _, gy in ipairs({ -HALF_Y, HALF_Y }) do
+   for _, gx in ipairs({ -half, half }) do
+      for _, gy in ipairs({ -half, half }) do
          local sx = gx * exx + gy * nyx
          local sy = gx * exy + gy * nyy
          minSx = math.min(minSx, sx); maxSx = math.max(maxSx, sx)
@@ -166,7 +168,7 @@ line = { TOP_STROKE[1], TOP_STROKE[2], TOP_STROKE[3], TOP_STROKE[4] * a }, w = m
    local by_cell = {}
    local function inwin(c)
       local gx, gy = c.gx, c.gy
-      return gx >= -HALF_X and gx <= HALF_X and gy >= -HALF_Y and gy <= HALF_Y
+      return gx >= -half and gx <= half and gy >= -half and gy <= half
    end
    for _, cc in ipairs(cells) do
       local c = cc

@@ -1128,7 +1128,7 @@ function update_minimap()
   local cur = P.current_room
   if not cur or not P.rooms[cur] then minimap_render({}, MINIMAP_COLS, MINIMAP_ROWS); return end
   local cells = minimap_grid(P.rooms, cur, MINIMAP_DEPTH)
-  minimap_render(cells as {any}, MINIMAP_COLS, MINIMAP_ROWS)
+  minimap_render(cells as {any}, MINIMAP_COLS, MINIMAP_ROWS, MINIMAP_DEPTH)
 end
 
 local record FrontierHit

@@ -23,7 +23,7 @@ global engaged:                function(? number): boolean   -- Combat.lua: text
 global in_combat:              function(): boolean           -- Combat.lua: engaged(); every pilot/eq/corpse consumer sits on it
 global smap_on_map_update:     function()                    -- AIPilot.lua: called after a ;smap; grid update
 global minimap:                function(? integer, ? integer): any   -- AIPilot.lua: room-graph minimap renderer (HUD consumes)
-global minimap_render:         function({any}, integer, integer)     -- Minimap.lua: iso-render the room cells into the graphical HUD panel
+global minimap_render:         function({any}, integer, integer, ? integer)   -- Minimap.lua: render the room cells into the graphical HUD panel (depth = window extent)
 global describe_state:         function(): string           -- AlterAeon.lua: human-readable state dump (Recovery/AIPilot consume)
 global game_command_reference: function(): string           -- AlterAeon.lua: AI command reference (AIPilot consumes)
 global __autofight_prompt:     function(? number, ? string)

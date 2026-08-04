@@ -33,16 +33,24 @@ import DependencyInjection
 
         // A scene exercising terrain variety, an eastern elevation climb, and a dim floor-above ghost.
         engine.evalREPL("""
-          minimap_render({
+          local sc = {
             {gx=0,gy=0,z=0,terrain=2,exits={"n","e","s","w","u"},cur=true},
-            {gx=0,gy=1,z=0,terrain=4,exits={"s","n"}}, {gx=0,gy=2,z=0,terrain=5,exits={"s"}},
-            {gx=0,gy=-1,z=0,terrain=2,exits={"n","s"}}, {gx=0,gy=-2,z=0,terrain=28,exits={"n"}},
+            {gx=0,gy=1,z=0,terrain=4,exits={"s","n"}}, {gx=0,gy=2,z=0,terrain=5,exits={"s","n"}},
+            {gx=0,gy=3,z=0,terrain=5,exits={"s","n"}}, {gx=0,gy=4,z=0,terrain=6,exits={"s","n"}},
+            {gx=0,gy=5,z=0,terrain=6,exits={"s"}},
+            {gx=0,gy=-1,z=0,terrain=2,exits={"n","s"}}, {gx=0,gy=-2,z=0,terrain=28,exits={"n","s"}},
+            {gx=0,gy=-3,z=0,terrain=28,exits={"n"}},
             {gx=1,gy=0,z=0,terrain=15,exits={"w","e"}}, {gx=2,gy=0,z=1,terrain=10,exits={"w","e"}},
-            {gx=3,gy=0,z=2,terrain=10,exits={"w"}},
-            {gx=-1,gy=0,z=0,terrain=32,exits={"e"}}, {gx=-2,gy=0,z=0,terrain=18,exits={"e"}},
-            {gx=1,gy=-1,z=0,terrain=20,exits={}},
+            {gx=3,gy=0,z=2,terrain=10,exits={"w","e"}}, {gx=4,gy=0,z=2,terrain=8,exits={"w","e"}},
+            {gx=5,gy=0,z=3,terrain=10,exits={"w"}},
+            {gx=-1,gy=0,z=0,terrain=32,exits={"e","w"}}, {gx=-2,gy=0,z=0,terrain=18,exits={"e","w"}},
+            {gx=-3,gy=0,z=0,terrain=18,exits={"e"}},
+            {gx=1,gy=1,z=0,terrain=3,exits={"s"}}, {gx=2,gy=1,z=1,terrain=15,exits={}},
+            {gx=-1,gy=-1,z=0,terrain=7,exits={"ne"}}, {gx=1,gy=-2,z=0,terrain=20,exits={}},
+            {gx=-1,gy=1,z=0,terrain=3,exits={}}, {gx=2,gy=-1,z=0,terrain=20,exits={}},
             {gx=0,gy=0,z=1,terrain=1,exits={"d"},dim=true}, {gx=0,gy=-1,z=-1,terrain=27,exits={"n"},dim=true},
-          }, 26, 9)
+          }
+          minimap_render(sc, 26, 9, 5)
         """)
 
         let img = try #require(Container.topPanelHost().currentImage(), "canvas painted no image into the panel")

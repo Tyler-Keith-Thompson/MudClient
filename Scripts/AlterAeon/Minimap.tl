@@ -18,10 +18,11 @@ local CELL_MAG    = 34.0    -- centre-to-centre cell step (pre-scale)
 local TILE_SCALE  = 0.82    -- drawn top face vs cell step → gaps between cubes
 local CUBE_H      = 12.0    -- side-wall height (block volume)
 local LEVEL_H     = 22.0    -- vertical lift per z-level (elevation → straight up)
-local Z_HEADROOM  = 2       -- z-levels of vertical margin reserved (keeps scale constant)
-local HALF_X      = 7       -- fixed window half-width  (constant per-room scale)
-local HALF_Y      = 5       -- fixed window half-height
+local Z_HEADROOM  = 1       -- z-levels of vertical margin reserved (keeps scale constant)
 local SCALE       = 3       -- render pixels per geometry unit (crispness; iTerm scales to the panel)
+-- The fixed window is the reachable extent: a room is at most `depth` hops away, so |gx|,|gy| ≤ depth (each
+-- hop changes each axis by ≤1). Sizing to exactly that — not a looser box — fills the panel instead of
+-- leaving dead margin, while staying constant-scale (canvas size depends only on depth, never room count).
 
 -- terrain code (0–39) → base RGB (fallback when a tile PNG is missing; also tints the shaded walls)
 local TERR: {integer:{number}} = {}
@@ -57,10 +58,11 @@ local function shade(rgb: {number}, mul: number, a: number): {number}
 end
 
 -- Render `cells` (from AIPilot's minimap_grid) into the top HUD panel. Empty → clears back to text.
-function minimap_render(cells: {any}, cols: integer, rows: integer)
+function minimap_render(cells: {any}, cols: integer, rows: integer, depth: integer)
   if not cells or #cells == 0 then
     canvas({} as {any}, { location = "top", cols = cols, rows = rows } as {string:any}); return
   end
+  local half = depth or 5
 
   local s = SCALE as number
   local ch, lvl = CUBE_H*s, LEVEL_H*s
@@ -78,8 +80,8 @@ function minimap_render(cells: {any}, cols: integer, rows: integer)
 
   -- constant canvas from the window corners (z=0) + tile extent + z headroom + margin
   local minSx, maxSx, minSy, maxSy = 0.0, 0.0, 0.0, 0.0
-  for _, gx in ipairs({-HALF_X, HALF_X}) do
-    for _, gy in ipairs({-HALF_Y, HALF_Y}) do
+  for _, gx in ipairs({-half, half}) do
+    for _, gy in ipairs({-half, half}) do
       local sx = gx*exx + gy*nyx
       local sy = gx*exy + gy*nyy
       minSx = math.min(minSx, sx); maxSx = math.max(maxSx, sx)
@@ -166,7 +168,7 @@ function minimap_render(cells: {any}, cols: integer, rows: integer)
   local by_cell: {string:any} = {}
   local function inwin(c: {string:any}): boolean
     local gx, gy = c.gx as integer, c.gy as integer
-    return gx >= -HALF_X and gx <= HALF_X and gy >= -HALF_Y and gy <= HALF_Y
+    return gx >= -half and gx <= half and gy >= -half and gy <= half
   end
   for _, cc in ipairs(cells) do
     local c = cc as {string:any}
