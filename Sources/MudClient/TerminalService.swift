@@ -627,9 +627,13 @@ final class TerminalService {
         // Track the colour the game stream expects active going forward. Game output advances it; an echo
         // body ends with liveSGR re-asserted, so this leaves it unchanged for echoes.
         liveSGR = Self.activeSGRState(liveSGR + body)
-        // Hide the cursor for the whole repaint so its round-trip — up to the output region to write,
-        // then back down to the input line — happens invisibly (that jump was the flicker).
-        writeToStandardOut(data: Data("\u{1B}[?25l".utf8))
+        // Begin a SYNCHRONIZED FRAME (DECSET 2026): supporting terminals (iTerm2/kitty/WezTerm/Ghostty)
+        // buffer everything until the matching ?2026l and present it atomically — no torn/partial repaint;
+        // others ignore it. Ended right before the cursor-show on BOTH exit paths below. Do NOT add 2026 to
+        // the inner paint helpers (setupScreen/paintRegion/drawFurniture) — 2026 isn't a counter in most
+        // terminals, so a nested ?2026l would end THIS frame early. Then hide the cursor so its round-trip —
+        // up to the output region to write, then back down to the input line — happens invisibly too.
+        writeToStandardOut(data: Data("\u{1B}[?2026h\u{1B}[?25l".utf8))
         if lastSignature != signature(l) { setupScreen() }     // band geometry changed → resize region (snaps to live)
 
         if scrollOffset > 0 {
@@ -653,7 +657,7 @@ final class TerminalService {
             drawFurniture(l)                                 // panels may have changed; never touches the band
             paintScrollIndicator(l)                          // update the "scrolled back N lines" marker
             drawInputLine(l, cursorColumn: cursor.column)    // return the physical cursor to the input line
-            writeToStandardOut(data: Data("\u{1B}[?25h".utf8))
+            writeToStandardOut(data: Data("\u{1B}[?25h\u{1B}[?2026l".utf8))   // show cursor, then END the sync frame
             return
         }
 
@@ -674,7 +678,7 @@ final class TerminalService {
             writeToStandardOut(data: Data(out.utf8))
         }
         drawFurniture(l)                                    // repaint furniture; parks cursor on input
-        writeToStandardOut(data: Data("\u{1B}[?25h".utf8))  // show the cursor, now back at the input line
+        writeToStandardOut(data: Data("\u{1B}[?25h\u{1B}[?2026l".utf8))  // show cursor (back at input), then END the sync frame
     }
 
     /// Paint one server/output chunk. Empty chunks (a fully-gagged status batch) carry no text but a
@@ -796,6 +800,12 @@ final class TerminalService {
         teardownScreen()
         TerminalService.restoreCookedMode()
         exit(0)
+    }
+
+    /// Set the terminal window/tab title (OSC 2, BEL-terminated — broadly supported). Exposed to Lua as
+    /// `title(text)`; scripts drive it from game state (character / area / HP). Survives the alt buffer.
+    func setTitle(_ text: String) {
+        writeToStandardOut(data: Data("\u{1B}]2;\(text)\u{07}".utf8))
     }
     
     private func getTerminalHeight() -> Int? {
@@ -969,6 +979,11 @@ final class TerminalService {
     /// line always lands on the absolute input row below the panel.
     private func refreshDisplay(cursorColumn: Int) {
         guard let l = layout() else { return }
+        // Atomic input-line redraw (DECSET 2026), same rationale as print(): a multi-row input repaint
+        // shouldn't tear or flash the cursor. defer guarantees the close even if drawInputLine grows an
+        // early return later. Safe from nesting: refreshDisplay is never called inside print()'s frame.
+        writeToStandardOut(data: Data("\u{1B}[?2026h".utf8))
+        defer { writeToStandardOut(data: Data("\u{1B}[?2026l".utf8)) }
         drawInputLine(l, cursorColumn: cursorColumn)
     }
 

@@ -416,6 +416,12 @@ doc("echo",  { sig = "echo(text[, color])", group = "io",
 doc("bell",  { sig = "bell()", group = "io",
   text = "Ring the bell: plays the macOS system alert sound (audible even when the terminal's own bell is muted, which it usually is) and writes a BEL to the controlling terminal so emulators that flash/badge on a bell still do.",
   example = "bell()" })
+doc("title", { sig = "title(text)", group = "terminal",
+  text = "Set the terminal window/tab title (OSC 2). Drive it from game state — character, area, HP.",
+  example = 'title("Vaelith — The Dream Realm — 84%")' })
+doc("hyperlink", { sig = "hyperlink(url[, text]) -> string", group = "io",
+  text = "Wrap `text` as a clickable OSC 8 hyperlink to `url` (iTerm2/kitty/WezTerm/Ghostty; plain text elsewhere). Returns the escape-wrapped string to embed in an echo or a trigger rewrite — it writes nothing itself. `text` defaults to the url.",
+  example = 'echo(hyperlink("http://alteraeon.com:8080/help/recall", "recall help"))' })
 doc("copy",  { sig = "copy([n])", group = "terminal",
   text = "Copy the last n scrollback lines (ANSI stripped) to the macOS clipboard; n defaults to 20. Echoes a confirmation with the number of lines copied.",
   example = "copy(50)" })

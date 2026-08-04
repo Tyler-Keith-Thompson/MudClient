@@ -1241,6 +1241,20 @@ final class LuaScriptEngine: @unchecked Sendable {
         }
         // bell() — ring the terminal bell.
         lua.register("bell") { _ in Container.terminalService().bell(); return [] }
+        // title(text): set the terminal window/tab title (OSC 2). Scripts drive it from game state.
+        lua.register("title") { args in
+            if case .string(let s)? = args.first { Container.terminalService().setTitle(s) }
+            return []
+        }
+        // hyperlink(url, text) -> string: wrap `text` as a clickable OSC 8 hyperlink to `url` (iTerm2/
+        // kitty/WezTerm/Ghostty; plain text elsewhere). Returns the escape-wrapped string to embed in an
+        // echo or a trigger rewrite — a pure formatter, it writes nothing itself. Text defaults to the url.
+        lua.register("hyperlink") { args in
+            guard case .string(let url)? = args.first else { return [] }
+            var text = url
+            if case .string(let t)? = args.dropFirst().first { text = t }
+            return [.string("\u{1B}]8;;\(url)\u{07}\(text)\u{1B}]8;;\u{07}")]
+        }
         // timestamps([on]) -> bool. Toggle (no arg) or set (bool / "on"/"off") the dim per-line arrival-
         // time gutter shown at the start of every scrollback line. Bound to ctrl-T by default. Returns the
         // new state so a bind can echo it.

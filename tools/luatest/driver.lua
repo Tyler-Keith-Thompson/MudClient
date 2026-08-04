@@ -25,7 +25,7 @@ for _, n in ipairs({
   "ai_memory_request", "ai_retrieve", "ai_rag_load",
   "ai_set_auth", "ai_set_endpoint", "ai_set_model", "ai_set_memory_endpoint",
   "ai_set_memory_key", "ai_set_memory_model", "ai_usage_reset",
-  "unbind", "input_set", "bell", "copy", "timestamps", "disconnect", "is_connected", "connect", "telnet_send", "on_stream",
+  "unbind", "input_set", "bell", "title", "copy", "timestamps", "disconnect", "is_connected", "connect", "telnet_send", "on_stream",
   "net_connect", "net_send", "net_disconnect", "net_is_connected", "feed_server",
   "log_start", "log_stop", "log_active", "replay",
   "grep", "sent", "received", "claude", "chat",
@@ -34,6 +34,7 @@ for _, n in ipairs({
 -- Speech / live-vs-history stubs (SpeechService + SpeechBuiltins). is_live defaults to true so specs
 -- run "as if live"; speech_voices returns a small canned voice list so Speech.lua's assignment logic
 -- has voices to work with. Specs override these locally to exercise the gating/assignment paths.
+stub("hyperlink", function(url, text) return text or url or "" end)   -- returns a value → explicit stub
 stub("is_live", function() return true end)
 stub("speech_voices", function()
   return { { name = "Alex", locale = "en_US" }, { name = "Samantha", locale = "en_US" },
