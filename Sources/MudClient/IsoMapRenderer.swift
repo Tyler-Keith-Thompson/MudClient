@@ -1,11 +1,11 @@
 //
 //  IsoMapRenderer.swift
-//  The 2.5-D minimap renderer. Where `MapRenderer` paints a flat top-down grid, this paints the same room
-//  graph as ANGLED 3-D BOXES on an axis-aligned grid: NORTH is straight up, EAST straight right (intuitive
-//  compass), and each room is a little block — a foreshortened top face carrying its TERRAIN texture plus a
-//  shaded front (south) wall for height. A room's z-level lifts its block; floors above/below are drawn as
-//  faint translucent ghosts so multi-level structure reads without hiding where you are. (This replaced an
-//  isometric-diamond projection whose 45° grid made the compass unintuitive; the type name is kept.)
+//  The 2.5-D minimap renderer. It paints the room graph through an ISOMETRIC camera (2:1 diamonds): each
+//  room is a little cube whose top face carries its TERRAIN texture and whose two visible side walls give
+//  real volume. Crucially, north maps to the up-LEFT diagonal while ELEVATION (world coord z) maps straight
+//  UP — so a raised room (up) is visually distinct from a northern neighbour (up-left), which is what makes
+//  "what's on top vs underneath" unambiguous. A small corner COMPASS marks north so the diagonal grid stays
+//  intuitive. Floors above/below (reached via up/down) are drawn as faint translucent ghosts.
 //
 //  Pure + game-agnostic: it takes a draw-spec (rooms on an integer grid + a z-level + a terrain code) and a
 //  tile provider, and returns PNG data. The projection from AIPilot's world-coord graph onto this grid lives
@@ -24,43 +24,57 @@ enum IsoMapRenderer {
         var gx: Int
         var gy: Int
         var z: Int
-        var exits: Set<String>          // cardinals (unused for placement here) + "u"/"d" for the chevron
+        var exits: Set<String>          // cardinals (for connector links) + "u"/"d" for the chevron
         var terrain: Int?
         var current: Bool
         var dim: Bool                   // a room on ANOTHER floor (reached via up/down) → drawn faint
         var rgb: (Double, Double, Double)?   // optional tint override (waypoint/blocked); nil → terrain colour
     }
 
-    // Box geometry. Top face is foreshortened (cellD < cellW) so we read it at an angle; the front wall gives
-    // height. Kept small — the terminal upscales the PNG into the panel rectangle.
-    private static let cellW = 42.0                   // top-face width
-    private static let cellD = 30.0                   // top-face depth (foreshortened → the "tilt")
-    private static let wallH = 11.0                   // front-wall height (block thickness)
-    private static let gapX  = 11.0, gapY = 10.0      // gaps between blocks (so connectors + fronts show)
-    private static let levelH = 20.0                  // vertical pixels per z-level
-    private static let zHeadroom = 4                  // z-levels of vertical margin reserved (constant scale)
+    // Shallow-dimetric geometry. The ground grid is rotated `leanDeg` off screen-axes (0 = flat top-down,
+    // 45 = full isometric) and foreshortened by `squish` (the "looking-down" tilt): north goes up-and-a-bit-
+    // left, east right-and-a-bit-up. 25° keeps north nearly up while still exposing the SE/SW side walls that
+    // make elevation read. Elevation (z) always lifts STRAIGHT up, distinct from the north lean.
+    private static let leanDeg = 25.0                 // grid rotation off vertical (25 = gentle, 45 = full iso)
+    private static let squish = 0.80                  // vertical foreshorten (1 = none, 0.5 = full 2:1 iso)
+    private static let cellMag = 34.0                 // centre-to-centre cell step (before scale)
+    private static let tileScale = 0.82               // drawn top face vs cell step → gaps between cubes
+    private static let cubeH = 12.0                   // side-wall height (block volume)
+    private static let levelH = 17.0                  // vertical LIFT per z-level (elevation → straight up)
+    private static let zHeadroom = 2                  // z-levels of vertical margin reserved (constant scale)
 
     /// Render `rooms` to PNG. A FIXED grid window (`halfX,halfY`) centred on the current room (placed at
     /// 0,0) keeps per-room scale constant regardless of how many rooms exist; rooms outside are clipped.
     /// `tiles` supplies terrain textures (nil → flat colour fallback, so it works before tiles are baked).
-    static func renderPNG(rooms: [Room], halfX: Int = 7, halfY: Int = 5,
+    static func renderPNG(rooms: [Room], halfX: Int = 6, halfY: Int = 5,
                           scale: Int = 2, tiles: TerrainTiles? = nil) -> Data? {
         guard !rooms.isEmpty, halfX > 0, halfY > 0, scale > 0 else { return nil }
         let s = CGFloat(scale)
-        let cw = cellW * s, cd = cellD * s, wh = wallH * s, lvl = levelH * s
-        let stepX = (cellW + gapX) * s
-        let stepY = (cellD + wallH + gapY) * s        // N-S spacing: clears each block's front wall + a gap
-        let zPad = lvl * CGFloat(zHeadroom)
+        let ch = cubeH * s, lvl = levelH * s
+        // Screen basis: rotate the ground axes by leanDeg, foreshorten y by `squish`, scale to cell size.
+        let th = leanDeg * .pi / 180.0, m = cellMag * s
+        let ex = CGVector(dx: cos(th) * m, dy: sin(th) * squish * m)     // one EAST step (right, slight up)
+        let ny = CGVector(dx: -sin(th) * m, dy: cos(th) * squish * m)    // one NORTH step (up, slight left)
+        let hex = CGVector(dx: ex.dx * tileScale / 2, dy: ex.dy * tileScale / 2)   // half drawn top-face edges
+        let hny = CGVector(dx: ny.dx * tileScale / 2, dy: ny.dy * tileScale / 2)
+        let halfSpanX = abs(hex.dx) + abs(hny.dx), halfSpanY = abs(hex.dy) + abs(hny.dy)
+        let zPad = lvl * CGFloat(zHeadroom) + ch
 
         func inWindow(_ r: Room) -> Bool { r.gx >= -halfX && r.gx <= halfX && r.gy >= -halfY && r.gy <= halfY }
 
-        // Constant canvas from the window extent + fixed z headroom (both directions) + wall/margin.
-        let margin = 6 * s
-        let spanX = CGFloat(halfX) * stepX, spanY = CGFloat(halfY) * stepY
-        let originX = spanX + cw / 2 + margin
-        let originY = spanY + wh + zPad + margin
-        let width  = Int(2 * spanX + cw + 2 * margin)
-        let height = Int(2 * spanY + cd + wh + 2 * zPad + 2 * margin)
+        // Constant canvas from the window corners (z=0) + tile extent + z headroom + cube depth + margin.
+        var minSx: CGFloat = 0, maxSx: CGFloat = 0, minSy: CGFloat = 0, maxSy: CGFloat = 0
+        for gx in [-halfX, halfX] { for gy in [-halfY, halfY] {
+            let sx: CGFloat = CGFloat(gx) * ex.dx + CGFloat(gy) * ny.dx
+            let sy: CGFloat = CGFloat(gx) * ex.dy + CGFloat(gy) * ny.dy
+            minSx = min(minSx, sx); maxSx = max(maxSx, sx); minSy = min(minSy, sy); maxSy = max(maxSy, sy)
+        } }
+        let margin: CGFloat = 6 * s
+        let originX: CGFloat = -minSx + halfSpanX + margin
+        let originY: CGFloat = -minSy + halfSpanY + ch + margin
+        let spanW: CGFloat = (maxSx - minSx) + 2 * halfSpanX + 2 * margin
+        let spanH: CGFloat = (maxSy - minSy) + 2 * halfSpanY + 2 * zPad + 2 * margin
+        let width = Int(spanW), height = Int(spanH)
         guard width > 0, height > 0,
               let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
@@ -69,54 +83,60 @@ enum IsoMapRenderer {
         ctx.clear(CGRect(x: 0, y: 0, width: width, height: height))
         ctx.interpolationQuality = .high
 
-        // Top-face centre (CG y-up: north = +gy → up, east = +gx → right, higher z → up).
+        // Centre (CG y-up): north = up-and-slightly-left, east = right-and-slightly-up, elevation z = UP.
         func centre(_ r: Room) -> CGPoint {
-            CGPoint(x: originX + CGFloat(r.gx) * stepX, y: originY + CGFloat(r.gy) * stepY + CGFloat(r.z) * lvl)
+            CGPoint(x: originX + CGFloat(r.gx) * ex.dx + CGFloat(r.gy) * ny.dx,
+                    y: originY + CGFloat(r.gx) * ex.dy + CGFloat(r.gy) * ny.dy + CGFloat(r.z) * lvl)
         }
-        // Top-face rect (foreshortened): south/front edge at cy-cd/2, north/back edge at cy+cd/2.
-        func topRect(_ c: CGPoint) -> CGRect { CGRect(x: c.x - cw / 2, y: c.y - cd / 2, width: cw, height: cd) }
 
         let placed = rooms.filter(inWindow)
         func backToFront(_ list: [Room]) -> [Room] {
-            list.sorted { $0.gy != $1.gy ? $0.gy > $1.gy : $0.z < $1.z }   // north (far) first, lower z first
+            list.sorted { ($0.gx + $0.gy) != ($1.gx + $1.gy) ? ($0.gx + $0.gy) > ($1.gx + $1.gy) : $0.z < $1.z }
+        }
+        func quad(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> CGPath {
+            let p = CGMutablePath(); p.move(to: a); p.addLine(to: b); p.addLine(to: c); p.addLine(to: d); p.closeSubpath(); return p
         }
 
-        // Draw one block: front (south) wall + terrain top face + outline + up/down chevrons, at `alpha`.
+        // Draw one cube: SW + SE side walls (visible fronts), then the terrain top face, at `alpha`.
         func drawRoom(_ r: Room, _ alpha: CGFloat) {
             ctx.setAlpha(alpha)
             let c = centre(r)
-            let rect = topRect(c)
+            let sw = CGPoint(x: c.x - hex.dx - hny.dx, y: c.y - hex.dy - hny.dy)   // front corner (lowest)
+            let se = CGPoint(x: c.x + hex.dx - hny.dx, y: c.y + hex.dy - hny.dy)
+            let ne = CGPoint(x: c.x + hex.dx + hny.dx, y: c.y + hex.dy + hny.dy)
+            let nw = CGPoint(x: c.x - hex.dx + hny.dx, y: c.y - hex.dy + hny.dy)
             let (fr, fg, fb) = r.rgb ?? terrainRGB(r.terrain)
-
-            // front (south) wall: hangs below the front edge, shaded darker for depth
-            let wall = CGMutablePath()
-            wall.move(to: CGPoint(x: rect.minX, y: rect.minY))
-            wall.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-            wall.addLine(to: CGPoint(x: rect.maxX, y: rect.minY - wh))
-            wall.addLine(to: CGPoint(x: rect.minX, y: rect.minY - wh))
-            wall.closeSubpath()
-            ctx.addPath(wall); ctx.setFillColor(red: fr * 0.5, green: fg * 0.5, blue: fb * 0.5, alpha: 1); ctx.fillPath()
-            ctx.addPath(wall); ctx.setStrokeColor(red: 0.08, green: 0.09, blue: 0.10, alpha: 0.8)
+            let dn = ch
+            // south-west wall: SW→NW edge? no — the two viewer-facing lower edges are SW→SE and SW→... use
+            // the front edges SW→SE (south) and SW→NW is back-left. Visible walls: south (SW→SE) + east (SE→NE).
+            let south = quad(sw, se, CGPoint(x: se.x, y: se.y - dn), CGPoint(x: sw.x, y: sw.y - dn))
+            let east  = quad(se, ne, CGPoint(x: ne.x, y: ne.y - dn), CGPoint(x: se.x, y: se.y - dn))
+            ctx.addPath(east);  ctx.setFillColor(red: fr * 0.62, green: fg * 0.62, blue: fb * 0.62, alpha: 1); ctx.fillPath()
+            ctx.addPath(south); ctx.setFillColor(red: fr * 0.44, green: fg * 0.44, blue: fb * 0.44, alpha: 1); ctx.fillPath()
+            ctx.addPath(east); ctx.addPath(south); ctx.setStrokeColor(red: 0.07, green: 0.08, blue: 0.09, alpha: 0.85)
             ctx.setLineWidth(max(1, 1 * s)); ctx.strokePath()
 
-            // top face: terrain texture (or flat colour), clipped to the rect
+            // top face: terrain texture mapped via affine (unit square → SW,SE,NE,NW parallelogram)
+            let top = quad(sw, se, ne, nw)
             if let img = tiles?.image(r.terrain) {
-                ctx.saveGState(); ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.clip()
-                ctx.draw(img, in: rect); ctx.restoreGState()
+                ctx.saveGState(); ctx.addPath(top); ctx.clip()
+                ctx.concatenate(CGAffineTransform(a: se.x - sw.x, b: se.y - sw.y, c: nw.x - sw.x, d: nw.y - sw.y, tx: sw.x, ty: sw.y))
+                ctx.draw(img, in: CGRect(x: 0, y: 0, width: 1, height: 1)); ctx.restoreGState()
             } else {
-                ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setFillColor(red: fr, green: fg, blue: fb, alpha: 1); ctx.fillPath()
+                ctx.addPath(top); ctx.setFillColor(red: fr, green: fg, blue: fb, alpha: 1); ctx.fillPath()
             }
-            ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setStrokeColor(red: 0.10, green: 0.12, blue: 0.13, alpha: 0.85)
+            ctx.addPath(top); ctx.setStrokeColor(red: 0.10, green: 0.12, blue: 0.13, alpha: 0.85)
             ctx.setLineWidth(max(1, 1.2 * s)); ctx.strokePath()
 
-            if r.exits.contains("u") { chevron(ctx, at: CGPoint(x: c.x, y: rect.maxY + 4 * s), up: true, s: s, bright: true) }
-            if r.exits.contains("d") { chevron(ctx, at: CGPoint(x: c.x, y: rect.minY - wh - 1 * s), up: false, s: s, bright: false) }
+            let topMid = CGPoint(x: (nw.x + ne.x) / 2, y: (nw.y + ne.y) / 2)
+            let botMid = CGPoint(x: (sw.x + se.x) / 2, y: (sw.y + se.y) / 2 - dn)
+            if r.exits.contains("u") { chevron(ctx, at: CGPoint(x: topMid.x, y: topMid.y + 4 * s), up: true, s: s, bright: true) }
+            if r.exits.contains("d") { chevron(ctx, at: CGPoint(x: botMid.x, y: botMid.y - 2 * s), up: false, s: s, bright: false) }
 
             if r.current {
-                // dark halo + gold ring so YOU are unmistakable, even under a translucent floor-above ghost.
-                ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setStrokeColor(red: 0.05, green: 0.06, blue: 0.07, alpha: 1)
+                ctx.addPath(top); ctx.setStrokeColor(red: 0.05, green: 0.06, blue: 0.07, alpha: 1)
                 ctx.setLineWidth(max(3, 5 * s)); ctx.strokePath()
-                ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setStrokeColor(red: 1.0, green: 0.86, blue: 0.2, alpha: 1)
+                ctx.addPath(top); ctx.setStrokeColor(red: 1.0, green: 0.86, blue: 0.2, alpha: 1)
                 ctx.setLineWidth(max(1.5, 2.4 * s)); ctx.strokePath()
             }
         }
@@ -131,7 +151,7 @@ enum IsoMapRenderer {
         let byCell = Dictionary(placed.filter { !$0.dim }.map { ("\($0.gx),\($0.gy)", $0) }) { a, _ in a }
         let delta: [String: (Int, Int)] = ["n": (0, 1), "s": (0, -1), "e": (1, 0), "w": (-1, 0),
                                            "ne": (1, 1), "nw": (-1, 1), "se": (1, -1), "sw": (-1, -1)]
-        ctx.setAlpha(1.0); ctx.setLineCap(.round)
+        ctx.setAlpha(1.0); ctx.setLineCap(CGLineCap.round)
         for r in placed where !r.dim {
             let from = centre(r)
             for d in r.exits {
@@ -141,7 +161,7 @@ enum IsoMapRenderer {
                 let vx = to.x - from.x, vy = to.y - from.y
                 let len = max(1, (vx * vx + vy * vy).squareRoot())
                 let ux = vx / len, uy = vy / len
-                let half = max(3 * s, len / 2 - 0.55 * cd)      // sit in the gap between the two blocks
+                let half = max(3 * s, len * 0.30)
                 ctx.setStrokeColor(red: 0.13, green: 0.14, blue: 0.15, alpha: 0.9); ctx.setLineWidth(max(2.5, 4 * s))
                 ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half)); ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
                 ctx.setStrokeColor(red: 0.95, green: 0.88, blue: 0.55, alpha: 1); ctx.setLineWidth(max(1.5, 2 * s))
@@ -153,8 +173,37 @@ enum IsoMapRenderer {
         for r in backToFront(placed.filter { $0.dim && $0.z > 0 }) { drawRoom(r, 0.26) }
         ctx.setAlpha(1.0)
 
+        drawCompass(ctx, corner: CGPoint(x: 20 * s, y: CGFloat(height) - 20 * s), s: s, north: ny)
+
         guard let image = ctx.makeImage() else { return nil }
         return pngData(image)
+    }
+
+    /// A little corner compass: an arrow toward screen-north (up-left in iso) with an "N", so the diagonal
+    /// grid stays readable. `stepX,stepY` give the exact north direction = the +gy screen vector (-,+).
+    private static func drawCompass(_ ctx: CGContext, corner: CGPoint, s: CGFloat, north: CGVector) {
+        ctx.setAlpha(1.0)
+        let len = 13 * s
+        let mag = (north.dx * north.dx + north.dy * north.dy).squareRoot()
+        let nx = north.dx / mag, ny = north.dy / mag         // north screen unit vector (up, slightly left)
+        let tip = CGPoint(x: corner.x + nx * len, y: corner.y + ny * len)
+        let tail = CGPoint(x: corner.x - nx * len * 0.5, y: corner.y - ny * len * 0.5)
+        // shaft
+        ctx.setStrokeColor(red: 0.95, green: 0.9, blue: 0.55, alpha: 1); ctx.setLineWidth(max(1.5, 2 * s)); ctx.setLineCap(CGLineCap.round)
+        ctx.move(to: tail); ctx.addLine(to: tip); ctx.strokePath()
+        // arrowhead
+        let perpx = -ny, perpy = nx, ah = 5 * s
+        let a1 = CGPoint(x: tip.x - nx * ah + perpx * ah * 0.6, y: tip.y - ny * ah + perpy * ah * 0.6)
+        let a2 = CGPoint(x: tip.x - nx * ah - perpx * ah * 0.6, y: tip.y - ny * ah - perpy * ah * 0.6)
+        let head = CGMutablePath(); head.move(to: tip); head.addLine(to: a1); head.addLine(to: a2); head.closeSubpath()
+        ctx.addPath(head); ctx.setFillColor(red: 0.95, green: 0.9, blue: 0.55, alpha: 1); ctx.fillPath()
+        // "N" glyph past the tip
+        let nl = CGPoint(x: tip.x + nx * 8 * s, y: tip.y + ny * 8 * s), g = 3.5 * s
+        let glyph = CGMutablePath()
+        glyph.move(to: CGPoint(x: nl.x - g, y: nl.y - g)); glyph.addLine(to: CGPoint(x: nl.x - g, y: nl.y + g))
+        glyph.addLine(to: CGPoint(x: nl.x + g, y: nl.y - g)); glyph.addLine(to: CGPoint(x: nl.x + g, y: nl.y + g))
+        ctx.addPath(glyph); ctx.setStrokeColor(red: 1.0, green: 0.95, blue: 0.7, alpha: 1)
+        ctx.setLineWidth(max(1.2, 1.6 * s)); ctx.setLineJoin(CGLineJoin.miter); ctx.strokePath()
     }
 
     private static func chevron(_ ctx: CGContext, at p: CGPoint, up: Bool, s: CGFloat, bright: Bool) {
@@ -165,7 +214,7 @@ enum IsoMapRenderer {
         ctx.addPath(path)
         if bright { ctx.setStrokeColor(red: 0.55, green: 1.0, blue: 0.6, alpha: 1) }
         else { ctx.setStrokeColor(red: 0.95, green: 0.65, blue: 0.35, alpha: 1) }
-        ctx.setLineWidth(max(1.5, 2 * s)); ctx.setLineJoin(.round); ctx.strokePath()
+        ctx.setLineWidth(max(1.5, 2 * s)); ctx.setLineJoin(CGLineJoin.round); ctx.strokePath()
     }
 
     /// Flat fallback colour per terrain code (used until the ComfyUI tiles are baked, or if one is missing).
