@@ -55,7 +55,7 @@ test("minimap shows a stub for every exit, even walked ones whose neighbor is of
   P.rooms, P.current_room = saved.rooms, saved.cur
 end)
 
-test("minimap_grid places rooms on an integer grid by BFS over moves, gy growing north", function()
+test("minimap_grid places rooms on the axis-aligned grid (N→(0,1) up, E→(1,0) right)", function()
   local minimap_grid = _AIP_TEST.minimap_grid
   local rooms = {
     A = { exits = { north = true, east = true }, moves = { north = "B", east = "C" } },
@@ -67,8 +67,8 @@ test("minimap_grid places rooms on an integer grid by BFS over moves, gy growing
   local by_id = {}
   for _, c in ipairs(cells) do by_id[c.gx .. "," .. c.gy] = c end
   expect(by_id["0,0"].cur):truthy()          -- A stays at the origin
-  expect(by_id["0,1"]):truthy()              -- B is north -> +y (screen-up)
-  expect(by_id["1,0"]):truthy()              -- C is east -> +x
+  expect(by_id["0,1"]):truthy()              -- B is north → +gy (screen-up)
+  expect(by_id["1,0"]):truthy()              -- C is east → +gx (screen-right)
   expect(by_id["1,0"].color):eq("yellow")    -- waypoint room tints yellow
 end)
 
@@ -90,7 +90,7 @@ test("minimap_grid carries terrain, relative elevation, and up/down exits for th
   local up_seen = false
   for _, e in ipairs(by["0,0,0"].exits) do if e == "u" then up_seen = true end end
   expect(up_seen):truthy()                 -- "up" move → 'u' chevron exit
-  expect(by["1,0,1"].terrain):eq(10)       -- east neighbour's terrain (coord[3] 5−4 = +1 → z key 1)
+  expect(by["1,0,1"].terrain):eq(10)       -- east neighbour → (1,0); coord[3] 5−4 = +1 → z key 1
   expect(by["1,0,1"].z):eq(1)              -- coord[3] 5 − 4 = +1 level
   expect(by["1,0,1"].dim):falsy()          -- same floor (cardinal move) → not dimmed
   expect(by["0,0,0"].dim):falsy()
@@ -112,7 +112,7 @@ test("minimap_grid places other floors (up/down) at the same cell, dimmed, and s
   expect(by["0,0,0"].dim):falsy()           -- current floor room
   expect(by["0,0,1"].dim):truthy()          -- one floor up → dimmed, z=+1
   expect(by["0,0,2"].dim):truthy()          -- two floors up → dimmed, z=+2 (stacked)
-  expect(by["1,0,0"].dim):falsy()           -- east neighbour is same floor, not dimmed
+  expect(by["1,0,0"].dim):falsy()           -- east neighbour → (1,0) same floor, not dimmed
 end)
 
 test("minimap_grid keeps the first (closer) room on a grid-cell collision, skips the later one", function()

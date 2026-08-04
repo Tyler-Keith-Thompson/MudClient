@@ -1,14 +1,15 @@
 //
 //  IsoMapRenderer.swift
-//  The 2.5-D minimap renderer. Where `MapRenderer` paints a flat top-down grid, this paints the same
-//  room graph through an ISOMETRIC camera (2:1 diamonds) so elevation reads at a glance: each room is a
-//  little block whose top face carries its TERRAIN texture and whose height/vertical offset encodes its
-//  z-level (world coord z, relative to the current room). Higher rooms float up and occlude lower ones;
-//  a room that has an up/down exit gets a chevron so "there's something above/below here" is obvious.
+//  The 2.5-D minimap renderer. Where `MapRenderer` paints a flat top-down grid, this paints the same room
+//  graph as ANGLED 3-D BOXES on an axis-aligned grid: NORTH is straight up, EAST straight right (intuitive
+//  compass), and each room is a little block — a foreshortened top face carrying its TERRAIN texture plus a
+//  shaded front (south) wall for height. A room's z-level lifts its block; floors above/below are drawn as
+//  faint translucent ghosts so multi-level structure reads without hiding where you are. (This replaced an
+//  isometric-diamond projection whose 45° grid made the compass unintuitive; the type name is kept.)
 //
-//  Pure + game-agnostic: it takes a draw-spec (rooms on an integer grid + a z-level + a terrain code) and
-//  a tile provider, and returns PNG data. The projection from AIPilot's world-coord graph onto this grid
-//  lives in Lua (`minimap_grid`), reaching here via the `map_image` builtin. Terrain textures are the
+//  Pure + game-agnostic: it takes a draw-spec (rooms on an integer grid + a z-level + a terrain code) and a
+//  tile provider, and returns PNG data. The projection from AIPilot's world-coord graph onto this grid lives
+//  in Lua (`minimap_grid`), reaching here via the `map_image` builtin. Terrain textures are the
 //  ComfyUI-generated tiles under `Assets/terrain/NN_name.png`, loaded + cached by `TerrainTiles`.
 //
 
@@ -17,55 +18,49 @@ import Foundation
 import ImageIO
 
 enum IsoMapRenderer {
-    /// One room to draw. `gx,gy` = BFS grid (gy grows NORTH). `z` = level relative to the current room
-    /// (0 = same level, +1 = one up, -1 = one down). `terrain` = kxwt terrain code (0–39) or nil.
+    /// One room to draw. `gx,gy` = BFS grid (gx grows EAST, gy grows NORTH). `z` = level relative to the
+    /// current room (0 = same, +1 = one up, -1 = one down). `terrain` = kxwt terrain code (0–39) or nil.
     struct Room {
         var gx: Int
         var gy: Int
         var z: Int
-        var exits: Set<String>          // cardinals for edge stubs + "u"/"d" for the vertical chevron
+        var exits: Set<String>          // cardinals (unused for placement here) + "u"/"d" for the chevron
         var terrain: Int?
         var current: Bool
-        var dim: Bool                   // a room on ANOTHER floor (reached via up/down) → drawn faint, behind
+        var dim: Bool                   // a room on ANOTHER floor (reached via up/down) → drawn faint
         var rgb: (Double, Double, Double)?   // optional tint override (waypoint/blocked); nil → terrain colour
     }
 
-    // Diamond geometry (2:1 iso). Kept small — the terminal upscales the PNG into the panel rectangle.
-    private static let tileW = 40, tileH = 20         // top-face diamond bounding box
-    private static let hw = 20.0, hh = 10.0           // half extents
-    private static let spread = 1.42                  // cell-centre spacing / tile size → gaps between rooms
-    private static let levelH = 18.0                  // vertical pixels per z-level
-    private static let skirt = 12.0                   // block wall thickness (volume under every tile)
+    // Box geometry. Top face is foreshortened (cellD < cellW) so we read it at an angle; the front wall gives
+    // height. Kept small — the terminal upscales the PNG into the panel rectangle.
+    private static let cellW = 42.0                   // top-face width
+    private static let cellD = 30.0                   // top-face depth (foreshortened → the "tilt")
+    private static let wallH = 11.0                   // front-wall height (block thickness)
+    private static let gapX  = 11.0, gapY = 10.0      // gaps between blocks (so connectors + fronts show)
+    private static let levelH = 20.0                  // vertical pixels per z-level
     private static let zHeadroom = 4                  // z-levels of vertical margin reserved (constant scale)
 
     /// Render `rooms` to PNG. A FIXED grid window (`halfX,halfY`) centred on the current room (placed at
     /// 0,0) keeps per-room scale constant regardless of how many rooms exist; rooms outside are clipped.
     /// `tiles` supplies terrain textures (nil → flat colour fallback, so it works before tiles are baked).
-    static func renderPNG(rooms: [Room], halfX: Int = 6, halfY: Int = 4,
+    static func renderPNG(rooms: [Room], halfX: Int = 7, halfY: Int = 5,
                           scale: Int = 2, tiles: TerrainTiles? = nil) -> Data? {
         guard !rooms.isEmpty, halfX > 0, halfY > 0, scale > 0 else { return nil }
         let s = CGFloat(scale)
-        let hwx = hw * s, hhx = hh * s, lvl = levelH * s, sk = skirt * s
-        let stepX = hwx * spread, stepY = hhx * spread          // centre-to-centre spacing (tile stays hwx/hhx)
-        let twx = CGFloat(tileW) * s, thx = CGFloat(tileH) * s
+        let cw = cellW * s, cd = cellD * s, wh = wallH * s, lvl = levelH * s
+        let stepX = (cellW + gapX) * s
+        let stepY = (cellD + wallH + gapY) * s        // N-S spacing: clears each block's front wall + a gap
+        let zPad = lvl * CGFloat(zHeadroom)
 
         func inWindow(_ r: Room) -> Bool { r.gx >= -halfX && r.gx <= halfX && r.gy >= -halfY && r.gy <= halfY }
 
-        // Canvas from the WINDOW corners at z=0 (constant), plus fixed z headroom + skirt margins.
-        var minSx = CGFloat.greatestFiniteMagnitude, maxSx = -CGFloat.greatestFiniteMagnitude
-        var minSy = CGFloat.greatestFiniteMagnitude, maxSy = -CGFloat.greatestFiniteMagnitude
-        for gx in [-halfX, halfX] {
-            for gy in [-halfY, halfY] {
-                let sx = CGFloat(gx - gy) * stepX, sy = CGFloat(gx + gy) * stepY
-                minSx = min(minSx, sx); maxSx = max(maxSx, sx)
-                minSy = min(minSy, sy); maxSy = max(maxSy, sy)
-            }
-        }
+        // Constant canvas from the window extent + fixed z headroom (both directions) + wall/margin.
         let margin = 6 * s
-        let originX = -minSx + twx / 2 + margin
-        let originY = -minSy + sk + margin                          // y-up; leaves room for the skirt below
-        let width  = Int((maxSx - minSx) + twx + 2 * margin)
-        let height = Int((maxSy - minSy) + thx + sk + lvl * CGFloat(zHeadroom) + 2 * margin)
+        let spanX = CGFloat(halfX) * stepX, spanY = CGFloat(halfY) * stepY
+        let originX = spanX + cw / 2 + margin
+        let originY = spanY + wh + zPad + margin
+        let width  = Int(2 * spanX + cw + 2 * margin)
+        let height = Int(2 * spanY + cd + wh + 2 * zPad + 2 * margin)
         guard width > 0, height > 0,
               let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
                                   bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
@@ -74,109 +69,89 @@ enum IsoMapRenderer {
         ctx.clear(CGRect(x: 0, y: 0, width: width, height: height))
         ctx.interpolationQuality = .high
 
-        // Top-face diamond centre (CG y-up: north/east and higher-z all move UP the screen).
+        // Top-face centre (CG y-up: north = +gy → up, east = +gx → right, higher z → up).
         func centre(_ r: Room) -> CGPoint {
-            CGPoint(x: originX + CGFloat(r.gx - r.gy) * stepX,
-                    y: originY + CGFloat(r.gx + r.gy) * stepY + CGFloat(r.z) * lvl)
+            CGPoint(x: originX + CGFloat(r.gx) * stepX, y: originY + CGFloat(r.gy) * stepY + CGFloat(r.z) * lvl)
         }
-        func diamond(_ c: CGPoint) -> CGPath {
-            let p = CGMutablePath()
-            p.move(to: CGPoint(x: c.x, y: c.y + hhx))            // N
-            p.addLine(to: CGPoint(x: c.x + hwx, y: c.y))         // E
-            p.addLine(to: CGPoint(x: c.x, y: c.y - hhx))         // S
-            p.addLine(to: CGPoint(x: c.x - hwx, y: c.y))         // W
-            p.closeSubpath()
-            return p
-        }
+        // Top-face rect (foreshortened): south/front edge at cy-cd/2, north/back edge at cy+cd/2.
+        func topRect(_ c: CGPoint) -> CGRect { CGRect(x: c.x - cw / 2, y: c.y - cd / 2, width: cw, height: cd) }
 
         let placed = rooms.filter(inWindow)
-        // Painter's order: other-floor (dim) rooms first as faint context BEHIND, then the current floor on
-        // top so it always reads clearly. Within each group: far/back (large gx+gy) first, lower z first.
-        let order = placed.sorted {
-            if $0.dim != $1.dim { return $0.dim && !$1.dim }        // dim group drawn first
-            let a = $0.gx + $0.gy, b = $1.gx + $1.gy
-            if a != b { return a > b }
-            return $0.z < $1.z
+        func backToFront(_ list: [Room]) -> [Room] {
+            list.sorted { $0.gy != $1.gy ? $0.gy > $1.gy : $0.z < $1.z }   // north (far) first, lower z first
         }
 
-        // Same-floor adjacency for the connector lines (drawn ON TOP after the tiles, so exits are obvious).
+        // Draw one block: front (south) wall + terrain top face + outline + up/down chevrons, at `alpha`.
+        func drawRoom(_ r: Room, _ alpha: CGFloat) {
+            ctx.setAlpha(alpha)
+            let c = centre(r)
+            let rect = topRect(c)
+            let (fr, fg, fb) = r.rgb ?? terrainRGB(r.terrain)
+
+            // front (south) wall: hangs below the front edge, shaded darker for depth
+            let wall = CGMutablePath()
+            wall.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            wall.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+            wall.addLine(to: CGPoint(x: rect.maxX, y: rect.minY - wh))
+            wall.addLine(to: CGPoint(x: rect.minX, y: rect.minY - wh))
+            wall.closeSubpath()
+            ctx.addPath(wall); ctx.setFillColor(red: fr * 0.5, green: fg * 0.5, blue: fb * 0.5, alpha: 1); ctx.fillPath()
+            ctx.addPath(wall); ctx.setStrokeColor(red: 0.08, green: 0.09, blue: 0.10, alpha: 0.8)
+            ctx.setLineWidth(max(1, 1 * s)); ctx.strokePath()
+
+            // top face: terrain texture (or flat colour), clipped to the rect
+            if let img = tiles?.image(r.terrain) {
+                ctx.saveGState(); ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.clip()
+                ctx.draw(img, in: rect); ctx.restoreGState()
+            } else {
+                ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setFillColor(red: fr, green: fg, blue: fb, alpha: 1); ctx.fillPath()
+            }
+            ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setStrokeColor(red: 0.10, green: 0.12, blue: 0.13, alpha: 0.85)
+            ctx.setLineWidth(max(1, 1.2 * s)); ctx.strokePath()
+
+            if r.exits.contains("u") { chevron(ctx, at: CGPoint(x: c.x, y: rect.maxY + 4 * s), up: true, s: s, bright: true) }
+            if r.exits.contains("d") { chevron(ctx, at: CGPoint(x: c.x, y: rect.minY - wh - 1 * s), up: false, s: s, bright: false) }
+
+            if r.current {
+                // dark halo + gold ring so YOU are unmistakable, even under a translucent floor-above ghost.
+                ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setStrokeColor(red: 0.05, green: 0.06, blue: 0.07, alpha: 1)
+                ctx.setLineWidth(max(3, 5 * s)); ctx.strokePath()
+                ctx.addPath(CGPath(rect: rect, transform: nil)); ctx.setStrokeColor(red: 1.0, green: 0.86, blue: 0.2, alpha: 1)
+                ctx.setLineWidth(max(1.5, 2.4 * s)); ctx.strokePath()
+            }
+        }
+
+        // Clarity-ordered passes: floors below (faint, behind) → this floor → YOU (opaque, on top) →
+        // connectors → floor above (faint translucent ghost so overhead shows without washing out your room).
+        for r in backToFront(placed.filter { $0.dim && $0.z <= 0 }) { drawRoom(r, 0.30) }
+        for r in backToFront(placed.filter { !$0.dim && !$0.current }) { drawRoom(r, 1.0) }
+        for r in placed where r.current { drawRoom(r, 1.0) }
+
+        // Connector bars ON TOP so every exit reads as a link. Axis-aligned grid: n=(0,1), e=(1,0), …
         let byCell = Dictionary(placed.filter { !$0.dim }.map { ("\($0.gx),\($0.gy)", $0) }) { a, _ in a }
         let delta: [String: (Int, Int)] = ["n": (0, 1), "s": (0, -1), "e": (1, 0), "w": (-1, 0),
                                            "ne": (1, 1), "nw": (-1, 1), "se": (1, -1), "sw": (-1, -1)]
-
-        for r in order {
-            ctx.setAlpha(r.dim ? 0.4 : 1.0)                          // other floors: faint ghost context
-            let c = centre(r)
-            let top = diamond(c)
-            let (fr, fg, fb) = r.rgb ?? terrainRGB(r.terrain)
-
-            // ── skirt: two wall faces dropping `sk` below the top, giving each tile block volume ──
-            let botC = CGPoint(x: c.x, y: c.y - sk)
-            // left (SW) face
-            let leftFace = CGMutablePath()
-            leftFace.move(to: CGPoint(x: c.x - hwx, y: c.y)); leftFace.addLine(to: CGPoint(x: c.x, y: c.y - hhx))
-            leftFace.addLine(to: CGPoint(x: botC.x, y: botC.y - hhx)); leftFace.addLine(to: CGPoint(x: botC.x - hwx, y: botC.y))
-            leftFace.closeSubpath()
-            ctx.addPath(leftFace); ctx.setFillColor(red: fr * 0.45, green: fg * 0.45, blue: fb * 0.45, alpha: 1); ctx.fillPath()
-            // right (SE) face
-            let rightFace = CGMutablePath()
-            rightFace.move(to: CGPoint(x: c.x + hwx, y: c.y)); rightFace.addLine(to: CGPoint(x: c.x, y: c.y - hhx))
-            rightFace.addLine(to: CGPoint(x: botC.x, y: botC.y - hhx)); rightFace.addLine(to: CGPoint(x: botC.x + hwx, y: botC.y))
-            rightFace.closeSubpath()
-            ctx.addPath(rightFace); ctx.setFillColor(red: fr * 0.62, green: fg * 0.62, blue: fb * 0.62, alpha: 1); ctx.fillPath()
-
-            // ── top face: terrain texture clipped to the diamond, else flat colour ──
-            if let img = tiles?.image(r.terrain) {
-                ctx.saveGState()
-                ctx.addPath(top); ctx.clip()
-                let box = CGRect(x: c.x - hwx, y: c.y - hhx, width: hwx * 2, height: hhx * 2)
-                ctx.draw(img, in: box)
-                ctx.restoreGState()
-            } else {
-                ctx.addPath(top); ctx.setFillColor(red: fr, green: fg, blue: fb, alpha: 1); ctx.fillPath()
-            }
-
-            // top-face outline (crisper block edges)
-            ctx.addPath(top); ctx.setStrokeColor(red: 0.10, green: 0.12, blue: 0.13, alpha: 0.85)
-            ctx.setLineWidth(max(1, 1.2 * s)); ctx.strokePath()
-
-            // vertical exit chevron: up = bright ▲ above the tile, down = dim ▼ on the tile
-            if r.exits.contains("u") { chevron(ctx, at: CGPoint(x: c.x, y: c.y + hhx + 3 * s), up: true, s: s, bright: true) }
-            if r.exits.contains("d") { chevron(ctx, at: CGPoint(x: c.x, y: c.y - 1 * s), up: false, s: s, bright: false) }
-
-            if r.current {
-                ctx.addPath(diamond(CGPoint(x: c.x, y: c.y)))
-                ctx.setStrokeColor(red: 1.0, green: 0.86, blue: 0.2, alpha: 1)
-                ctx.setLineWidth(max(1.5, 2.2 * s)); ctx.strokePath()
-            }
-        }
-
-        // Connector lines ON TOP of the current floor, so every exit reads as a link between rooms. Each is
-        // a short bright bar spanning just the GAP between two tile faces (not the whole diameter) — enough
-        // to show the link without painting a road across the tile tops. Same-floor pairs only.
-        ctx.setAlpha(1.0)
-        ctx.setLineCap(.round)
+        ctx.setAlpha(1.0); ctx.setLineCap(.round)
         for r in placed where !r.dim {
             let from = centre(r)
             for d in r.exits {
                 guard let (dx, dy) = delta[d], let nb = byCell["\(r.gx + dx),\(r.gy + dy)"] else { continue }
                 let to = centre(nb)
-                // trim each end to the tile's half-extent so the bar sits in the gap between the two tiles
                 let mx = (from.x + to.x) / 2, my = (from.y + to.y) / 2
                 let vx = to.x - from.x, vy = to.y - from.y
                 let len = max(1, (vx * vx + vy * vy).squareRoot())
                 let ux = vx / len, uy = vy / len
-                let half = max(3 * s, (len - hwx) / 2)          // gap half-length (never negative)
-                ctx.setStrokeColor(red: 0.15, green: 0.17, blue: 0.18, alpha: 0.9)   // dark casing
-                ctx.setLineWidth(max(2.5, 4 * s))
-                ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half))
-                ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
-                ctx.setStrokeColor(red: 0.95, green: 0.88, blue: 0.55, alpha: 1)     // warm tan core
-                ctx.setLineWidth(max(1.5, 2 * s))
-                ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half))
-                ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
+                let half = max(3 * s, len / 2 - 0.55 * cd)      // sit in the gap between the two blocks
+                ctx.setStrokeColor(red: 0.13, green: 0.14, blue: 0.15, alpha: 0.9); ctx.setLineWidth(max(2.5, 4 * s))
+                ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half)); ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
+                ctx.setStrokeColor(red: 0.95, green: 0.88, blue: 0.55, alpha: 1); ctx.setLineWidth(max(1.5, 2 * s))
+                ctx.move(to: CGPoint(x: mx - ux * half, y: my - uy * half)); ctx.addLine(to: CGPoint(x: mx + ux * half, y: my + uy * half)); ctx.strokePath()
             }
         }
+
+        // Floor(s) above last, faint translucent ghost — your (opaque) room stays clear through it.
+        for r in backToFront(placed.filter { $0.dim && $0.z > 0 }) { drawRoom(r, 0.26) }
+        ctx.setAlpha(1.0)
 
         guard let image = ctx.makeImage() else { return nil }
         return pngData(image)

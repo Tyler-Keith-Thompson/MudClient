@@ -1330,10 +1330,10 @@ final class LuaScriptEngine: @unchecked Sendable {
                                                  z: num(f["z"]) ?? 0, exits: exits,
                                                  terrain: num(f["terrain"]), current: cur, dim: dim, rgb: rgb))
             }
-            // Fixed grid window centred on the current room → constant per-room scale (no zoom wobble). winy
-            // matches the display rows; winx is wider so the iso diamonds read ~square in the panel cells.
-            let winy = num(optDict["winy"]) ?? max(1, (rowsN - 1) / 2)
-            let winx = num(optDict["winx"]) ?? (winy + 2)
+            // Fixed grid window centred on the current room → constant per-room scale (no zoom wobble). The
+            // axis-aligned box grid maps gx→cols, gy→rows; wider than tall to match the panel rectangle.
+            let winx = num(optDict["winx"]) ?? 7
+            let winy = num(optDict["winy"]) ?? 5
             if let png = IsoMapRenderer.renderPNG(rooms: rooms, halfX: winx, halfY: winy,
                                                   scale: num(optDict["cell"]).map { max(1, $0 / 11) } ?? 2,
                                                   tiles: LuaScriptEngine.terrainTiles) {

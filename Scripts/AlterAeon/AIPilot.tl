@@ -1031,6 +1031,9 @@ end
 -- kxwt coords when known), this walks the pure move-GRAPH: coords aren't needed, so it also works right
 -- after a reload/relaunch before kxwt re-supplies them. gy grows NORTH (screen-up), matching map_image's
 -- documented grid convention; up/down/in/out/other non-2D directions are ignored for placement.
+-- Axis-aligned grid: gx grows EAST, gy grows NORTH. IsoMapRenderer draws each cell as an angled 3-D box
+-- with north straight up / east straight right, so the grid maps directly to the screen compass. Must match
+-- IsoMapRenderer's connector `delta` map.
 local GRID_DELTA: {string:{integer}} = {
   north = { 0, 1 }, south = { 0, -1 }, east = { 1, 0 }, west = { -1, 0 },
   northeast = { 1, 1 }, northwest = { -1, 1 }, southeast = { 1, -1 }, southwest = { -1, -1 },
