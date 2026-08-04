@@ -802,10 +802,13 @@ final class TerminalService {
         exit(0)
     }
 
-    /// Set the terminal window/tab title (OSC 2, BEL-terminated — broadly supported). Exposed to Lua as
-    /// `title(text)`; scripts drive it from game state (character / area / HP). Survives the alt buffer.
+    /// Set the terminal title. Uses OSC 0 (BEL-terminated), which sets BOTH the icon name and the window
+    /// title — the TAB shows the icon name (OSC 1/0), NOT the window title (OSC 2), so OSC 0 is what actually
+    /// updates the tab. Exposed to Lua as `title(text)`; scripts drive it from game state. Survives the alt
+    /// buffer. (If it still doesn't show in iTerm2, check Profiles → General → Title includes the session
+    /// title, and Advanced/Terminal allows the terminal to set the title.)
     func setTitle(_ text: String) {
-        writeToStandardOut(data: Data("\u{1B}]2;\(text)\u{07}".utf8))
+        writeToStandardOut(data: Data("\u{1B}]0;\(text)\u{07}".utf8))
     }
     
     private func getTerminalHeight() -> Int? {
