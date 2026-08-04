@@ -224,11 +224,22 @@ line = { TOP_STROKE[1], TOP_STROKE[2], TOP_STROKE[3], TOP_STROKE[4] * a }, w = m
                   local vx, vy = tx - fx, ty - fy
                   local len = math.max(1, math.sqrt(vx * vx + vy * vy))
                   local ux, uy = vx / len, vy / len
-                  local half = math.max(3 * s, len * 0.30)
-                  local p1x, p1y = mx - ux * half, my - uy * half
-                  local p2x, p2y = mx + ux * half, my + uy * half
+                  local hgap = math.max(3 * s, len * 0.30)
+                  local p1x, p1y = mx - ux * hgap, my - uy * hgap
+                  local p2x, p2y = mx + ux * hgap, my + uy * hgap
                   push({ op = "path", pts = { p1x, p1y, p2x, p2y }, line = { 0.13, 0.14, 0.15, 0.9 }, w = math.max(2.5, 4 * s) })
                   push({ op = "path", pts = { p1x, p1y, p2x, p2y }, line = { 0.95, 0.88, 0.55, 1 }, w = math.max(1.5, 2 * s) })
+               else
+
+
+                  local fx, fy = cx(c), cy(c)
+                  local sdx, sdy = dl[1] * exx + dl[2] * nyx, dl[1] * exy + dl[2] * nyy
+                  local sl = math.max(1, math.sqrt(sdx * sdx + sdy * sdy))
+                  local ux, uy = sdx / sl, sdy / sl
+                  local a1x, a1y = fx + ux * sl * 0.34, fy + uy * sl * 0.34
+                  local a2x, a2y = fx + ux * sl * 0.56, fy + uy * sl * 0.56
+                  push({ op = "path", pts = { a1x, a1y, a2x, a2y }, line = { 0.10, 0.11, 0.12, 0.7 }, w = math.max(2, 3 * s) })
+                  push({ op = "path", pts = { a1x, a1y, a2x, a2y }, line = { 0.72, 0.66, 0.42, 0.85 }, w = math.max(1, 1.4 * s) })
                end
             end
          end end

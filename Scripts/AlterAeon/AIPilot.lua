@@ -39,6 +39,13 @@ local recallFizzleS = rx and rx.subject() or nil
 
 
 
+
+
+
+local minimap_dirty = false
+
+
+
 local function untrack_flow(p)
    if p and __untrack_promise then __untrack_promise(p) end
    return p
@@ -450,13 +457,18 @@ if rx then
    rx.fromTrigger([[^kxw[tq]_terrain (\d+)]]):subscribe(function(c)
       local id = P.current_room
       if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(c[1]) then
-         P.rooms[id].terrain = tonumber(c[1]); schedule_save()
+         P.rooms[id].terrain = tonumber(c[1]); schedule_save(); minimap_dirty = true
       end
    end)
 
    rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function(_)
       local id = P.current_room
-      if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+      if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save(); minimap_dirty = true end
+   end)
+
+
+   rx.fromTrigger([[^kxw[tq]_prompt ]]):subscribe(function(_)
+      if minimap_dirty and P.minimap_on then minimap_dirty = false; update_minimap() end
    end)
 
    rx.fromTrigger([[^You have been KILLED]]):subscribe(function(_) mark_death() end)
@@ -473,12 +485,15 @@ else
    trigger([[^kxw[tq]_terrain (\d+)]], function(_, t)
       local id = P.current_room
       if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(t) then
-         P.rooms[id].terrain = tonumber(t); schedule_save()
+         P.rooms[id].terrain = tonumber(t); schedule_save(); minimap_dirty = true
       end
    end)
    trigger([[^kxw[tq]_waypoint]], function()
       local id = P.current_room
-      if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+      if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save(); minimap_dirty = true end
+   end)
+   trigger([[^kxw[tq]_prompt ]], function()
+      if minimap_dirty and P.minimap_on then minimap_dirty = false; update_minimap() end
    end)
    trigger([[^You have been KILLED]], function() mark_death() end)
    trigger([[.*]], function(line) pilot_observe(line) end)
@@ -557,7 +572,7 @@ function pilot_room_change(id, coord)
       after(0.4, function() if P.goto_bridge then goto_bridge_advance() end end)
    end
    if P.nav then nav_step() end
-   if P.minimap_on then update_minimap() end
+   minimap_dirty = true
 end
 
 function pilot_room_name(n)
@@ -1107,14 +1122,21 @@ local function minimap_grid(rooms, start, depth)
       local r = rooms[id]
       local g = pos[id]
       local floor = g[3]
+
+
       local exits = {}
-      for dir in pairs(r.moves or {}) do
+      local seen_dir = {}
+      local function add_exit(dir)
+         if seen_dir[dir] then return end
+         seen_dir[dir] = true
          local abbr = GRID_ABBR[dir]
          if abbr then exits[#exits + 1] = abbr
          elseif dir == "up" then exits[#exits + 1] = "u"
          elseif dir == "down" then exits[#exits + 1] = "d"
          end
       end
+      for dir in pairs(r.exits or {}) do add_exit(dir) end
+      for dir in pairs(r.moves or {}) do add_exit(dir) end
       local color
       if r.waypoint then color = "yellow"
       elseif r.blocked and next(r.blocked) then color = "gray" end
@@ -1505,7 +1527,7 @@ function pilot_observe(line)
    if exits and P.current_room then
       P.rooms[P.current_room] = P.rooms[P.current_room] or { exits = {}, moves = {} }
       local r = P.rooms[P.current_room]
-      for d in pairs(exits) do if not r.exits[d] then r.exits[d] = true; schedule_save() end end
+      for d in pairs(exits) do if not r.exits[d] then r.exits[d] = true; schedule_save(); minimap_dirty = true end end
 
 
       if r.pending_reverse_dir then

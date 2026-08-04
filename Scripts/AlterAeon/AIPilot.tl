@@ -37,6 +37,13 @@ local rx = __rx
 local roomChangeS   = rx and rx.subject() or nil   -- a room change landed; emits the new room id
 local recallFizzleS = rx and rx.subject() or nil   -- a recall fizzled ("No god responds"); emits ()
 
+-- Graphical minimap refresh is DEFERRED to the prompt (GA boundary), not fired inline on room change: the
+-- room's terrain + exit lines arrive AFTER the room-change signal but BEFORE the prompt, so rendering on
+-- room change paints a room with no terrain/exits yet ("you don't see them until you `look`"). We just mark
+-- the map dirty as data lands and render ONCE when the batch completes (the kxwt_prompt line). Deterministic
+-- — no timers.
+local minimap_dirty = false
+
 -- Keep a reactive flow promise OUT of the HUD promise widget (AIPilot contributes no `active_promises`
 -- rows — the recall await is internal plumbing, not a user-visible action). Mirrors AutoFight/Corpse's P().
 local function untrack_flow(p: any): any
@@ -450,13 +457,18 @@ if rx then
   rx.fromTrigger([[^kxw[tq]_terrain (\d+)]]):subscribe(function(c: {string})
     local id = P.current_room
     if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(c[1]) then
-      P.rooms[id].terrain = tonumber(c[1]) as integer; schedule_save()
+      P.rooms[id].terrain = tonumber(c[1]) as integer; schedule_save(); minimap_dirty = true
     end
   end)
   -- kxwt_waypoint marks the current room as a travel waypoint; remember it so the minimap can flag it.
   rx.fromTrigger([[^kxw[tq]_waypoint]]):subscribe(function(_: {string})
     local id = P.current_room
-    if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+    if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save(); minimap_dirty = true end
+  end)
+  -- Render the graphical minimap at the GA/prompt boundary — the server sends the prompt AFTER the room's
+  -- name/terrain/exit lines, so by here the room is fully parsed. Only when something actually changed.
+  rx.fromTrigger([[^kxw[tq]_prompt ]]):subscribe(function(_: {string})
+    if minimap_dirty and P.minimap_on then minimap_dirty = false; update_minimap() end
   end)
   -- Your own death (only ever printed for YOU) teleports you to recall — mark the corpse room first.
   rx.fromTrigger([[^You have been KILLED]]):subscribe(function(_: {string}) mark_death() end)
@@ -473,12 +485,15 @@ else
   trigger([[^kxw[tq]_terrain (\d+)]], function(_: any, t: string): any
     local id = P.current_room
     if id and P.rooms[id] and P.rooms[id].terrain ~= tonumber(t) then
-      P.rooms[id].terrain = tonumber(t) as integer; schedule_save()
+      P.rooms[id].terrain = tonumber(t) as integer; schedule_save(); minimap_dirty = true
     end
   end)
   trigger([[^kxw[tq]_waypoint]], function(): any
     local id = P.current_room
-    if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save() end
+    if id and P.rooms[id] and not P.rooms[id].waypoint then P.rooms[id].waypoint = true; schedule_save(); minimap_dirty = true end
+  end)
+  trigger([[^kxw[tq]_prompt ]], function(): any
+    if minimap_dirty and P.minimap_on then minimap_dirty = false; update_minimap() end
   end)
   trigger([[^You have been KILLED]], function(): any mark_death() end)
   trigger([[.*]], function(line: string): any pilot_observe(line) end)
@@ -557,7 +572,7 @@ function pilot_room_change(id: integer, coord: {number})
     after(0.4, function() if P.goto_bridge then goto_bridge_advance() end end)
   end
   if P.nav then nav_step() end   -- a route is in progress: take the next step
-  if P.minimap_on then update_minimap() end   -- graphical minimap opt-in: refresh on every room change
+  minimap_dirty = true           -- graphical minimap: render at the prompt, once terrain/exits have landed
 end
 
 function pilot_room_name(n: string)
@@ -1107,14 +1122,21 @@ local function minimap_grid(rooms: {integer:Room}, start: integer, depth: intege
     local r = rooms[id]
     local g = pos[id]
     local floor = g[3]
+    -- Advertised exits (the room's exit line) UNION traversed moves, so the renderer can draw a stub for an
+    -- exit we haven't walked yet (unexplored) — not just links between rooms we've already connected.
     local exits: {string} = {}
-    for dir in pairs(r.moves or {}) do
+    local seen_dir: {string:boolean} = {}
+    local function add_exit(dir: string)
+      if seen_dir[dir] then return end
+      seen_dir[dir] = true
       local abbr = GRID_ABBR[dir]
-      if abbr then exits[#exits + 1] = abbr             -- cardinal → grid edge stub
+      if abbr then exits[#exits + 1] = abbr             -- cardinal → grid edge stub / connector
       elseif dir == "up" then exits[#exits + 1] = "u"   -- vertical exits → the up/down depth chevrons
       elseif dir == "down" then exits[#exits + 1] = "d"
       end
     end
+    for dir in pairs(r.exits or {}) do add_exit(dir) end
+    for dir in pairs(r.moves or {}) do add_exit(dir) end
     local color: string
     if r.waypoint then color = "yellow"
     elseif r.blocked and next(r.blocked) then color = "gray" end
@@ -1505,7 +1527,7 @@ function pilot_observe(line: string)
   if exits and P.current_room then
     P.rooms[P.current_room] = P.rooms[P.current_room] or { exits = {}, moves = {} }
     local r = P.rooms[P.current_room]
-    for d in pairs(exits) do if not r.exits[d] then r.exits[d] = true; schedule_save() end end
+    for d in pairs(exits) do if not r.exits[d] then r.exits[d] = true; schedule_save(); minimap_dirty = true end end
     -- Resolve a reverse edge deferred by pilot_room_change (destination's exits weren't known yet):
     -- only wire it up if the room genuinely advertises that direction, never fabricate it.
     if r.pending_reverse_dir then

@@ -8,6 +8,22 @@ local compass          = _HUD_TEST.compass
 local group_member_row = _HUD_TEST.group_member_row
 local append_col       = _HUD_TEST.append_col
 
+-- Is the "exits" compass label present anywhere in a panel spec? (In combat it must NOT be — the rose
+-- vanishes rather than relocating to the top panel.)
+local function has_exits_label(rows)
+  local found = false
+  local function walk(node)
+    if type(node) ~= "table" then return end
+    if node.text == "exits" then found = true end
+    for _, key in ipairs({ "cols", "spans" }) do
+      if node[key] then for _, c in ipairs(node[key]) do walk(c) end end
+    end
+    if node[1] then for _, c in ipairs(node) do walk(c) end end
+  end
+  for _, r in ipairs(rows) do walk(r) end
+  return found
+end
+
 test("compass builds a centered 12-wide rose cell, lighting only the available exits", function()
   local saved = state
   state = { exits = { north = true } }
@@ -105,10 +121,8 @@ test("in-combat bottom panel: target rides the stats line; spells + room name go
   expect(bottom[2].spans):truthy()
   expect(bottom[3].cols):eq(nil)     -- ...and so is the room-name row
   expect(bottom[3].spans):truthy()
-  -- The exits rose relocates to the TOP panel while fighting (3 compass rows, each a 2-col row).
-  local compass_rows = 0
-  for _, r in ipairs(top) do if r.cols and #r.cols == 2 then compass_rows = compass_rows + 1 end end
-  expect(compass_rows >= 3):truthy()
+  -- The exits rose VANISHES in combat — it is NOT relocated to the top panel.
+  expect(has_exits_label(top)):falsy()
 end)
 
 -- Collect every text fragment painted into a panel spec (rows -> cols/spans -> text).
@@ -188,10 +202,8 @@ test("nomelee fight (NO kxwt_fighting): combat layout renders with the best esti
   expect(all_text(bottom)):contains("An orc bachelor")
   expect(all_text(bottom)):contains("near death")             -- pct 3 -> the estimate's condition word
   expect(all_text(bottom)):contains("~")                      -- flagged as an estimate, not exact
-  -- The exits rose relocates to the top panel, exactly as in a kxwt-confirmed fight.
-  local compass_rows = 0
-  for _, r in ipairs(top) do if r.cols and #r.cols == 2 then compass_rows = compass_rows + 1 end end
-  expect(compass_rows >= 3):truthy()
+  -- The exits rose vanishes in combat (same as a kxwt-confirmed fight) — not relocated to the top.
+  expect(has_exits_label(top)):falsy()
 end)
 
 test("a freshly TARGETED enemy (no health reading yet) is promoted by name with a '?' estimate", function()

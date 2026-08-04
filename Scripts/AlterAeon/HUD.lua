@@ -858,11 +858,9 @@ update_top = function()
       group_view_rows = group_block_rows
       group_scrollable = group_max() > 0 and #members > group_max()
    end
-   if in_fight() then
-      left[#left + 1] = { cols = { { text = "" }, compass(1) } }
-      left[#left + 1] = { cols = { { spans = { { text = "exits", dim = true } } }, compass(2) } }
-      left[#left + 1] = { cols = { { text = "" }, compass(3) } }
-   end
+
+
+
    for _, r in ipairs(reference_rows()) do left[#left + 1] = r end
 
 

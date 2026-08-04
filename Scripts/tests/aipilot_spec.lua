@@ -97,6 +97,15 @@ test("minimap_grid: elevation follows up/down MOVES, not coord[3] drift; carries
   expect(by["0,0,1"].dim):truthy()         -- other floor → dimmed/ghost
 end)
 
+test("minimap_grid reports ADVERTISED exits (from the exit line), not just walked moves", function()
+  local minimap_grid = _AIP_TEST.minimap_grid
+  local rooms = { A = { exits = { north = true, east = true, up = true }, moves = {} } }  -- advertised, none walked
+  local cells = minimap_grid(rooms, "A", 5)
+  local ex = {}
+  for _, e in ipairs(cells[1].exits) do ex[e] = true end
+  expect(ex.n):truthy(); expect(ex.e):truthy(); expect(ex.u):truthy()   -- shown so the renderer can stub them
+end)
+
 test("minimap_grid is UNDIRECTED: a just-arrived room with no outgoing moves still shows its neighbourhood", function()
   local minimap_grid = _AIP_TEST.minimap_grid
   -- A is the current room, freshly entered: its reverse edge isn't parsed yet, so moves = {}. But B points

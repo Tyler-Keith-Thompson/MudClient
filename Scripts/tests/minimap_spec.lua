@@ -44,6 +44,21 @@ test("minimap_render draws the current room's gold ring and an elevation is enco
   expect(gold):truthy()
 end)
 
+test("minimap_render draws a muted stub for an advertised exit with no room on the other side (unexplored)", function()
+  local seen = capture()
+  minimap_render({
+    { gx = 0, gy = 0, z = 0, terrain = 3, exits = { "n", "e", "s", "w" }, cur = true },  -- lone room, 4 exits
+  }, 26, 9)
+  -- each unexplored cardinal exit → a stub whose core is the muted tan {0.72,0.66,0.42}
+  local stubs = 0
+  for _, c in ipairs(seen.cmds) do
+    if c.op == "path" and c.line and math.abs(c.line[1]-0.72) < 0.02 and math.abs(c.line[2]-0.66) < 0.02 then
+      stubs = stubs + 1
+    end
+  end
+  expect(stubs):eq(4)
+end)
+
 test("minimap_render clears the panel (empty commands) when there are no cells", function()
   local seen = capture()
   minimap_render({}, 26, 9)

@@ -279,8 +279,8 @@ local function room_name_cell(): Cell
 end
 
 -- Out of combat the exits rose sits on the RIGHT of the bottom panel, spanning the three rows next to
--- the stats. In combat the target takes the stats line's 4th slot and the rose shoots up to the top
--- panel (see update_top), so it's always the full rose — never a one-liner.
+-- the stats. In combat the target takes the stats line's 4th slot and the rose just vanishes (it returns
+-- at the bottom when the fight ends) — we no longer relocate it to the top panel.
 update_bottom = function()
   local fighting = in_fight()                    -- kxwt target OR text-inferred (nomelee) engagement
   -- Inferred opponents. Without an exact kxwt target (nomelee) the best-known one is PROMOTED into
@@ -858,11 +858,9 @@ update_top = function()
     group_view_rows = group_block_rows                        -- screen rows 1..this are the group (top of the panel)
     group_scrollable = group_max() > 0 and #members > group_max()
   end
-  if in_fight() then   -- the stats line is busy with the target, so the exits rose lives up here
-    left[#left + 1] = { cols = { { text = "" }, compass(1) } }
-    left[#left + 1] = { cols = { { spans = { { text = "exits", dim = true } } }, compass(2) } }
-    left[#left + 1] = { cols = { { text = "" }, compass(3) } }
-  end
+  -- In combat the exits rose simply VANISHES (the bottom stats line is busy with the target). We used to
+  -- relocate it up here, but that shuffle was more distracting than useful — it comes back at the bottom
+  -- the moment the fight ends.
   for _, r in ipairs(reference_rows()) do left[#left + 1] = r end
 
   -- Compose the minimap as a right-hand column, aligned row-for-row with the left content. EVERY left
