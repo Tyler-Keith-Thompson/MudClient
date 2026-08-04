@@ -1060,6 +1060,19 @@ end
 
 
 
+local function abort_engagement()
+   end_fight()
+   F.engaging, F.engage_busy, F.opener_primed = false, false, false
+   F.on_dead, F.on_fail = nil, nil
+   F.fought = false
+   say("cancelled this fight — still armed (type `autofight off` to disarm)")
+end
+
+
+
+
+
+
 
 
 
@@ -1816,7 +1829,7 @@ group = "combat", text = "Start a fight from out of combat: set the target and c
 function attack(target)
    return __promise(function(resolve, reject, onCancel)
       autofight.engage(target, function() resolve(nil) end, function(reason) reject(reason) end)
-      onCancel(function() autofight.off() end)
+      onCancel(function() abort_engagement() end)
    end, "attack")
 end
 doc("attack", { sig = "attack(target) -> promise", group = "combat",

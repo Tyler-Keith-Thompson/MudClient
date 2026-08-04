@@ -540,6 +540,23 @@ test("engage: a stray fight-end while still landing the opener does NOT resolve 
   expect(dead):eq(false)
 end)
 
+test("attack() cancel (`-|` / dropped pipe stage) stops THIS fight but leaves auto-fight ARMED — no disarm", function()
+  -- Regression: a `-|` that caught a pending `attack` promise used to call autofight.off() and silently
+  -- disarm the whole feature, so the NEXT fight drove nothing. Cancel must stop only the current engagement.
+  AF.reset()                                           -- armed: F.on = true
+  AF.state().engaging = false                          -- hermetic (reset() doesn't touch engaging)
+  local p = attack("orc")                              -- engage: target + opener (F.engaging)
+  p.__start()                                          -- offline harness doesn't fire the auto-start tick — run it
+  expect(AF.state().on):eq(true)
+  expect(AF.state().engaging):eq(true)
+  p:cancel()                                           -- exactly what `-|` / a dropped pipe does
+  expect(AF.state().on):eq(true)                       -- STILL armed (used to flip to false)
+  expect(AF.state().engaging):eq(false)                -- but the current engagement is stopped
+  -- and an explicit disarm still fully turns it off
+  autofight.off()
+  expect(AF.state().on):eq(false)
+end)
+
 -- ---- soulsteal that fails to capture (resist / dormant latch) ------------------------------------
 -- A soulsteal can RESIST outright, or LATCH ("You magically latch onto <x>'s soul and wait for <x> to
 -- weaken…") — either way it did NOT capture. The rule (per the player) is identical for both: throw the

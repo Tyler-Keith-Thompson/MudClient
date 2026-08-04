@@ -388,7 +388,8 @@ end
 __promise = __promise_impl
 
 -- cancelPromises() — abort every in-flight promise at once. Each one's cancel hook runs, so the action
--- is UNDONE: recover stands you up, attack disarms auto-fight, a queued pipe segment's send is dropped.
+-- is UNDONE: recover stands you up, attack stops the current engagement (auto-fight stays ARMED), a queued
+-- pipe segment's send is dropped.
 -- The panic button for "stop whatever the chain is doing." Returns how many promises were cancelled.
 function cancelPromises(): integer
    local n = cancel_all()

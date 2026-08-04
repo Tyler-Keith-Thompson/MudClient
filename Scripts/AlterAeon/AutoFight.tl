@@ -1055,6 +1055,19 @@ local function end_fight()
   if F.suspend_timer and cancel then cancel(F.suspend_timer); F.suspend_timer = nil end
 end
 
+-- Stop the CURRENT fight/engage WITHOUT disarming auto-fight. attack()'s cancel hook uses this so a `-|`
+-- (or any promise cancel that catches a pending `attack` stage) stops just that engagement but leaves
+-- auto-fight ARMED for the next fight. Disarming the whole feature on a stray cancel was a surprise: a `-|`
+-- while an `attack` promise was still pending silently turned auto-fight OFF for good, so the next fight
+-- (a manual `attack …`) drove nothing. Explicit `autofight off` still fully disarms.
+local function abort_engagement()
+  end_fight()                                                       -- tear down the in-flight flow (deadS), clear fighting/suspend
+  F.engaging, F.engage_busy, F.opener_primed = false, false, false  -- stop any opener-retry loop
+  F.on_dead, F.on_fail = nil, nil                                   -- drop the engage callbacks (the promise is already settling)
+  F.fought = false
+  say("cancelled this fight — still armed (type `autofight off` to disarm)")
+end
+
 -- ---- AOE crowd tracking --------------------------------------------------------------------------
 -- F.enemy_est = our running estimate of how many hostiles are engaged. It's SET from a room listing
 -- (a look/auto-look) and COUNTED DOWN as enemies die (kxwt_mdeath). AOE is on (in "auto") whenever the
@@ -1816,7 +1829,7 @@ doc(autofight.engage, { name = "autofight.engage", sig = "autofight.engage(targe
 global function attack(target: string): Promise<any>
   return __promise(function(resolve: function(any), reject: function(string), onCancel: function(function()))
     autofight.engage(target, function() resolve(nil) end, function(reason: string) reject(reason) end)
-    onCancel(function() autofight.off() end)   -- chain aborted: disarm auto-fight
+    onCancel(function() abort_engagement() end)   -- cancel (`-|`/drop) stops THIS engagement but leaves auto-fight ARMED
   end, "attack")
 end
 doc("attack", { sig = "attack(target) -> promise", group = "combat",

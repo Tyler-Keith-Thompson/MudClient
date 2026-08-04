@@ -390,6 +390,7 @@ __promise = __promise_impl
 
 
 
+
 function cancelPromises()
    local n = cancel_all()
    if echo then
