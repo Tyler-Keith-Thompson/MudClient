@@ -269,6 +269,20 @@ final class TerminalService {
                 // to Lua `bind` first, so a script can rebind ctrl-T to anything else. The gutter
                 // appearing/disappearing is its own feedback, so there's no status echo.
                 toggleTimestamps()
+            // Readline-style editing on the current VISUAL line (buffers may be multi-line via Shift+Enter).
+            case "ctrl-u": killRange(Self.lineStart(of: cursor.column - 1, in: lineBuffer), cursor.column - 1)  // kill to line start
+            case "ctrl-k": killRange(cursor.column - 1, Self.lineEnd(of: cursor.column - 1, in: lineBuffer))    // kill to line end
+            case "ctrl-w": killRange(Self.wordStart(before: cursor.column - 1, in: lineBuffer), cursor.column - 1)  // kill word back
+            case "ctrl-y": if !killBuffer.isEmpty { insertText(killBuffer) }                                    // yank
+            case "alt-b", "alt-left", "ctrl-left":                                                              // word back
+                // Alt-B needs iTerm2's Option=Esc+; Option+← / Ctrl+← work regardless (arrows don't compose).
+                cursor.update(column: Self.wordStart(before: cursor.column - 1, in: lineBuffer) + 1)
+                refreshDisplay(cursorColumn: cursor.column)
+            case "alt-f", "alt-right", "ctrl-right":                                                            // word forward
+                cursor.update(column: Self.wordEnd(after: cursor.column - 1, in: lineBuffer) + 1)
+                refreshDisplay(cursorColumn: cursor.column)
+            case "ctrl-l":                                                                                      // clear + redraw
+                writeToStandardOut(data: Data("\u{1B}[2J".utf8)); lastSignature = ""; setupScreen()
             default:
                 break                                    // recognised but unbound special key → drop
             }
@@ -574,6 +588,26 @@ final class TerminalService {
         return i
     }
 
+    private static func isWordSep(_ c: Character) -> Bool { c == " " || c == "\t" || c == "\n" }
+
+    /// Offset of the start of the word before `index`: skip trailing separators, then the word. The target
+    /// for Ctrl-W (kill word back) and Alt-B (word back). Pure, so it's unit-tested directly.
+    static func wordStart(before index: Int, in buffer: String) -> Int {
+        let chars = Array(buffer)
+        var i = min(max(0, index), chars.count)
+        while i > 0 && isWordSep(chars[i - 1]) { i -= 1 }
+        while i > 0 && !isWordSep(chars[i - 1]) { i -= 1 }
+        return i
+    }
+    /// Offset just past the word after `index`: skip leading separators, then the word. Target for Alt-F.
+    static func wordEnd(after index: Int, in buffer: String) -> Int {
+        let chars = Array(buffer)
+        var i = min(max(0, index), chars.count)
+        while i < chars.count && isWordSep(chars[i]) { i += 1 }
+        while i < chars.count && !isWordSep(chars[i]) { i += 1 }
+        return i
+    }
+
     /// Split a submitted input buffer into the individual commands to send, one per visual line.
     static func splitCommands(_ buffer: String) -> [String] {
         buffer.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -823,6 +857,35 @@ final class TerminalService {
     func setTitle(_ text: String) {
         writeToStandardOut(data: Data("\u{1B}]0;\(text)\u{07}".utf8))
     }
+
+    /// Post a desktop/terminal notification (iTerm2 OSC 9). Scripts fire it on tells/deaths/level-ups —
+    /// pair with the `on_focus` hook to notify only when the window is unfocused. Ignored by terminals
+    /// that don't support it. Exposed to Lua as `notify(text)`.
+    func notify(_ text: String) {
+        writeToStandardOut(data: Data("\u{1B}]9;\(text)\u{07}".utf8))
+    }
+
+    /// iTerm2 badge (OSC 1337 SetBadgeFormat): a large translucent status watermark over the session —
+    /// character, HP%, "DANGER". Empty string clears it. The format is base64-encoded per the protocol.
+    /// iTerm2-only (no-op elsewhere). Exposed to Lua as `badge(text)`.
+    func setBadge(_ text: String) {
+        let b64 = Data(text.utf8).base64EncodedString()
+        writeToStandardOut(data: Data("\u{1B}]1337;SetBadgeFormat=\(b64)\u{07}".utf8))
+    }
+
+    /// iTerm2 RequestAttention (OSC 1337): bounce the dock icon / flash on urgent events. `kind` is
+    /// "yes" (until focused), "once", "fireworks", or "no". iTerm2-only. Exposed as `attention([kind])`.
+    func requestAttention(_ kind: String) {
+        writeToStandardOut(data: Data("\u{1B}]1337;RequestAttention=\(kind)\u{07}".utf8))
+    }
+
+    /// iTerm2 user variable (OSC 1337 SetUserVar): push a named value scripts can surface in the native
+    /// status bar via an Interpolated String component. Value base64-encoded per the protocol. iTerm2-only.
+    /// Exposed to Lua as `set_uservar(name, value)`.
+    func setUserVar(_ name: String, _ value: String) {
+        let b64 = Data(value.utf8).base64EncodedString()
+        writeToStandardOut(data: Data("\u{1B}]1337;SetUserVar=\(name)=\(b64)\u{07}".utf8))
+    }
     
     private func getTerminalHeight() -> Int? {
         var w = winsize()
@@ -913,6 +976,27 @@ final class TerminalService {
         historyAnchor = nil
         historyMatchStart = nil
         historyMatchLength = nil
+    }
+
+    // The last killed text (Ctrl-U/K/W), re-inserted by Ctrl-Y (yank). A single slot, like a minimal
+    // readline kill buffer — enough for the common "wipe it and paste it back / elsewhere" flow.
+    private var killBuffer = ""
+
+    /// Delete buffer characters in the 0-indexed half-open range [from, to), save them to the kill buffer
+    /// (for Ctrl-Y), and place the cursor at `from`. Shared by the Ctrl-U/K/W kill operations. Rebuilds the
+    /// input geometry if a newline was removed (a visual line went away), mirroring handleBackspace.
+    private func killRange(_ from: Int, _ to: Int) {
+        guard to > from, from >= 0, to <= lineBuffer.count else { return }
+        resetHistorySearch()
+        let lo = lineBuffer.index(lineBuffer.startIndex, offsetBy: from)
+        let hi = lineBuffer.index(lineBuffer.startIndex, offsetBy: to)
+        killBuffer = String(lineBuffer[lo..<hi])
+        let hadNewline = killBuffer.contains("\n")
+        lineBuffer.removeSubrange(lo..<hi)
+        visibleStartColumn = 0
+        cursor.update(column: from + 1)
+        if hadNewline { ensureInputGeometry() }
+        refreshDisplay(cursorColumn: cursor.column)
     }
 
     private func handleBackspace() {
@@ -1793,6 +1877,11 @@ final class TerminalService {
         case 8, 127: return "backspace"
         case 97...122: return String(Character(UnicodeScalar(cp)!))          // a-z
         case 65...90: return String(Character(UnicodeScalar(cp + 32)!))      // A-Z → lowercase
+        // Defensive: the kitty spec says CSI-u carries the BASE key codepoint (so ctrl-w = 'w' = 119, with
+        // ctrl in the modifier field). Some terminals instead send the CONTROL codepoint (ctrl-w = 0x17 = 23).
+        // Map those back to the letter too (0x01→'a' … 0x1A→'z') so ctrl-<letter> combos aren't silently
+        // dropped. The special controls above (8/9/13/27) are matched first, so this only catches the rest.
+        case 1...26: return String(Character(UnicodeScalar(cp + 96)!))
         default: return nil
         }
     }

@@ -422,6 +422,18 @@ doc("title", { sig = "title(text)", group = "terminal",
 doc("hyperlink", { sig = "hyperlink(url[, text]) -> string", group = "io",
   text = "Wrap `text` as a clickable OSC 8 hyperlink to `url` (iTerm2/kitty/WezTerm/Ghostty; plain text elsewhere). Returns the escape-wrapped string to embed in an echo or a trigger rewrite — it writes nothing itself. `text` defaults to the url.",
   example = 'echo(hyperlink("http://alteraeon.com:8080/help/recall", "recall help"))' })
+doc("notify", { sig = "notify(text)", group = "terminal",
+  text = "Post a desktop/terminal notification (iTerm2). Fire on tells/deaths/level-ups; pair with on_focus to notify only when the window is unfocused. Ignored where unsupported.",
+  example = 'notify("Vaelith tells you: hi")' })
+doc("badge", { sig = "badge(text)", group = "terminal",
+  text = "Set (or clear, with \"\") the iTerm2 badge — a big translucent status watermark over the session (character, HP%, DANGER). iTerm2-only.",
+  example = 'badge("DANGER")' })
+doc("attention", { sig = "attention(['yes'|'once'|'fireworks'|'no'])", group = "terminal",
+  text = "Request user attention in iTerm2 — bounce the dock icon / flash on urgent events. Defaults to 'yes' (until focused). iTerm2-only.",
+  example = "attention()" })
+doc("set_uservar", { sig = "set_uservar(name, value)", group = "terminal",
+  text = "Set an iTerm2 user variable, surfaceable in the native status bar via an Interpolated String component. iTerm2-only.",
+  example = 'set_uservar("hp", "84%")' })
 doc("copy",  { sig = "copy([n])", group = "terminal",
   text = "Copy the last n scrollback lines (ANSI stripped) to the macOS clipboard; n defaults to 20. Echoes a confirmation with the number of lines copied.",
   example = "copy(50)" })

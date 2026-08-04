@@ -227,6 +227,10 @@ global every: function(number, function(): any...): integer
 global bell:            function()
 global title:           function(string)                     -- set the terminal tab/window title (OSC 0)
 global hyperlink:       function(string, ? string): string   -- wrap text as an OSC 8 clickable link → string
+global notify:          function(string)                     -- post a desktop/terminal notification (iTerm2)
+global badge:           function(string)                     -- iTerm2 badge watermark ("" clears)
+global attention:       function(? string)                   -- iTerm2 request-attention (dock bounce)
+global set_uservar:     function(string, string)             -- iTerm2 user variable → native status bar
 global copy:            function(? integer)
 global spellcheck:      function(string): string
 global input_get:       function(): string

@@ -192,6 +192,24 @@ private typealias E = TerminalService.InputEvent
   }
 }
 
+@Test func wordBoundariesForReadlineEditing() {
+  try withTestContainer {
+    // "the quick  brown" (double space) — 0-indexed offsets; separators are space/tab/newline.
+    let buf = "the quick  brown"
+    // wordStart(before:) — Ctrl-W / Alt-B target: skip trailing separators, then the word.
+    #expect(TerminalService.wordStart(before: 16, in: buf) == 11)  // from end → start of "brown"
+    #expect(TerminalService.wordStart(before: 11, in: buf) == 4)   // start of "brown" → start of "quick" (spans 2 spaces)
+    #expect(TerminalService.wordStart(before: 3,  in: buf) == 0)   // inside "the" → 0
+    #expect(TerminalService.wordStart(before: 0,  in: buf) == 0)   // at start → 0
+    // wordEnd(after:) — Alt-F target: skip leading separators, then the word.
+    #expect(TerminalService.wordEnd(after: 0,  in: buf) == 3)      // start → end of "the"
+    #expect(TerminalService.wordEnd(after: 3,  in: buf) == 9)      // after "the" → end of "quick"
+    #expect(TerminalService.wordEnd(after: 16, in: buf) == 16)     // at end → end
+    // Newline is a separator (multi-line buffers via Shift+Enter).
+    #expect(TerminalService.wordStart(before: 5, in: "ab\ncd") == 3)   // in "cd" → just after the newline
+  }
+}
+
 @Test func tokenizeReproducesTheReportedBugFragmentWithoutError() {
   try withTestContainer {
     // The exact reported buffer: a CSI sequence split by a stdin read boundary right after "ESC[".

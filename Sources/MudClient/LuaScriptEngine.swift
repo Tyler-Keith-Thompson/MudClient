@@ -1262,6 +1262,33 @@ final class LuaScriptEngine: @unchecked Sendable {
             if case .string(let t)? = args.dropFirst().first { text = t }
             return [.string("\u{1B}]8;;\(url)\u{07}\(text)\u{1B}]8;;\u{07}")]
         }
+        // notify(text): post a desktop notification (iTerm2). Fire on tells/deaths/level-ups.
+        lua.register("notify") { args in
+            if case .string(let s)? = args.first { Container.terminalService().notify(s) }
+            return []
+        }
+        // badge(text): iTerm2 status watermark over the session; "" clears it.
+        lua.register("badge") { args in
+            var text = ""
+            if case .string(let s)? = args.first { text = s }
+            Container.terminalService().setBadge(text)
+            return []
+        }
+        // attention([kind]): iTerm2 request-attention (dock bounce). kind defaults to "yes".
+        lua.register("attention") { args in
+            var kind = "yes"
+            if case .string(let s)? = args.first { kind = s }
+            Container.terminalService().requestAttention(kind)
+            return []
+        }
+        // set_uservar(name, value): iTerm2 user variable for the native status bar.
+        lua.register("set_uservar") { args in
+            guard case .string(let name)? = args.first else { return [] }
+            var value = ""
+            if case .string(let v)? = args.dropFirst().first { value = v }
+            Container.terminalService().setUserVar(name, value)
+            return []
+        }
         // timestamps([on]) -> bool. Toggle (no arg) or set (bool / "on"/"off") the dim per-line arrival-
         // time gutter shown at the start of every scrollback line. Bound to ctrl-T by default. Returns the
         // new state so a bind can echo it.
