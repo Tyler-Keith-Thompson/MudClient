@@ -24,6 +24,12 @@ tools/finetune/game_help.sh waypoint recall        # prints the best-matching he
 TOPN=5 tools/finetune/game_help.sh sacrifice corpse spellcomp
 ```
 
+The **raw server capture** is `mud_raw.log` (repo-root CWD; ring-buffered, current session). It is
+`HH:MM:SS.mmm <base64>` per network chunk — NOT plaintext. **Decode it with `tools/rawlog/decode.sh`**
+(`[FILE] [--ansi] [--telemetry] [-g PATTERN]`); never hand-roll `base64 -d` (the timestamp prefix isn't
+base64, so decoding the whole line returns garbage — the recurring trap). e.g.
+`tools/rawlog/decode.sh -g 'points awarded'`.
+
 Real player logs are also on disk: `~/Documents/MudClient/human-traces.jsonl` (verbatim game output +
 the command taken — good for exact wire formats). The embedding RAG index
 (`~/Documents/MudClient/rag_index.json`, built by `build_rag_index.py`) is what the in-game AI retrieves

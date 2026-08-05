@@ -93,7 +93,7 @@ end
 -- loader now uses — AIPilot BEFORE AlterAeon — so their globals (state, on_update, run_test_suite,
 -- _HUD_TEST, _AIP_TEST, …) are all present AND the defensive `state = state or {}` decoupling is
 -- exercised under the real order (there is no manifest pinning AlterAeon first anymore).
-for _, f in ipairs({ "Scripts/AlterAeon/AIPilot.lua", "Scripts/AlterAeon/AlterAeon.lua", "Scripts/AlterAeon/Audio.lua",
+for _, f in ipairs({ "Scripts/AlterAeon/AIPilot.lua", "Scripts/AlterAeon/AlterAeon.lua", "Scripts/AlterAeon/Archery.lua", "Scripts/AlterAeon/Audio.lua",
                      "Scripts/AlterAeon/AutoFight.lua", "Scripts/AlterAeon/BookDump.lua", "Scripts/AlterAeon/ChatDecode.lua",
                      "Scripts/AlterAeon/Combat.lua", "Scripts/AlterAeon/Corpse.lua", "Scripts/AlterAeon/DCast.lua",
                      "Scripts/AlterAeon/DClientProbe.lua",
